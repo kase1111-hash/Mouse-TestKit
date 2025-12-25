@@ -8,5 +8,4 @@ pub mod angle_snap;
 pub mod acceleration;
 pub mod double_click;
 pub mod jitter;
-pub mod durability;
 pub mod standard;

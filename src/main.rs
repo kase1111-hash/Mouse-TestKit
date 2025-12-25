@@ -33,8 +33,7 @@ fn main() {
             "9" => tests::acceleration::run(),
             "10" => tests::double_click::run(),
             "11" => tests::jitter::run(),
-            "12" => tests::durability::run(),
-            "13" => tests::standard::run_all(),
+            "12" => tests::standard::run_all(),
             "0" => {
                 println!("Exiting Mouse-TestKit. Goodbye!");
                 break;
@@ -75,9 +74,8 @@ fn print_menu() {
     println!("│  9. Acceleration Detection          │");
     println!("│ 10. Double-Click Test               │");
     println!("│ 11. Jitter Test                     │");
-    println!("│ 12. Button Durability Test          │");
     println!("├─────────────────────────────────────┤");
-    println!("│ 13. Run All Standard Tests          │");
+    println!("│ 12. Run All Standard Tests          │");
     println!("│  0. Exit                            │");
     println!("└─────────────────────────────────────┘");
 }
