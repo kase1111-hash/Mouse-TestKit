@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::panels::{
     PollingPanel, StutterPanel, ClickPanel, JitterPanel,
-    DpiPanel, AccelPanel, DoubleClickPanel, DurabilityPanel
+    DpiPanel, AccelPanel, DoubleClickPanel
 };
 use crate::theme;
 
@@ -19,7 +19,6 @@ pub enum ActiveTest {
     Acceleration,
     DoubleClick,
     Jitter,
-    Durability,
 }
 
 pub struct MouseTestKitApp {
@@ -31,7 +30,6 @@ pub struct MouseTestKitApp {
     dpi_panel: DpiPanel,
     accel_panel: AccelPanel,
     double_click_panel: DoubleClickPanel,
-    durability_panel: DurabilityPanel,
     dark_mode: bool,
     show_about: bool,
 }
@@ -50,7 +48,6 @@ impl MouseTestKitApp {
             dpi_panel: DpiPanel::new(),
             accel_panel: AccelPanel::new(),
             double_click_panel: DoubleClickPanel::new(),
-            durability_panel: DurabilityPanel::new(),
             dark_mode: true,
             show_about: false,
         }
@@ -96,7 +93,6 @@ impl MouseTestKitApp {
                 self.nav_button(ui, "Acceleration", ActiveTest::Acceleration);
                 self.nav_button(ui, "Double-Click", ActiveTest::DoubleClick);
                 self.nav_button(ui, "Jitter Test", ActiveTest::Jitter);
-                self.nav_button(ui, "Durability", ActiveTest::Durability);
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(10.0);
@@ -257,7 +253,6 @@ impl eframe::App for MouseTestKitApp {
                     ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx),
                     ActiveTest::DoubleClick => self.double_click_panel.ui(ui, ctx),
                     ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx),
-                    ActiveTest::Durability => self.durability_panel.ui(ui, ctx),
                 }
             });
         });

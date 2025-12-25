@@ -11,8 +11,10 @@ pub struct PollingPanel {
     avg_hz: f64,
     samples: u32,
     history: VecDeque<f64>,
-    timestamps: VecDeque<Instant>,
-    last_update: Instant,
+    /// Timestamps of recent mouse movements for calculating Hz
+    event_times: VecDeque<Instant>,
+    /// Last time we calculated and recorded a Hz sample
+    last_hz_calc: Option<Instant>,
 }
 
 impl PollingPanel {
@@ -25,12 +27,12 @@ impl PollingPanel {
             avg_hz: 0.0,
             samples: 0,
             history: VecDeque::with_capacity(200),
-            timestamps: VecDeque::with_capacity(1000),
-            last_update: Instant::now(),
+            event_times: VecDeque::with_capacity(1000),
+            last_hz_calc: None,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Polling Rate Monitor");
         ui.add_space(5.0);
         ui.label("Measures your mouse's polling rate in real-time.");
@@ -113,9 +115,50 @@ impl PollingPanel {
                 ui.label(egui::RichText::new("Common polling rates: 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz").weak());
             });
 
-        // Simulate data for demo (in real app, this would come from evdev)
+        // Capture real mouse input and calculate polling rate
         if self.is_running {
-            self.simulate_update();
+            let delta = ctx.input(|i| i.pointer.delta());
+            let now = Instant::now();
+
+            // Record timestamp when mouse moves
+            if delta.x != 0.0 || delta.y != 0.0 {
+                self.event_times.push_back(now);
+
+                // Keep only events from the last second
+                while let Some(front) = self.event_times.front() {
+                    if now.duration_since(*front).as_secs_f64() > 1.0 {
+                        self.event_times.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Calculate Hz every 100ms
+            let should_calc = match self.last_hz_calc {
+                None => true,
+                Some(last) => now.duration_since(last).as_millis() >= 100,
+            };
+
+            if should_calc && self.event_times.len() >= 2 {
+                // Calculate Hz from events in the last second
+                let hz = self.event_times.len() as u32;
+
+                if hz > 0 {
+                    self.current_hz = hz;
+                    self.min_hz = self.min_hz.min(hz);
+                    self.max_hz = self.max_hz.max(hz);
+                    self.samples += 1;
+                    self.avg_hz = (self.avg_hz * (self.samples - 1) as f64 + hz as f64) / self.samples as f64;
+
+                    self.history.push_back(hz as f64);
+                    if self.history.len() > 200 {
+                        self.history.pop_front();
+                    }
+                }
+
+                self.last_hz_calc = Some(now);
+            }
         }
     }
 
@@ -128,8 +171,8 @@ impl PollingPanel {
 
     fn start(&mut self) {
         self.is_running = true;
-        self.timestamps.clear();
-        self.last_update = Instant::now();
+        self.event_times.clear();
+        self.last_hz_calc = None;
     }
 
     fn reset(&mut self) {
@@ -140,36 +183,7 @@ impl PollingPanel {
         self.avg_hz = 0.0;
         self.samples = 0;
         self.history.clear();
-        self.timestamps.clear();
+        self.event_times.clear();
+        self.last_hz_calc = None;
     }
-
-    fn simulate_update(&mut self) {
-        // Simulate polling rate data for demo
-        // In the real implementation, this would read from evdev
-        if self.last_update.elapsed().as_millis() >= 100 {
-            // Simulate ~1000Hz with some variation
-            let hz = 950 + (rand_simple() % 100) as u32;
-
-            self.current_hz = hz;
-            self.min_hz = self.min_hz.min(hz);
-            self.max_hz = self.max_hz.max(hz);
-            self.samples += 1;
-            self.avg_hz = (self.avg_hz * (self.samples - 1) as f64 + hz as f64) / self.samples as f64;
-
-            self.history.push_back(hz as f64);
-            if self.history.len() > 200 {
-                self.history.pop_front();
-            }
-
-            self.last_update = Instant::now();
-        }
-    }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }

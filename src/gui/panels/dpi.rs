@@ -33,7 +33,7 @@ impl DpiPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("DPI Accuracy Test");
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
@@ -169,11 +169,19 @@ impl DpiPanel {
             }
         }
 
-        // Simulate accumulation while running
+        // Capture real mouse input while running
         if self.is_running {
-            // Simulate mouse movement accumulation for demo
-            if rand_simple() % 5 == 0 {
-                self.accumulated_counts += (rand_simple() % 20) as i32;
+            ctx.request_repaint();
+
+            let delta = ctx.input(|i| i.pointer.delta());
+            if delta.x != 0.0 || delta.y != 0.0 {
+                // Accumulate the distance moved (using Euclidean distance)
+                let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
+                self.accumulated_counts += distance as i32;
+
+                // Update current position for visualization
+                self.current_pos.0 += delta.x as i32;
+                self.current_pos.1 += delta.y as i32;
             }
         }
     }
@@ -181,11 +189,17 @@ impl DpiPanel {
     fn start_measurement(&mut self) {
         self.is_running = true;
         self.accumulated_counts = 0;
-        self.start_pos = Some(self.current_pos);
+        self.current_pos = (0, 0);
+        self.start_pos = Some((0, 0));
     }
 
     fn finish_measurement(&mut self) {
-        let _expected_counts = self.target_dpi as f32 * self.target_distance_inches;
+        if self.accumulated_counts == 0 {
+            self.is_running = false;
+            self.start_pos = None;
+            return;
+        }
+
         self.measured_dpi = self.accumulated_counts as f32 / self.target_distance_inches;
 
         // Calculate accuracy as percentage of target (can be over or under)
@@ -207,12 +221,4 @@ impl DpiPanel {
         self.is_running = false;
         self.start_pos = None;
     }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }

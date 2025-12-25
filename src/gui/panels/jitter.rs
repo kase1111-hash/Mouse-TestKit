@@ -147,8 +147,10 @@ impl JitterPanel {
                         // Store raw delta for jitter calculation
                         self.current_deltas.push((delta.x as f64, delta.y as f64));
                         // Accumulate position for visualization
+                        // Negate Y because screen coordinates have Y increasing downward,
+                        // but plot coordinates have Y increasing upward
                         self.accumulated_pos.0 += delta.x as f64;
-                        self.accumulated_pos.1 += delta.y as f64;
+                        self.accumulated_pos.1 -= delta.y as f64;
                         self.current_positions.push((self.accumulated_pos.0, self.accumulated_pos.1));
                     }
                 }

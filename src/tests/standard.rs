@@ -17,8 +17,7 @@ pub fn run_all() {
     println!("  7. Angle Snapping Detection");
     println!("  8. Acceleration Detection");
     println!("  9. Double-Click Test");
-    println!(" 10. Jitter Test");
-    println!(" 11. Button Durability Test\n");
+    println!(" 10. Jitter Test\n");
 
     print!("Press Enter to begin, or 'q' to cancel: ");
     io::stdout().flush().ok();
@@ -35,71 +34,65 @@ pub fn run_all() {
 
     // Core Tests
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 1/11: Polling Rate");
+    println!("TEST 1/10: Polling Rate");
     println!("══════════════════════════════════════════════════════════");
     super::polling::run();
     results.polling = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 2/11: Stutter Detection");
+    println!("TEST 2/10: Stutter Detection");
     println!("══════════════════════════════════════════════════════════");
     super::stutter::run();
     results.stutter = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 3/11: Click Response");
+    println!("TEST 3/10: Click Response");
     println!("══════════════════════════════════════════════════════════");
     super::click_response::run();
     results.click_response = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 4/11: Click Stickiness");
+    println!("TEST 4/10: Click Stickiness");
     println!("══════════════════════════════════════════════════════════");
     super::click_sticky::run();
     results.click_sticky = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 5/11: Lift-Off Jump");
+    println!("TEST 5/10: Lift-Off Jump");
     println!("══════════════════════════════════════════════════════════");
     super::liftoff::run();
     results.liftoff = true;
 
     // Advanced Tests
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 6/11: DPI Accuracy");
+    println!("TEST 6/10: DPI Accuracy");
     println!("══════════════════════════════════════════════════════════");
     super::dpi::run();
     results.dpi = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 7/11: Angle Snapping Detection");
+    println!("TEST 7/10: Angle Snapping Detection");
     println!("══════════════════════════════════════════════════════════");
     super::angle_snap::run();
     results.angle_snap = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 8/11: Acceleration Detection");
+    println!("TEST 8/10: Acceleration Detection");
     println!("══════════════════════════════════════════════════════════");
     super::acceleration::run();
     results.acceleration = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 9/11: Double-Click Test");
+    println!("TEST 9/10: Double-Click Test");
     println!("══════════════════════════════════════════════════════════");
     super::double_click::run();
     results.double_click = true;
 
     println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 10/11: Jitter Test");
+    println!("TEST 10/10: Jitter Test");
     println!("══════════════════════════════════════════════════════════");
     super::jitter::run();
     results.jitter = true;
-
-    println!("\n══════════════════════════════════════════════════════════");
-    println!("TEST 11/11: Button Durability");
-    println!("══════════════════════════════════════════════════════════");
-    super::durability::run();
-    results.durability = true;
 
     // Final summary
     println!("\n╔══════════════════════════════════════════════════════════╗");
@@ -118,13 +111,12 @@ pub fn run_all() {
     println!("  Acceleration:       {}", status(results.acceleration));
     println!("  Double-Click:       {}", status(results.double_click));
     println!("  Jitter:             {}", status(results.jitter));
-    println!("  Button Durability:  {}", status(results.durability));
     println!("─────────────────────────────────────────────");
 
     let completed = results.count_completed();
-    println!("\nCompleted: {}/11 tests", completed);
+    println!("\nCompleted: {}/10 tests", completed);
 
-    if completed == 11 {
+    if completed == 10 {
         println!("\n✓ All tests completed successfully!");
     }
 
@@ -147,7 +139,6 @@ pub struct TestSuite {
     pub acceleration: bool,
     pub double_click: bool,
     pub jitter: bool,
-    pub durability: bool,
 }
 
 impl TestSuite {
@@ -163,7 +154,6 @@ impl TestSuite {
             acceleration: false,
             double_click: false,
             jitter: false,
-            durability: false,
         }
     }
 
@@ -179,7 +169,6 @@ impl TestSuite {
         if self.acceleration { count += 1; }
         if self.double_click { count += 1; }
         if self.jitter { count += 1; }
-        if self.durability { count += 1; }
         count
     }
 }

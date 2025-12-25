@@ -10,13 +10,19 @@ pub struct AccelPanel {
     slow_movements: VecDeque<f64>,
     fast_movements: VecDeque<f64>,
     current_velocity: f64,
-    last_update: Instant,
+    last_move_time: Option<Instant>,
     detection_result: Option<AccelResult>,
+    /// Accumulated distance for ratio calculation
+    accumulated_distance: f64,
+    /// Reference distance for slow movement
+    reference_distance: Option<f64>,
 
     // Angle snapping detection
     angle_running: bool,
     angle_points: Vec<(f64, f64)>,
     angle_result: Option<AngleResult>,
+    /// Accumulated position for angle visualization
+    angle_accumulated_pos: (f64, f64),
 }
 
 struct AccelSample {
@@ -44,11 +50,14 @@ impl AccelPanel {
             slow_movements: VecDeque::with_capacity(100),
             fast_movements: VecDeque::with_capacity(100),
             current_velocity: 0.0,
-            last_update: Instant::now(),
+            last_move_time: None,
             detection_result: None,
+            accumulated_distance: 0.0,
+            reference_distance: None,
             angle_running: false,
             angle_points: Vec::new(),
             angle_result: None,
+            angle_accumulated_pos: (0.0, 0.0),
         }
     }
 
@@ -56,7 +65,7 @@ impl AccelPanel {
         self.ui(ui, ctx);
     }
 
-    pub fn ui_angle(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui_angle(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Angle Snapping Detection");
         ui.add_space(5.0);
         ui.label("Detects if your mouse firmware corrects diagonal movements to straight lines.");
@@ -74,6 +83,7 @@ impl AccelPanel {
                     self.angle_running = true;
                     self.angle_points.clear();
                     self.angle_result = None;
+                    self.angle_accumulated_pos = (0.0, 0.0);
                 }
             }
 
@@ -181,9 +191,24 @@ impl AccelPanel {
                 });
         }
 
-        // Simulate point collection while running
+        // Capture real mouse input while running
         if self.angle_running {
-            self.simulate_angle_update();
+            ctx.request_repaint();
+
+            let delta = ctx.input(|i| i.pointer.delta());
+            if delta.x != 0.0 || delta.y != 0.0 {
+                // Accumulate position from deltas
+                // Negate Y because screen coordinates have Y increasing downward,
+                // but plot coordinates have Y increasing upward
+                self.angle_accumulated_pos.0 += delta.x as f64;
+                self.angle_accumulated_pos.1 -= delta.y as f64;
+                self.angle_points.push((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
+
+                // Keep a reasonable number of points
+                if self.angle_points.len() > 2000 {
+                    self.angle_points.remove(0);
+                }
+            }
         }
     }
 
@@ -232,21 +257,7 @@ impl AccelPanel {
         });
     }
 
-    fn simulate_angle_update(&mut self) {
-        // Simulate mouse movement points for demo
-        if rand_simple() % 3 == 0 {
-            let last = self.angle_points.last().cloned().unwrap_or((0.0, 0.0));
-            let dx = (rand_simple() % 10) as f64 - 5.0;
-            let dy = (rand_simple() % 10) as f64 - 5.0;
-            self.angle_points.push((last.0 + dx, last.1 + dy));
-
-            if self.angle_points.len() > 2000 {
-                self.angle_points.remove(0);
-            }
-        }
-    }
-
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
         ui.label("Detects mouse acceleration (pointer speed varies with movement speed).");
@@ -382,9 +393,64 @@ impl AccelPanel {
                 });
         }
 
-        // Simulate data collection
+        // Capture real mouse input
         if self.is_running {
-            self.simulate_update();
+            ctx.request_repaint();
+
+            let delta = ctx.input(|i| i.pointer.delta());
+            let now = Instant::now();
+
+            if delta.x != 0.0 || delta.y != 0.0 {
+                let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
+
+                // Calculate velocity (pixels per second)
+                if let Some(last_time) = self.last_move_time {
+                    let dt = now.duration_since(last_time).as_secs_f64();
+                    if dt > 0.0 && dt < 0.5 {
+                        let velocity = distance / dt;
+                        self.current_velocity = velocity;
+
+                        // Accumulate distance
+                        self.accumulated_distance += distance;
+
+                        // Categorize by velocity
+                        if velocity < 400.0 {
+                            // Slow movement
+                            self.slow_movements.push_back(distance);
+                            if self.slow_movements.len() > 100 {
+                                self.slow_movements.pop_front();
+                            }
+                        } else {
+                            // Fast movement
+                            self.fast_movements.push_back(distance);
+                            if self.fast_movements.len() > 100 {
+                                self.fast_movements.pop_front();
+                            }
+                        }
+
+                        // Calculate ratio based on velocity comparison
+                        // With acceleration, faster movements should cover more distance per count
+                        let slow_avg = if self.slow_movements.is_empty() {
+                            1.0
+                        } else {
+                            self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
+                        };
+
+                        let ratio = distance / slow_avg.max(1.0);
+
+                        self.samples.push(AccelSample {
+                            velocity,
+                            distance_ratio: ratio,
+                        });
+
+                        if self.samples.len() > 500 {
+                            self.samples.remove(0);
+                        }
+                    }
+                }
+
+                self.last_move_time = Some(now);
+            }
         }
     }
 
@@ -394,7 +460,9 @@ impl AccelPanel {
         self.slow_movements.clear();
         self.fast_movements.clear();
         self.detection_result = None;
-        self.last_update = Instant::now();
+        self.last_move_time = None;
+        self.accumulated_distance = 0.0;
+        self.reference_distance = None;
     }
 
     fn stop_test(&mut self) {
@@ -429,50 +497,4 @@ impl AccelPanel {
             confidence,
         });
     }
-
-    fn simulate_update(&mut self) {
-        if self.last_update.elapsed().as_millis() >= 50 {
-            // Simulate velocity measurements
-            let base_velocity = 200.0 + (rand_simple() % 800) as f64;
-            self.current_velocity = base_velocity;
-
-            // Simulate slight acceleration effect for demo
-            let ratio = if base_velocity > 600.0 {
-                1.0 + (rand_simple() % 10) as f64 * 0.01 // Fast movements
-            } else {
-                1.0 - (rand_simple() % 5) as f64 * 0.01 // Slow movements
-            };
-
-            self.samples.push(AccelSample {
-                velocity: base_velocity,
-                distance_ratio: ratio,
-            });
-
-            if base_velocity < 400.0 {
-                self.slow_movements.push_back(ratio);
-                if self.slow_movements.len() > 100 {
-                    self.slow_movements.pop_front();
-                }
-            } else {
-                self.fast_movements.push_back(ratio);
-                if self.fast_movements.len() > 100 {
-                    self.fast_movements.pop_front();
-                }
-            }
-
-            if self.samples.len() > 500 {
-                self.samples.remove(0);
-            }
-
-            self.last_update = Instant::now();
-        }
-    }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }
