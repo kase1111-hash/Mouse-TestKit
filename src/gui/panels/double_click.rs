@@ -133,15 +133,20 @@ impl DoubleClickPanel {
             ui.heading("Analysis");
 
             let consistency = self.calculate_consistency();
-            let (rating, color, message) = if self.accidental_double_clicks > 0 {
-                ("Warning", egui::Color32::RED,
-                 format!("{} accidental double-clicks detected! This may indicate switch issues.", self.accidental_double_clicks))
-            } else if consistency > 80.0 {
-                ("Excellent", egui::Color32::GREEN, "Very consistent clicking rhythm".to_string())
-            } else if consistency > 60.0 {
-                ("Good", egui::Color32::LIGHT_GREEN, "Reasonably consistent clicking".to_string())
+            // Primary concern is detecting switch issues (accidental double-clicks)
+            // Consistency is secondary - humans naturally vary in click timing
+            let (rating, color, message) = if self.accidental_double_clicks > 2 {
+                ("Switch Issue", egui::Color32::RED,
+                 format!("{} accidental double-clicks detected! Your mouse switch may be failing.", self.accidental_double_clicks))
+            } else if self.accidental_double_clicks > 0 {
+                ("Minor Issue", egui::Color32::YELLOW,
+                 format!("{} accidental double-click(s) detected. Monitor for worsening.", self.accidental_double_clicks))
+            } else if consistency > 50.0 {
+                ("Excellent", egui::Color32::GREEN, "No switch issues detected, good timing consistency".to_string())
+            } else if consistency > 30.0 {
+                ("Good", egui::Color32::LIGHT_GREEN, "No switch issues detected".to_string())
             } else {
-                ("Variable", egui::Color32::YELLOW, "High variation in click timing".to_string())
+                ("OK", egui::Color32::LIGHT_BLUE, "No switch issues detected (click timing varies, which is normal)".to_string())
             };
 
             egui::Frame::dark_canvas(ui.style())

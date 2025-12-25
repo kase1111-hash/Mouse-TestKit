@@ -2,9 +2,9 @@ use eframe::egui;
 use std::time::Instant;
 
 /// Jump threshold in pixels - movements larger than this after idle are considered jumps
-const JUMP_THRESHOLD_PX: f64 = 50.0;
+const JUMP_THRESHOLD_PX: f64 = 15.0;
 /// Time in milliseconds without movement to consider mouse "idle" (potential lift)
-const IDLE_THRESHOLD_MS: u64 = 100;
+const IDLE_THRESHOLD_MS: u64 = 80;
 
 pub struct ClickPanel {
     // Click Response - real click testing
@@ -497,6 +497,9 @@ impl ClickPanel {
 
         // Capture real mouse input and detect jumps
         if self.liftoff_running {
+            // Request continuous repaints for idle detection timing
+            ctx.request_repaint();
+
             let delta = ctx.input(|i| i.pointer.delta());
             let now = Instant::now();
 
