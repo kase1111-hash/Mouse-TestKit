@@ -1,0 +1,14 @@
+[package]
+name = "mouse-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "A standalone mouse testing utility"
+authors = ["Mouse-TestKit Contributors"]
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
