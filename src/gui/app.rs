@@ -426,6 +426,12 @@ impl MouseTestKitApp {
                     if ui.add(close_btn).clicked() {
                         self.show_about = false;
                     }
+
+                    // Hidden message
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("MERRY CHRISTMAS // TO: XANDER FROM: DAD")
+                        .size(8.0)
+                        .color(egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60)));
                 });
             });
     }
