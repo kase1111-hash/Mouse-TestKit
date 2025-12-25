@@ -185,10 +185,93 @@ fn wait_for_enter() {
     io::stdin().read_line(&mut input).ok();
 }
 
-#[derive(Clone)]
-struct JitterSample {
-    event_count: usize,
-    total_distance: f64,
-    avg_magnitude: f64,
-    max_single_move: f64,
+#[derive(Clone, Debug, PartialEq)]
+pub struct JitterSample {
+    pub event_count: usize,
+    pub total_distance: f64,
+    pub avg_magnitude: f64,
+    pub max_single_move: f64,
+}
+
+/// Analyze jitter from movement data - exposed for testing
+pub fn analyze_jitter_pub(movements: &[(i32, i32)]) -> JitterSample {
+    analyze_jitter(movements)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_analyze_jitter_empty_input() {
+        let result = analyze_jitter(&[]);
+        assert_eq!(result.event_count, 0);
+        assert_eq!(result.total_distance, 0.0);
+        assert_eq!(result.avg_magnitude, 0.0);
+        assert_eq!(result.max_single_move, 0.0);
+    }
+
+    #[test]
+    fn test_analyze_jitter_single_movement() {
+        let movements = vec![(3, 4)]; // Pythagorean: sqrt(9+16) = 5.0
+        let result = analyze_jitter(&movements);
+
+        assert_eq!(result.event_count, 1);
+        assert!((result.total_distance - 5.0).abs() < 0.001);
+        assert!((result.avg_magnitude - 5.0).abs() < 0.001);
+        assert!((result.max_single_move - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_analyze_jitter_multiple_movements() {
+        // (3,4) = 5.0, (0,1) = 1.0, (1,0) = 1.0
+        let movements = vec![(3, 4), (0, 1), (1, 0)];
+        let result = analyze_jitter(&movements);
+
+        assert_eq!(result.event_count, 3);
+        assert!((result.total_distance - 7.0).abs() < 0.001); // 5 + 1 + 1
+        assert!((result.avg_magnitude - 7.0 / 3.0).abs() < 0.001);
+        assert!((result.max_single_move - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_analyze_jitter_zero_movement() {
+        let movements = vec![(0, 0), (0, 0)];
+        let result = analyze_jitter(&movements);
+
+        assert_eq!(result.event_count, 2);
+        assert_eq!(result.total_distance, 0.0);
+        assert_eq!(result.avg_magnitude, 0.0);
+        assert_eq!(result.max_single_move, 0.0);
+    }
+
+    #[test]
+    fn test_analyze_jitter_negative_values() {
+        // (-3,-4) = 5.0, magnitude should be positive
+        let movements = vec![(-3, -4)];
+        let result = analyze_jitter(&movements);
+
+        assert!((result.total_distance - 5.0).abs() < 0.001);
+        assert!((result.max_single_move - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_analyze_jitter_large_movement() {
+        let movements = vec![(100, 100), (1, 1)];
+        let result = analyze_jitter(&movements);
+
+        let large_magnitude = (100.0_f64.powi(2) + 100.0_f64.powi(2)).sqrt();
+        assert!((result.max_single_move - large_magnitude).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_analyze_jitter_calculates_correct_average() {
+        // Test that average is total_distance / event_count
+        let movements = vec![(6, 8), (3, 4)]; // 10.0 + 5.0 = 15.0 total, avg = 7.5
+        let result = analyze_jitter(&movements);
+
+        assert_eq!(result.event_count, 2);
+        assert!((result.total_distance - 15.0).abs() < 0.001);
+        assert!((result.avg_magnitude - 7.5).abs() < 0.001);
+    }
 }

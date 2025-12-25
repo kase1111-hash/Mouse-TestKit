@@ -142,3 +142,103 @@ impl LiftEvent {
 pub fn is_jump(distance: f64) -> bool {
     distance > JUMP_THRESHOLD_PX
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lift_event_new_basic() {
+        let event = LiftEvent::new(3, 4);
+        assert_eq!(event.jump_x, 3);
+        assert_eq!(event.jump_y, 4);
+        // Pythagorean: sqrt(9 + 16) = 5.0
+        assert!((event.distance - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_lift_event_new_zero() {
+        let event = LiftEvent::new(0, 0);
+        assert_eq!(event.jump_x, 0);
+        assert_eq!(event.jump_y, 0);
+        assert_eq!(event.distance, 0.0);
+    }
+
+    #[test]
+    fn test_lift_event_new_negative() {
+        let event = LiftEvent::new(-3, -4);
+        assert_eq!(event.jump_x, -3);
+        assert_eq!(event.jump_y, -4);
+        // Distance should still be positive
+        assert!((event.distance - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_lift_event_horizontal_only() {
+        let event = LiftEvent::new(100, 0);
+        assert!((event.distance - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_lift_event_vertical_only() {
+        let event = LiftEvent::new(0, 100);
+        assert!((event.distance - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_is_jump_below_threshold() {
+        // JUMP_THRESHOLD_PX = 50.0
+        assert!(!is_jump(0.0));
+        assert!(!is_jump(25.0));
+        assert!(!is_jump(49.9));
+        assert!(!is_jump(50.0)); // Exactly at threshold is NOT a jump
+    }
+
+    #[test]
+    fn test_is_jump_above_threshold() {
+        assert!(is_jump(50.1));
+        assert!(is_jump(51.0));
+        assert!(is_jump(100.0));
+        assert!(is_jump(1000.0));
+    }
+
+    #[test]
+    fn test_is_jump_with_lift_event() {
+        // Test integration of LiftEvent and is_jump
+        let small_event = LiftEvent::new(3, 4); // distance = 5.0
+        let large_event = LiftEvent::new(30, 40); // distance = 50.0
+        let jump_event = LiftEvent::new(40, 40); // distance = ~56.57
+
+        assert!(!is_jump(small_event.distance));
+        assert!(!is_jump(large_event.distance)); // Exactly 50 is NOT a jump
+        assert!(is_jump(jump_event.distance));
+    }
+
+    #[test]
+    fn test_jump_threshold_constant() {
+        // Verify the threshold is what we expect
+        assert_eq!(JUMP_THRESHOLD_PX, 50.0);
+    }
+
+    #[test]
+    fn test_idle_threshold_constant() {
+        // Verify the idle threshold is what we expect
+        assert_eq!(IDLE_THRESHOLD_MS, 100);
+    }
+
+    #[test]
+    fn test_lift_event_large_values() {
+        let event = LiftEvent::new(1000, 1000);
+        let expected_distance = (1000.0_f64.powi(2) + 1000.0_f64.powi(2)).sqrt();
+        assert!((event.distance - expected_distance).abs() < 0.001);
+        assert!(is_jump(event.distance));
+    }
+
+    #[test]
+    fn test_lift_event_asymmetric() {
+        let event = LiftEvent::new(100, 1);
+        // Distance should be dominated by x
+        assert!(event.distance > 100.0);
+        assert!(event.distance < 101.0);
+    }
+}
