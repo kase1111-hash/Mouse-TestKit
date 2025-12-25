@@ -198,17 +198,23 @@ impl ClickPanel {
 
         // Capture real mouse button input
         if self.response_running {
+            // Request continuous repaints while running
+            ctx.request_repaint();
+
             let now = Instant::now();
             let pointer = ctx.input(|i| i.pointer.clone());
             let is_primary_down = pointer.primary_down();
 
-            // Detect press (transition from not pressed to pressed)
-            if is_primary_down && !self.response_is_pressed {
+            // Only track clicks that start within the test area
+            let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
+
+            // Detect press (transition from not pressed to pressed) - only in test area
+            if in_test_area && is_primary_down && !self.response_is_pressed {
                 self.response_is_pressed = true;
                 self.response_press_start = Some(now);
             }
 
-            // Detect release (transition from pressed to not pressed)
+            // Detect release (transition from pressed to not pressed) - can happen anywhere
             if !is_primary_down && self.response_is_pressed {
                 self.response_is_pressed = false;
                 self.response_click_count += 1;
@@ -348,17 +354,23 @@ impl ClickPanel {
 
         // Capture real mouse button input
         if self.sticky_running {
+            // Request continuous repaints while running
+            ctx.request_repaint();
+
             let now = Instant::now();
             let pointer = ctx.input(|i| i.pointer.clone());
             let is_primary_down = pointer.primary_down();
 
-            // Detect press
-            if is_primary_down && !self.sticky_is_pressed {
+            // Only track clicks that start within the test area
+            let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
+
+            // Detect press - only when pointer is in test area
+            if in_test_area && is_primary_down && !self.sticky_is_pressed {
                 self.sticky_is_pressed = true;
                 self.sticky_press_start = Some(now);
             }
 
-            // Detect release
+            // Detect release - can happen anywhere as long as we were tracking a press
             if !is_primary_down && self.sticky_is_pressed {
                 self.sticky_is_pressed = false;
 
