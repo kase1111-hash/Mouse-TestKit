@@ -57,25 +57,37 @@ impl DpiPanel {
 
         ui.add_space(15.0);
 
-        // Controls
+        // Keyboard controls
+        let space_pressed = ctx.input(|i| i.key_pressed(egui::Key::Space));
+        let escape_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if self.is_running {
+            if space_pressed {
+                self.finish_measurement();
+            }
+            if escape_pressed {
+                self.is_running = false;
+                self.start_pos = None;
+            }
+        } else {
+            if space_pressed {
+                self.start_measurement();
+            }
+        }
+
+        // Controls display
         ui.horizontal(|ui| {
             if self.is_running {
-                if ui.button("Finish Measurement").clicked() {
-                    self.finish_measurement();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.is_running = false;
-                    self.start_pos = None;
-                }
+                ui.label(egui::RichText::new("Press SPACE to finish | ESC to cancel").strong().color(egui::Color32::GREEN));
             } else {
-                if ui.button("Start Measurement").clicked() {
-                    self.start_measurement();
-                }
+                ui.label(egui::RichText::new("Press SPACE to start measurement").strong());
             }
 
-            if ui.button("Clear Results").clicked() {
-                self.samples.clear();
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Clear Results").clicked() {
+                    self.samples.clear();
+                }
+            });
         });
 
         ui.add_space(20.0);
@@ -94,6 +106,8 @@ impl DpiPanel {
                     ui.add_space(10.0);
                     ui.label(format!("Accumulated counts: {}", self.accumulated_counts));
                     ui.label(format!("Expected counts: {:.0}", self.target_dpi as f32 * self.target_distance_inches));
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Press SPACE when done moving").color(egui::Color32::YELLOW));
                 });
         } else {
             egui::Frame::none()
@@ -105,9 +119,9 @@ impl DpiPanel {
                     ui.label("1. Set your mouse's DPI in its software/hardware");
                     ui.label("2. Enter the target DPI above");
                     ui.label("3. Measure a distance on your mousepad (use a ruler)");
-                    ui.label("4. Click 'Start Measurement'");
+                    ui.label("4. Press SPACE to start");
                     ui.label("5. Move the mouse that exact distance in a straight line");
-                    ui.label("6. Click 'Finish Measurement'");
+                    ui.label("6. Press SPACE to finish");
                 });
         }
 
