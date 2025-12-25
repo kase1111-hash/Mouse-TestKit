@@ -10,7 +10,7 @@ pub struct StutterPanel {
     avg_delta: f64,
     min_delta: f64,
     max_delta: f64,
-    last_update: Instant,
+    last_move_time: Option<Instant>,
     threshold: f64,
 }
 
@@ -23,7 +23,7 @@ impl StutterPanel {
             avg_delta: 0.0,
             min_delta: f64::MAX,
             max_delta: 0.0,
-            last_update: Instant::now(),
+            last_move_time: None,
             threshold: 4.0,
         }
     }
@@ -158,18 +158,19 @@ impl StutterPanel {
             // Only record timing when mouse is actually moving
             if delta.x != 0.0 || delta.y != 0.0 {
                 let now = Instant::now();
-                let time_since_last = now.duration_since(self.last_update).as_secs_f64() * 1000.0;
 
-                // Only record if we have a previous movement (not the first one)
-                if time_since_last < 500.0 {
-                    // Ignore very long gaps (mouse was stopped)
-                    self.deltas.push_back(time_since_last);
-                    if self.deltas.len() > 100 {
-                        self.deltas.pop_front();
-                    }
+                // If we have a previous movement, calculate the delta time
+                if let Some(last_time) = self.last_move_time {
+                    let time_since_last = now.duration_since(last_time).as_secs_f64() * 1000.0;
 
-                    // Calculate stats
-                    if !self.deltas.is_empty() {
+                    // Only record reasonable deltas (ignore gaps > 500ms when mouse was stopped)
+                    if time_since_last < 500.0 {
+                        self.deltas.push_back(time_since_last);
+                        if self.deltas.len() > 100 {
+                            self.deltas.pop_front();
+                        }
+
+                        // Calculate stats
                         self.avg_delta = self.deltas.iter().sum::<f64>() / self.deltas.len() as f64;
                         self.min_delta = self.deltas.iter().cloned().fold(f64::MAX, f64::min);
                         self.max_delta = self.deltas.iter().cloned().fold(0.0, f64::max);
@@ -180,7 +181,8 @@ impl StutterPanel {
                     }
                 }
 
-                self.last_update = now;
+                // Always update last move time when mouse moves
+                self.last_move_time = Some(now);
             }
         }
     }
@@ -194,12 +196,17 @@ impl StutterPanel {
 
     fn start(&mut self) {
         self.is_running = true;
-        self.last_update = Instant::now();
+        self.last_move_time = None; // Will be set on first mouse movement
         self.deltas.clear();
+        self.stutter_count = 0;
+        self.avg_delta = 0.0;
+        self.min_delta = f64::MAX;
+        self.max_delta = 0.0;
     }
 
     fn reset(&mut self) {
         self.is_running = false;
+        self.last_move_time = None;
         self.deltas.clear();
         self.stutter_count = 0;
         self.avg_delta = 0.0;
