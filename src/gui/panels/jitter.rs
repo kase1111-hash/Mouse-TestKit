@@ -3,7 +3,6 @@ use egui_plot::{Plot, Points, PlotPoints};
 use std::time::Instant;
 
 pub struct JitterPanel {
-    is_running: bool,
     is_sampling: bool,
     samples: Vec<JitterSample>,
     current_events: Vec<(f64, f64)>,
@@ -19,7 +18,6 @@ struct JitterSample {
 impl JitterPanel {
     pub fn new() -> Self {
         Self {
-            is_running: false,
             is_sampling: false,
             samples: Vec::new(),
             current_events: Vec::new(),
@@ -89,6 +87,7 @@ impl JitterPanel {
                 .show(ui, |ui| {
                     let avg_events: f64 = self.samples.iter().map(|s| s.events as f64).sum::<f64>() / self.samples.len() as f64;
                     let avg_distance: f64 = self.samples.iter().map(|s| s.total_distance).sum::<f64>() / self.samples.len() as f64;
+                    let max_jitter: f64 = self.samples.iter().map(|s| s.max_single).fold(0.0, f64::max);
 
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
@@ -104,6 +103,11 @@ impl JitterPanel {
                         ui.vertical(|ui| {
                             ui.label("Avg Distance");
                             ui.label(egui::RichText::new(format!("{:.2} px", avg_distance)).size(20.0));
+                        });
+                        ui.add_space(30.0);
+                        ui.vertical(|ui| {
+                            ui.label("Max Jitter");
+                            ui.label(egui::RichText::new(format!("{:.2} px", max_jitter)).size(20.0));
                         });
                         ui.add_space(30.0);
                         ui.vertical(|ui| {
@@ -172,6 +176,6 @@ fn rand_simple() -> u64 {
     use std::time::SystemTime;
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_nanos() as u64 % 1000
 }

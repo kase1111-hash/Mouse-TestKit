@@ -46,8 +46,8 @@ pub fn run() {
         let delay = 1000 + (trial * 200) % 2000;
         println!("\nTrial {}/{}  -  Get ready...", trial + 1, NUM_TRIALS);
 
-        // Drain pending events
-        while device.fetch_events().is_ok() {}
+        // Drain pending events (fetch once to clear buffer)
+        let _ = device.fetch_events();
 
         std::thread::sleep(Duration::from_millis(delay as u64));
 

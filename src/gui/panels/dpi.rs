@@ -186,14 +186,18 @@ impl DpiPanel {
     }
 
     fn finish_measurement(&mut self) {
-        let expected_counts = self.target_dpi as f32 * self.target_distance_inches;
+        let _expected_counts = self.target_dpi as f32 * self.target_distance_inches;
         self.measured_dpi = self.accumulated_counts as f32 / self.target_distance_inches;
-        self.accuracy_percent = (self.measured_dpi / self.target_dpi as f32 * 100.0).min(100.0);
 
-        // Handle case where measured > expected
-        if self.accuracy_percent > 100.0 {
-            self.accuracy_percent = 100.0 - (self.accuracy_percent - 100.0);
-        }
+        // Calculate accuracy as percentage of target (can be over or under)
+        let raw_accuracy = self.measured_dpi / self.target_dpi as f32 * 100.0;
+
+        // Convert to accuracy score: 100% means perfect, lower means deviation in either direction
+        self.accuracy_percent = if raw_accuracy > 100.0 {
+            200.0 - raw_accuracy  // e.g., 110% raw -> 90% accuracy
+        } else {
+            raw_accuracy
+        }.max(0.0);
 
         self.samples.push(DpiSample {
             target_dpi: self.target_dpi,
@@ -210,6 +214,6 @@ fn rand_simple() -> u64 {
     use std::time::SystemTime;
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_nanos() as u64 % 1000
 }

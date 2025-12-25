@@ -17,6 +17,8 @@ pub fn setup_custom_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+// Utility color functions for consistent theming across panels
+#[allow(dead_code)]
 pub fn status_color(good: bool) -> egui::Color32 {
     if good {
         egui::Color32::from_rgb(100, 200, 100)
@@ -25,10 +27,12 @@ pub fn status_color(good: bool) -> egui::Color32 {
     }
 }
 
+#[allow(dead_code)]
 pub fn warning_color() -> egui::Color32 {
     egui::Color32::from_rgb(200, 180, 100)
 }
 
+#[allow(dead_code)]
 pub fn info_color() -> egui::Color32 {
     egui::Color32::from_rgb(100, 150, 200)
 }
