@@ -7,17 +7,29 @@ const JUMP_THRESHOLD_PX: f64 = 50.0;
 const IDLE_THRESHOLD_MS: u64 = 100;
 
 pub struct ClickPanel {
-    // Click Response
+    // Click Response - real click testing
     response_running: bool,
-    response_results: Vec<f64>,
-    response_trial: usize,
-    response_waiting: bool,
-    response_start: Option<Instant>,
+    /// Total clicks recorded
+    response_click_count: usize,
+    /// Hold durations in ms
+    response_hold_times: Vec<f64>,
+    /// When the current click started (button pressed)
+    response_press_start: Option<Instant>,
+    /// Is button currently held down
+    response_is_pressed: bool,
+    /// Timestamps of recent clicks for CPS calculation
+    response_click_times: std::collections::VecDeque<Instant>,
+    /// Current CPS
+    response_cps: f64,
 
     // Click Sticky
     sticky_running: bool,
     sticky_holds: Vec<f64>,
     sticky_count: usize,
+    /// When click started for hold measurement
+    sticky_press_start: Option<Instant>,
+    /// Is button currently held
+    sticky_is_pressed: bool,
 
     // Lift Off
     liftoff_running: bool,
@@ -35,14 +47,18 @@ impl ClickPanel {
     pub fn new() -> Self {
         Self {
             response_running: false,
-            response_results: Vec::new(),
-            response_trial: 0,
-            response_waiting: false,
-            response_start: None,
+            response_click_count: 0,
+            response_hold_times: Vec::new(),
+            response_press_start: None,
+            response_is_pressed: false,
+            response_click_times: std::collections::VecDeque::with_capacity(100),
+            response_cps: 0.0,
 
             sticky_running: false,
             sticky_holds: Vec::new(),
             sticky_count: 0,
+            sticky_press_start: None,
+            sticky_is_pressed: false,
 
             liftoff_running: false,
             liftoff_jumps: 0,
@@ -53,10 +69,10 @@ impl ClickPanel {
         }
     }
 
-    pub fn ui_response(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        ui.heading("Click Response Test");
+    pub fn ui_response(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.heading("Click Test");
         ui.add_space(5.0);
-        ui.label("Measures your click reaction time.");
+        ui.label("Tests mouse button response - measures click registration and hold duration.");
         ui.add_space(15.0);
 
         // Controls
@@ -66,128 +82,171 @@ impl ClickPanel {
                     self.response_running = false;
                 }
             } else {
-                if ui.button("Start Test").clicked() {
+                if ui.button("Start").clicked() {
                     self.response_running = true;
-                    self.response_results.clear();
-                    self.response_trial = 0;
-                    self.response_waiting = false;
+                    self.response_click_count = 0;
+                    self.response_hold_times.clear();
+                    self.response_click_times.clear();
+                    self.response_cps = 0.0;
+                    self.response_press_start = None;
+                    self.response_is_pressed = false;
                 }
             }
 
             if ui.button("Reset").clicked() {
                 self.response_running = false;
-                self.response_results.clear();
-                self.response_trial = 0;
+                self.response_click_count = 0;
+                self.response_hold_times.clear();
+                self.response_click_times.clear();
+                self.response_cps = 0.0;
+                self.response_press_start = None;
+                self.response_is_pressed = false;
             }
         });
 
         ui.add_space(20.0);
 
-        // Test area
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), 200.0),
-            egui::Sense::click(),
+        // Click area - changes color when pressed
+        let (rect, _response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 150.0),
+            egui::Sense::hover(),
         );
 
-        let color = if self.response_waiting {
-            egui::Color32::from_rgb(50, 200, 50)
+        let color = if self.response_is_pressed {
+            egui::Color32::from_rgb(50, 200, 50) // Green when pressed
         } else if self.response_running {
-            egui::Color32::from_rgb(200, 50, 50)
+            egui::Color32::from_rgb(60, 60, 80) // Dark when waiting
         } else {
-            egui::Color32::from_rgb(80, 80, 80)
+            egui::Color32::from_rgb(50, 50, 50)
         };
 
         ui.painter().rect_filled(rect, 8.0, color);
 
-        let text = if self.response_waiting {
-            "CLICK NOW!"
-        } else if self.response_running {
-            "Wait for green..."
+        let text = if !self.response_running {
+            "Click Start, then click here to test"
+        } else if self.response_is_pressed {
+            "PRESSED"
         } else {
-            "Click Start to begin"
+            "Click here!"
         };
 
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             text,
-            egui::FontId::proportional(32.0),
+            egui::FontId::proportional(28.0),
             egui::Color32::WHITE,
         );
 
-        if response.clicked() && self.response_waiting {
-            if let Some(start) = self.response_start {
-                let latency = start.elapsed().as_secs_f64() * 1000.0;
-                self.response_results.push(latency);
-                self.response_trial += 1;
-                self.response_waiting = false;
+        ui.add_space(20.0);
 
-                if self.response_trial >= 10 {
-                    self.response_running = false;
-                }
-            }
-        }
-
-        // Simulate waiting phase
-        if self.response_running && !self.response_waiting && self.response_trial < 10 {
-            if rand_simple() % 100 < 2 {
-                self.response_waiting = true;
-                self.response_start = Some(Instant::now());
-            }
-        }
+        // Stats display
+        egui::Frame::dark_canvas(ui.style())
+            .inner_margin(20.0)
+            .rounding(8.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Clicks");
+                        ui.label(egui::RichText::new(format!("{}", self.response_click_count)).size(24.0).strong());
+                    });
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("CPS");
+                        ui.label(egui::RichText::new(format!("{:.1}", self.response_cps)).size(24.0).color(egui::Color32::YELLOW));
+                    });
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("Avg Hold");
+                        let avg_hold = if self.response_hold_times.is_empty() {
+                            0.0
+                        } else {
+                            self.response_hold_times.iter().sum::<f64>() / self.response_hold_times.len() as f64
+                        };
+                        ui.label(egui::RichText::new(format!("{:.1} ms", avg_hold)).size(24.0));
+                    });
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("Min Hold");
+                        let min_hold = self.response_hold_times.iter().cloned().fold(f64::MAX, f64::min);
+                        let min_str = if min_hold == f64::MAX { "- ms".to_string() } else { format!("{:.1} ms", min_hold) };
+                        ui.label(egui::RichText::new(min_str).size(24.0).color(egui::Color32::LIGHT_GREEN));
+                    });
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("Max Hold");
+                        let max_hold = self.response_hold_times.iter().cloned().fold(0.0, f64::max);
+                        ui.label(egui::RichText::new(format!("{:.1} ms", max_hold)).size(24.0).color(egui::Color32::LIGHT_RED));
+                    });
+                });
+            });
 
         ui.add_space(20.0);
 
-        // Results
-        if !self.response_results.is_empty() {
-            ui.heading("Results");
-
-            let avg: f64 = self.response_results.iter().sum::<f64>() / self.response_results.len() as f64;
-            let min = self.response_results.iter().cloned().fold(f64::MAX, f64::min);
-            let max = self.response_results.iter().cloned().fold(0.0, f64::max);
-
-            egui::Frame::dark_canvas(ui.style())
-                .inner_margin(15.0)
-                .rounding(8.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("Average");
-                            ui.label(egui::RichText::new(format!("{:.1} ms", avg)).size(20.0).strong());
-                        });
-                        ui.add_space(30.0);
-                        ui.vertical(|ui| {
-                            ui.label("Best");
-                            ui.label(egui::RichText::new(format!("{:.1} ms", min)).size(20.0).color(egui::Color32::GREEN));
-                        });
-                        ui.add_space(30.0);
-                        ui.vertical(|ui| {
-                            ui.label("Worst");
-                            ui.label(egui::RichText::new(format!("{:.1} ms", max)).size(20.0).color(egui::Color32::RED));
-                        });
-                        ui.add_space(30.0);
-                        ui.vertical(|ui| {
-                            ui.label("Trials");
-                            ui.label(egui::RichText::new(format!("{}/10", self.response_results.len())).size(20.0));
-                        });
-                    });
-                });
-
-            ui.add_space(10.0);
-
-            // Individual results
-            ui.collapsing("All Results", |ui| {
-                for (i, result) in self.response_results.iter().enumerate() {
-                    ui.label(format!("Trial {}: {:.1} ms", i + 1, result));
-                }
+        // Instructions
+        egui::Frame::none()
+            .fill(ui.visuals().faint_bg_color)
+            .inner_margin(15.0)
+            .rounding(8.0)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Instructions").strong());
+                ui.label("1. Click Start to begin testing");
+                ui.label("2. Click in the box above - it turns green when pressed");
+                ui.label("3. Hold duration = time between press and release");
+                ui.label("4. CPS = clicks per second (measured over last second)");
             });
+
+        // Capture real mouse button input
+        if self.response_running {
+            let now = Instant::now();
+            let pointer = ctx.input(|i| i.pointer.clone());
+            let is_primary_down = pointer.primary_down();
+
+            // Detect press (transition from not pressed to pressed)
+            if is_primary_down && !self.response_is_pressed {
+                self.response_is_pressed = true;
+                self.response_press_start = Some(now);
+            }
+
+            // Detect release (transition from pressed to not pressed)
+            if !is_primary_down && self.response_is_pressed {
+                self.response_is_pressed = false;
+                self.response_click_count += 1;
+                self.response_click_times.push_back(now);
+
+                // Calculate hold duration
+                if let Some(start) = self.response_press_start {
+                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                    self.response_hold_times.push(hold_ms);
+                    // Keep only last 100 hold times
+                    if self.response_hold_times.len() > 100 {
+                        self.response_hold_times.remove(0);
+                    }
+                }
+                self.response_press_start = None;
+
+                // Keep only clicks from last second for CPS
+                while let Some(front) = self.response_click_times.front() {
+                    if now.duration_since(*front).as_secs_f64() > 1.0 {
+                        self.response_click_times.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // Update CPS (clicks in the last second)
+            let one_sec_ago = now - std::time::Duration::from_secs(1);
+            self.response_cps = self.response_click_times.iter()
+                .filter(|t| **t > one_sec_ago)
+                .count() as f64;
         }
     }
 
-    pub fn ui_sticky(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui_sticky(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Click Stickiness Test");
         ui.add_space(5.0);
-        ui.label("Tests for stuck or delayed click releases.");
+        ui.label("Tests for stuck or delayed click releases. Long holds (>100ms) may indicate sticky switches.");
         ui.add_space(15.0);
 
         // Controls
@@ -201,6 +260,8 @@ impl ClickPanel {
                     self.sticky_running = true;
                     self.sticky_holds.clear();
                     self.sticky_count = 0;
+                    self.sticky_press_start = None;
+                    self.sticky_is_pressed = false;
                 }
             }
 
@@ -208,6 +269,8 @@ impl ClickPanel {
                 self.sticky_running = false;
                 self.sticky_holds.clear();
                 self.sticky_count = 0;
+                self.sticky_press_start = None;
+                self.sticky_is_pressed = false;
             }
         });
 
@@ -216,16 +279,33 @@ impl ClickPanel {
         // Test area
         let (rect, _response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 150.0),
-            egui::Sense::click(),
+            egui::Sense::hover(),
         );
 
-        ui.painter().rect_filled(rect, 8.0, ui.visuals().faint_bg_color);
+        let color = if self.sticky_is_pressed {
+            egui::Color32::from_rgb(50, 200, 50)
+        } else if self.sticky_running {
+            egui::Color32::from_rgb(60, 60, 80)
+        } else {
+            ui.visuals().faint_bg_color
+        };
+
+        ui.painter().rect_filled(rect, 8.0, color);
+
+        let text = if !self.sticky_running {
+            "Click Start to begin"
+        } else if self.sticky_is_pressed {
+            "HELD"
+        } else {
+            "Click rapidly to test switches"
+        };
+
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            if self.sticky_running { "Click rapidly to test switches" } else { "Click Start to begin" },
+            text,
             egui::FontId::proportional(20.0),
-            ui.visuals().text_color(),
+            egui::Color32::WHITE,
         );
 
         ui.add_space(20.0);
@@ -242,7 +322,7 @@ impl ClickPanel {
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
-                        ui.label("Sticky Clicks");
+                        ui.label("Sticky (>100ms)");
                         let color = if self.sticky_count == 0 { egui::Color32::GREEN } else { egui::Color32::RED };
                         ui.label(egui::RichText::new(format!("{}", self.sticky_count)).size(20.0).color(color));
                     });
@@ -256,15 +336,42 @@ impl ClickPanel {
                         };
                         ui.label(egui::RichText::new(format!("{:.1} ms", avg)).size(20.0));
                     });
+                    ui.add_space(30.0);
+                    ui.vertical(|ui| {
+                        ui.label("Max Hold");
+                        let max = self.sticky_holds.iter().cloned().fold(0.0, f64::max);
+                        let color = if max > 100.0 { egui::Color32::RED } else { egui::Color32::GREEN };
+                        ui.label(egui::RichText::new(format!("{:.1} ms", max)).size(20.0).color(color));
+                    });
                 });
             });
 
-        // Simulate clicks
-        if self.sticky_running && rand_simple() % 20 == 0 {
-            let hold = 50.0 + (rand_simple() % 50) as f64;
-            self.sticky_holds.push(hold);
-            if hold > 100.0 {
-                self.sticky_count += 1;
+        // Capture real mouse button input
+        if self.sticky_running {
+            let now = Instant::now();
+            let pointer = ctx.input(|i| i.pointer.clone());
+            let is_primary_down = pointer.primary_down();
+
+            // Detect press
+            if is_primary_down && !self.sticky_is_pressed {
+                self.sticky_is_pressed = true;
+                self.sticky_press_start = Some(now);
+            }
+
+            // Detect release
+            if !is_primary_down && self.sticky_is_pressed {
+                self.sticky_is_pressed = false;
+
+                if let Some(start) = self.sticky_press_start {
+                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                    self.sticky_holds.push(hold_ms);
+
+                    // Count as sticky if held > 100ms
+                    if hold_ms > 100.0 {
+                        self.sticky_count += 1;
+                    }
+                }
+                self.sticky_press_start = None;
             }
         }
     }
@@ -407,12 +514,4 @@ impl ClickPanel {
             }
         }
     }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }
