@@ -1,10 +1,14 @@
+#[cfg(target_os = "linux")]
 mod tests;
 mod usb;
 mod display;
+#[cfg(target_os = "linux")]
 mod input;
 
+#[cfg(target_os = "linux")]
 use std::io::{self, Write};
 
+#[cfg(target_os = "linux")]
 fn main() {
     println!("╔════════════════════════════════════╗");
     println!("║        Mouse-TestKit v0.1.0        ║");
@@ -41,6 +45,20 @@ fn main() {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    println!("╔════════════════════════════════════╗");
+    println!("║        Mouse-TestKit v0.1.0        ║");
+    println!("║     Mouse Testing Utility          ║");
+    println!("╚════════════════════════════════════╝");
+    println!();
+    println!("The CLI version requires Linux for raw input access.");
+    println!("Please use mouse-testkit-gui instead for the graphical interface.");
+    println!();
+    println!("Run: cargo run --bin mouse-testkit-gui");
+}
+
+#[cfg(target_os = "linux")]
 fn print_menu() {
     println!("┌─────────────────────────────────────┐");
     println!("│              Main Menu              │");
@@ -64,6 +82,7 @@ fn print_menu() {
     println!("└─────────────────────────────────────┘");
 }
 
+#[cfg(target_os = "linux")]
 fn get_input(prompt: &str) -> String {
     print!("{}", prompt);
     io::stdout().flush().unwrap();

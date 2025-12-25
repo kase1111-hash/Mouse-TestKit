@@ -30,7 +30,7 @@ impl PollingPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         ui.heading("Polling Rate Monitor");
         ui.add_space(5.0);
         ui.label("Measures your mouse's polling rate in real-time.");

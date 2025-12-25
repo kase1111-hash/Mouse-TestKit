@@ -2,7 +2,7 @@
 /// Measures click latency and response time
 
 use std::time::{Duration, Instant};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode};
 use crate::input::{self, MouseEvent, MouseButton};
 
 const NUM_TRIALS: usize = 10;

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode};
 use crate::input::{self, MouseEvent};
 
 pub fn run() {
