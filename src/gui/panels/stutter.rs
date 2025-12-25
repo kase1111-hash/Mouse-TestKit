@@ -10,7 +10,7 @@ pub struct StutterPanel {
     avg_delta: f64,
     min_delta: f64,
     max_delta: f64,
-    last_update: Instant,
+    last_move_time: Option<Instant>,
     threshold: f64,
 }
 
@@ -23,12 +23,12 @@ impl StutterPanel {
             avg_delta: 0.0,
             min_delta: f64::MAX,
             max_delta: 0.0,
-            last_update: Instant::now(),
+            last_move_time: None,
             threshold: 4.0,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Stutter Detection");
         ui.add_space(5.0);
         ui.label("Detects movement irregularities and timing stutters.");
@@ -151,9 +151,39 @@ impl StutterPanel {
                 ui.label(egui::RichText::new("Consistent flat lines indicate smooth tracking.").weak());
             });
 
-        // Simulate data
+        // Capture real mouse input and measure timing
         if self.is_running {
-            self.simulate_update();
+            let delta = ctx.input(|i| i.pointer.delta());
+
+            // Only record timing when mouse is actually moving
+            if delta.x != 0.0 || delta.y != 0.0 {
+                let now = Instant::now();
+
+                // If we have a previous movement, calculate the delta time
+                if let Some(last_time) = self.last_move_time {
+                    let time_since_last = now.duration_since(last_time).as_secs_f64() * 1000.0;
+
+                    // Only record reasonable deltas (ignore gaps > 500ms when mouse was stopped)
+                    if time_since_last < 500.0 {
+                        self.deltas.push_back(time_since_last);
+                        if self.deltas.len() > 100 {
+                            self.deltas.pop_front();
+                        }
+
+                        // Calculate stats
+                        self.avg_delta = self.deltas.iter().sum::<f64>() / self.deltas.len() as f64;
+                        self.min_delta = self.deltas.iter().cloned().fold(f64::MAX, f64::min);
+                        self.max_delta = self.deltas.iter().cloned().fold(0.0, f64::max);
+
+                        self.stutter_count = self.deltas.iter()
+                            .filter(|d| (**d - self.avg_delta).abs() > self.threshold)
+                            .count();
+                    }
+                }
+
+                // Always update last move time when mouse moves
+                self.last_move_time = Some(now);
+            }
         }
     }
 
@@ -166,11 +196,7 @@ impl StutterPanel {
 
     fn start(&mut self) {
         self.is_running = true;
-        self.last_update = Instant::now();
-    }
-
-    fn reset(&mut self) {
-        self.is_running = false;
+        self.last_move_time = None; // Will be set on first mouse movement
         self.deltas.clear();
         self.stutter_count = 0;
         self.avg_delta = 0.0;
@@ -178,39 +204,13 @@ impl StutterPanel {
         self.max_delta = 0.0;
     }
 
-    fn simulate_update(&mut self) {
-        if self.last_update.elapsed().as_millis() >= 10 {
-            // Simulate delta times with occasional stutters
-            let base = 1.0;
-            let noise = (rand_simple() % 50) as f64 / 100.0;
-            let stutter = if rand_simple() % 100 < 5 { 8.0 } else { 0.0 };
-            let delta = base + noise + stutter;
-
-            self.deltas.push_back(delta);
-            if self.deltas.len() > 100 {
-                self.deltas.pop_front();
-            }
-
-            // Calculate stats
-            if !self.deltas.is_empty() {
-                self.avg_delta = self.deltas.iter().sum::<f64>() / self.deltas.len() as f64;
-                self.min_delta = self.deltas.iter().cloned().fold(f64::MAX, f64::min);
-                self.max_delta = self.deltas.iter().cloned().fold(0.0, f64::max);
-
-                self.stutter_count = self.deltas.iter()
-                    .filter(|d| (**d - self.avg_delta).abs() > self.threshold)
-                    .count();
-            }
-
-            self.last_update = Instant::now();
-        }
+    fn reset(&mut self) {
+        self.is_running = false;
+        self.last_move_time = None;
+        self.deltas.clear();
+        self.stutter_count = 0;
+        self.avg_delta = 0.0;
+        self.min_delta = f64::MAX;
+        self.max_delta = 0.0;
     }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }
