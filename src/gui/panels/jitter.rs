@@ -5,8 +5,13 @@ use std::time::Instant;
 pub struct JitterPanel {
     is_sampling: bool,
     samples: Vec<JitterSample>,
-    current_events: Vec<(f64, f64)>,
+    /// Raw delta movements for jitter calculation
+    current_deltas: Vec<(f64, f64)>,
+    /// Accumulated positions for visualization
+    current_positions: Vec<(f64, f64)>,
     sample_start: Option<Instant>,
+    /// Accumulated position for visualization (sum of deltas)
+    accumulated_pos: (f64, f64),
 }
 
 struct JitterSample {
@@ -20,12 +25,14 @@ impl JitterPanel {
         Self {
             is_sampling: false,
             samples: Vec::new(),
-            current_events: Vec::new(),
+            current_deltas: Vec::new(),
+            current_positions: Vec::new(),
             sample_start: None,
+            accumulated_pos: (0.0, 0.0),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Jitter Test");
         ui.add_space(5.0);
         ui.label("Measures sensor noise when the mouse is stationary.");
@@ -43,7 +50,8 @@ impl JitterPanel {
 
             if ui.button("Clear All").clicked() {
                 self.samples.clear();
-                self.current_events.clear();
+                self.current_deltas.clear();
+                self.current_positions.clear();
             }
         });
 
@@ -54,7 +62,7 @@ impl JitterPanel {
         // Jitter visualization
         ui.heading("Jitter Visualization");
 
-        let points: PlotPoints = self.current_events
+        let points: PlotPoints = self.current_positions
             .iter()
             .map(|(x, y)| [*x, *y])
             .collect();
@@ -127,17 +135,21 @@ impl JitterPanel {
                 });
         }
 
-        // Simulate sampling
+        // Capture real mouse input during sampling
         if self.is_sampling {
             if let Some(start) = self.sample_start {
                 if start.elapsed().as_secs() >= 5 {
                     self.finish_sample();
                 } else {
-                    // Simulate jitter events
-                    if rand_simple() % 10 == 0 {
-                        let x = (rand_simple() % 20) as f64 - 10.0;
-                        let y = (rand_simple() % 20) as f64 - 10.0;
-                        self.current_events.push((x * 0.1, y * 0.1));
+                    // Read real mouse delta from egui input
+                    let delta = ctx.input(|i| i.pointer.delta());
+                    if delta.x != 0.0 || delta.y != 0.0 {
+                        // Store raw delta for jitter calculation
+                        self.current_deltas.push((delta.x as f64, delta.y as f64));
+                        // Accumulate position for visualization
+                        self.accumulated_pos.0 += delta.x as f64;
+                        self.accumulated_pos.1 += delta.y as f64;
+                        self.current_positions.push((self.accumulated_pos.0, self.accumulated_pos.1));
                     }
                 }
             }
@@ -147,22 +159,25 @@ impl JitterPanel {
     fn start_sample(&mut self) {
         self.is_sampling = true;
         self.sample_start = Some(Instant::now());
-        self.current_events.clear();
+        self.current_deltas.clear();
+        self.current_positions.clear();
+        self.accumulated_pos = (0.0, 0.0);
     }
 
     fn finish_sample(&mut self) {
-        let total_distance: f64 = self.current_events
+        // Calculate jitter metrics from raw deltas
+        let total_distance: f64 = self.current_deltas
             .iter()
-            .map(|(x, y)| (x * x + y * y).sqrt())
+            .map(|(dx, dy)| (dx * dx + dy * dy).sqrt())
             .sum();
 
-        let max_single = self.current_events
+        let max_single = self.current_deltas
             .iter()
-            .map(|(x, y)| (x * x + y * y).sqrt())
+            .map(|(dx, dy)| (dx * dx + dy * dy).sqrt())
             .fold(0.0, f64::max);
 
         self.samples.push(JitterSample {
-            events: self.current_events.len(),
+            events: self.current_deltas.len(),
             total_distance,
             max_single,
         });
@@ -170,12 +185,4 @@ impl JitterPanel {
         self.is_sampling = false;
         self.sample_start = None;
     }
-}
-
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64 % 1000
 }

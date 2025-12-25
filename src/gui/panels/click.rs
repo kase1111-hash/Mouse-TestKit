@@ -1,6 +1,11 @@
 use eframe::egui;
 use std::time::Instant;
 
+/// Jump threshold in pixels - movements larger than this after idle are considered jumps
+const JUMP_THRESHOLD_PX: f64 = 50.0;
+/// Time in milliseconds without movement to consider mouse "idle" (potential lift)
+const IDLE_THRESHOLD_MS: u64 = 100;
+
 pub struct ClickPanel {
     // Click Response
     response_running: bool,
@@ -18,6 +23,12 @@ pub struct ClickPanel {
     liftoff_running: bool,
     liftoff_jumps: usize,
     liftoff_position: (i64, i64),
+    /// Time of last mouse movement
+    liftoff_last_move: Instant,
+    /// Whether mouse is currently considered idle (lifted)
+    liftoff_is_idle: bool,
+    /// Jump events with their distances
+    liftoff_jump_events: Vec<f64>,
 }
 
 impl ClickPanel {
@@ -36,6 +47,9 @@ impl ClickPanel {
             liftoff_running: false,
             liftoff_jumps: 0,
             liftoff_position: (0, 0),
+            liftoff_last_move: Instant::now(),
+            liftoff_is_idle: false,
+            liftoff_jump_events: Vec::new(),
         }
     }
 
@@ -255,7 +269,7 @@ impl ClickPanel {
         }
     }
 
-    pub fn ui_liftoff(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn ui_liftoff(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Lift-Off Jump Test");
         ui.add_space(5.0);
         ui.label("Detects cursor jumps when lifting the mouse.");
@@ -271,6 +285,10 @@ impl ClickPanel {
                 if ui.button("Start").clicked() {
                     self.liftoff_running = true;
                     self.liftoff_jumps = 0;
+                    self.liftoff_position = (0, 0);
+                    self.liftoff_jump_events.clear();
+                    self.liftoff_is_idle = false;
+                    self.liftoff_last_move = Instant::now();
                 }
             }
 
@@ -278,6 +296,8 @@ impl ClickPanel {
                 self.liftoff_running = false;
                 self.liftoff_jumps = 0;
                 self.liftoff_position = (0, 0);
+                self.liftoff_jump_events.clear();
+                self.liftoff_is_idle = false;
             }
         });
 
@@ -302,13 +322,44 @@ impl ClickPanel {
                     ui.add_space(50.0);
                     ui.vertical(|ui| {
                         ui.label("Status");
-                        let status = if self.liftoff_running { "Monitoring..." } else { "Stopped" };
-                        ui.label(egui::RichText::new(status).size(20.0));
+                        let status = if !self.liftoff_running {
+                            "Stopped"
+                        } else if self.liftoff_is_idle {
+                            "IDLE (mouse lifted?)"
+                        } else {
+                            "Moving..."
+                        };
+                        let color = if self.liftoff_is_idle { egui::Color32::YELLOW } else { egui::Color32::WHITE };
+                        ui.label(egui::RichText::new(status).size(20.0).color(color));
                     });
                 });
             });
 
         ui.add_space(20.0);
+
+        // Jump history
+        if !self.liftoff_jump_events.is_empty() {
+            egui::Frame::dark_canvas(ui.style())
+                .inner_margin(15.0)
+                .rounding(8.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Jump History").strong());
+                    let avg: f64 = self.liftoff_jump_events.iter().sum::<f64>() / self.liftoff_jump_events.len() as f64;
+                    let max = self.liftoff_jump_events.iter().cloned().fold(0.0, f64::max);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Average: {:.1} px", avg));
+                        ui.add_space(20.0);
+                        ui.label(format!("Max: {:.1} px", max));
+                    });
+                    ui.collapsing("All jumps", |ui| {
+                        for (i, dist) in self.liftoff_jump_events.iter().enumerate() {
+                            ui.label(format!("#{}: {:.1} px", i + 1, dist));
+                        }
+                    });
+                });
+
+            ui.add_space(20.0);
+        }
 
         // Instructions
         egui::Frame::none()
@@ -321,12 +372,39 @@ impl ClickPanel {
                 ui.label("2. Move your mouse around");
                 ui.label("3. Slowly lift the mouse off the surface");
                 ui.label("4. Large cursor jumps during lift indicate high LOD");
+                ui.add_space(5.0);
+                ui.label(egui::RichText::new(format!("Jump threshold: {} px | Idle threshold: {} ms", JUMP_THRESHOLD_PX, IDLE_THRESHOLD_MS)).weak());
             });
 
-        // Simulate position updates
+        // Capture real mouse input and detect jumps
         if self.liftoff_running {
-            self.liftoff_position.0 += (rand_simple() % 10) as i64 - 5;
-            self.liftoff_position.1 += (rand_simple() % 10) as i64 - 5;
+            let delta = ctx.input(|i| i.pointer.delta());
+            let now = Instant::now();
+
+            if delta.x != 0.0 || delta.y != 0.0 {
+                // Mouse is moving
+                let distance = ((delta.x as f64).powi(2) + (delta.y as f64).powi(2)).sqrt();
+
+                // Check for jump: large movement after being idle
+                if self.liftoff_is_idle && distance > JUMP_THRESHOLD_PX {
+                    self.liftoff_jumps += 1;
+                    self.liftoff_jump_events.push(distance);
+                }
+
+                // Update position
+                self.liftoff_position.0 += delta.x as i64;
+                self.liftoff_position.1 += delta.y as i64;
+
+                // Reset idle state
+                self.liftoff_is_idle = false;
+                self.liftoff_last_move = now;
+            } else {
+                // No movement - check if we've been idle long enough
+                let time_since_move = now.duration_since(self.liftoff_last_move).as_millis() as u64;
+                if time_since_move > IDLE_THRESHOLD_MS {
+                    self.liftoff_is_idle = true;
+                }
+            }
         }
     }
 }
