@@ -24,7 +24,13 @@ fn main() {
             "4" => tests::click_response::run(),
             "5" => tests::click_sticky::run(),
             "6" => tests::liftoff::run(),
-            "7" => tests::standard::run_all(),
+            "7" => tests::dpi::run(),
+            "8" => tests::angle_snap::run(),
+            "9" => tests::acceleration::run(),
+            "10" => tests::double_click::run(),
+            "11" => tests::jitter::run(),
+            "12" => tests::durability::run(),
+            "13" => tests::standard::run_all(),
             "0" => {
                 println!("Exiting Mouse-TestKit. Goodbye!");
                 break;
@@ -36,18 +42,26 @@ fn main() {
 }
 
 fn print_menu() {
-    println!("┌────────────────────────────────────┐");
-    println!("│              Main Menu             │");
-    println!("├────────────────────────────────────┤");
-    println!("│  1. Stutter Detection Test         │");
-    println!("│  2. Polling Rate Monitor           │");
-    println!("│  3. USB Conflict Scanner           │");
-    println!("│  4. Click Response Test            │");
-    println!("│  5. Click Stickiness Test          │");
-    println!("│  6. Lift-Off Jump Test             │");
-    println!("│  7. Run All Standard Tests         │");
-    println!("│  0. Exit                           │");
-    println!("└────────────────────────────────────┘");
+    println!("┌─────────────────────────────────────┐");
+    println!("│              Main Menu              │");
+    println!("├─────────────────────────────────────┤");
+    println!("│  1. Stutter Detection Test          │");
+    println!("│  2. Polling Rate Monitor            │");
+    println!("│  3. USB Conflict Scanner            │");
+    println!("│  4. Click Response Test             │");
+    println!("│  5. Click Stickiness Test           │");
+    println!("│  6. Lift-Off Jump Test              │");
+    println!("├─────────────────────────────────────┤");
+    println!("│  7. DPI Accuracy Test               │");
+    println!("│  8. Angle Snapping Detection        │");
+    println!("│  9. Acceleration Detection          │");
+    println!("│ 10. Double-Click Test               │");
+    println!("│ 11. Jitter Test                     │");
+    println!("│ 12. Button Durability Test          │");
+    println!("├─────────────────────────────────────┤");
+    println!("│ 13. Run All Standard Tests          │");
+    println!("│  0. Exit                            │");
+    println!("└─────────────────────────────────────┘");
 }
 
 fn get_input(prompt: &str) -> String {
