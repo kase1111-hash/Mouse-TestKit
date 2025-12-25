@@ -198,8 +198,10 @@ impl AccelPanel {
             let delta = ctx.input(|i| i.pointer.delta());
             if delta.x != 0.0 || delta.y != 0.0 {
                 // Accumulate position from deltas
+                // Negate Y because screen coordinates have Y increasing downward,
+                // but plot coordinates have Y increasing upward
                 self.angle_accumulated_pos.0 += delta.x as f64;
-                self.angle_accumulated_pos.1 += delta.y as f64;
+                self.angle_accumulated_pos.1 -= delta.y as f64;
                 self.angle_points.push((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
 
                 // Keep a reasonable number of points
