@@ -1,6 +1,7 @@
 mod tests;
 mod usb;
 mod display;
+mod input;
 
 use std::io::{self, Write};
 

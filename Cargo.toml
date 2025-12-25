@@ -6,6 +6,8 @@ description = "A standalone mouse testing utility"
 authors = ["Mouse-TestKit Contributors"]
 
 [dependencies]
+crossterm = "0.27"
+evdev = "0.12"
 
 [profile.release]
 opt-level = "z"

@@ -1,18 +1,127 @@
 /// Lift-Off Distance Jump Test
 /// Tests for cursor jump during mouse lift
 
+use std::time::{Duration, Instant};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crate::input::{self, MouseEvent};
+
+pub const JUMP_THRESHOLD_PX: f64 = 50.0;
+pub const IDLE_THRESHOLD_MS: u64 = 100;
+
 pub fn run() {
     println!("\n=== Lift-Off Jump Test ===");
-    println!("Slowly lift your mouse off the surface...");
-    println!();
+    println!("This test detects cursor jumps when lifting the mouse.");
+    println!("Move your mouse, then slowly lift it off the surface.");
+    println!("Press 'q' to quit.\n");
 
-    // TODO: Monitor mouse position during lift
-    // TODO: Detect sudden position changes (jumps)
-    // TODO: Report jump distance and direction
+    let mut device = match input::select_mouse() {
+        Some(d) => d,
+        None => {
+            println!("\nNo mouse selected. Returning to menu...");
+            wait_for_enter();
+            return;
+        }
+    };
 
-    println!("[Placeholder] Lift-off jump test not yet implemented.");
-    println!("Press Enter to return to menu...");
+    device.grab().ok();
 
+    let mut last_event_time = Instant::now();
+    let mut accumulated_dx: i32 = 0;
+    let mut accumulated_dy: i32 = 0;
+    let mut jump_events: Vec<LiftEvent> = Vec::new();
+    let mut last_print = Instant::now();
+    let mut was_idle = false;
+    let mut position = (0i64, 0i64);
+
+    crossterm::terminal::enable_raw_mode().ok();
+
+    println!("\nMonitoring... (press 'q' to quit)\n");
+
+    loop {
+        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+                break;
+            }
+        }
+
+        let now = Instant::now();
+        let time_since_last = now.duration_since(last_event_time).as_millis() as u64;
+
+        if let Ok(events) = device.fetch_events() {
+            for ev in events {
+                if let Some(MouseEvent::Move { dx, dy }) = input::parse_event(&ev) {
+                    accumulated_dx += dx;
+                    accumulated_dy += dy;
+                    position.0 += dx as i64;
+                    position.1 += dy as i64;
+
+                    let distance = ((accumulated_dx.pow(2) + accumulated_dy.pow(2)) as f64).sqrt();
+
+                    if was_idle && distance > JUMP_THRESHOLD_PX {
+                        let event = LiftEvent::new(accumulated_dx, accumulated_dy);
+                        println!("\r\x1B[K⚠ JUMP DETECTED! Distance: {:.1}px (dx: {}, dy: {})",
+                            event.distance, accumulated_dx, accumulated_dy);
+                        jump_events.push(event);
+                    }
+
+                    last_event_time = now;
+                    accumulated_dx = 0;
+                    accumulated_dy = 0;
+                    was_idle = false;
+                }
+            }
+        }
+
+        // Check for idle state (potential lift)
+        if time_since_last > IDLE_THRESHOLD_MS && !was_idle {
+            was_idle = true;
+        }
+
+        if last_print.elapsed() >= Duration::from_millis(200) {
+            print!("\r\x1B[K");
+            print!("Position: ({}, {}) | ", position.0, position.1);
+            print!("Jumps detected: {} | ", jump_events.len());
+            print!("Status: {}", if was_idle { "IDLE (lift detected)" } else { "Moving" });
+
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+            last_print = Instant::now();
+        }
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    crossterm::terminal::disable_raw_mode().ok();
+
+    println!("\n\n=== Lift-Off Jump Test Complete ===\n");
+    println!("Total jumps detected: {}", jump_events.len());
+
+    if !jump_events.is_empty() {
+        let avg = jump_events.iter().map(|j| j.distance).sum::<f64>() / jump_events.len() as f64;
+        let max = jump_events.iter().map(|j| j.distance).fold(f64::MIN, f64::max);
+
+        println!("\nJump statistics:");
+        println!("  Average distance: {:.1} px", avg);
+        println!("  Maximum distance: {:.1} px", max);
+
+        println!("\nJump events:");
+        for (i, event) in jump_events.iter().enumerate() {
+            println!("  #{}: {:.1}px (dx: {}, dy: {})", i + 1, event.distance, event.jump_x, event.jump_y);
+        }
+
+        println!("\n⚠ Jumps during lift may indicate:");
+        println!("  - High lift-off distance (LOD) setting");
+        println!("  - Sensor tracking issues");
+        println!("  - Surface compatibility problems");
+    } else {
+        println!("\n✓ No jumps detected. Lift-off behavior appears normal.");
+    }
+
+    wait_for_enter();
+}
+
+fn wait_for_enter() {
+    println!("\nPress Enter to return to menu...");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).ok();
 }
@@ -29,9 +138,6 @@ impl LiftEvent {
         Self { jump_x, jump_y, distance }
     }
 }
-
-/// Threshold in pixels - movement larger than this during lift is a jump
-pub const JUMP_THRESHOLD_PX: f64 = 5.0;
 
 pub fn is_jump(distance: f64) -> bool {
     distance > JUMP_THRESHOLD_PX
