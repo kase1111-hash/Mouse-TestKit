@@ -57,13 +57,67 @@ Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and d
 | Detection | Identifies unwanted cursor movement when lifting mouse |
 | Use Case | Evaluating sensor lift-off behavior and calibration |
 
-### 7. Industry Standard Tests
+### 7. DPI Accuracy Test
 
 | Specification | Description |
 |---------------|-------------|
-| Function | Additional standardized mouse testing protocols |
-| Coverage | Comprehensive suite of industry-accepted benchmarks |
-| Use Case | Complete mouse performance validation |
+| Function | Verifies mouse DPI matches advertised/configured value |
+| Method | Measures actual counts per physical distance moved |
+| Output | Actual DPI vs expected, accuracy percentage |
+| Use Case | Validating sensor accuracy and DPI calibration |
+
+### 8. Angle Snapping Detection
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Detects if mouse has angle snapping/prediction enabled |
+| Method | Analyzes diagonal movement for artificial straightening |
+| Detection | Identifies deviation from natural hand movement |
+| Use Case | Verifying raw input for competitive gaming |
+
+### 9. Acceleration Detection
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Tests for unwanted mouse acceleration curves |
+| Method | Compares movement distance at different speeds |
+| Output | Acceleration coefficient and consistency |
+| Use Case | Ensuring 1:1 input for precision tasks |
+
+### 10. Double-Click Test
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Detects faulty switches causing unintended double-clicks |
+| Method | Monitors for rapid unintended click events |
+| Threshold | Configurable debounce detection window |
+| Use Case | Diagnosing switch degradation or defects |
+
+### 11. Jitter Test
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Measures micro-movements when mouse is stationary |
+| Method | Records position variance over time at rest |
+| Output | Jitter magnitude in pixels/counts |
+| Use Case | Evaluating sensor stability and noise floor |
+
+### 12. Button Durability Test
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Rapid click endurance test for switch reliability |
+| Method | High-speed click counting with failure detection |
+| Metrics | Click count, failures, timing consistency |
+| Use Case | Stress testing switches for quality assurance |
+
+### 13. Run All Standard Tests
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Executes complete test suite sequentially |
+| Coverage | All tests with comprehensive final report |
+| Use Case | Full mouse performance validation |
 
 ---
 

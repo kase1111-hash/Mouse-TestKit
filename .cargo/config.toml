@@ -1,0 +1,26 @@
+# Windows cross-compilation settings
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = ["-C", "link-args=-mwindows -static"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-gnu]
+linker = "i686-w64-mingw32-gcc"
+ar = "i686-w64-mingw32-ar"
+rustflags = ["-C", "link-args=-mwindows -static"]
+
+# Build configuration
+[build]
+# Uncomment to set default target
+# target = "x86_64-pc-windows-gnu"
+
+[profile.keychain]
+inherits = "release"
+
+# Alias for quick builds
+[alias]
+keychain = "build --profile keychain --bin mouse-testkit-gui"
+keychain-win = "build --profile keychain --bin mouse-testkit-gui --target x86_64-pc-windows-gnu"

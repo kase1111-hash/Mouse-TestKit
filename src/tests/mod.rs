@@ -1,0 +1,12 @@
+pub mod stutter;
+pub mod polling;
+pub mod click_response;
+pub mod click_sticky;
+pub mod liftoff;
+pub mod dpi;
+pub mod angle_snap;
+pub mod acceleration;
+pub mod double_click;
+pub mod jitter;
+pub mod durability;
+pub mod standard;
