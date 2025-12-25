@@ -1,5 +1,4 @@
 use eframe::egui;
-use std::collections::VecDeque;
 use std::time::Instant;
 
 pub struct ClickPanel {

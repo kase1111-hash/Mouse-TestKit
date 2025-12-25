@@ -322,7 +322,7 @@ impl AccelPanel {
 
         // Ideal line (no acceleration = 1.0 ratio at all velocities)
         let ideal_line = Line::new(PlotPoints::from_explicit_callback(
-            |x| 1.0,
+            |_x| 1.0,
             0.0..2000.0,
             100
         ))

@@ -28,7 +28,7 @@ impl StutterPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         ui.heading("Stutter Detection");
         ui.add_space(5.0);
         ui.label("Detects movement irregularities and timing stutters.");

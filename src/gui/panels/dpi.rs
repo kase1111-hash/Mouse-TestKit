@@ -1,5 +1,4 @@
 use eframe::egui;
-use std::time::Instant;
 
 pub struct DpiPanel {
     is_running: bool,

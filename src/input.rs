@@ -1,10 +1,14 @@
 /// Input handling module
-/// Provides mouse device detection and event reading via evdev
+/// Provides mouse device detection and event reading via evdev (Linux only)
 
+#[cfg(target_os = "linux")]
 use evdev::{Device, InputEventKind, RelativeAxisType, Key};
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 pub struct MouseDevice {
     pub device: Device,
     pub name: String,
@@ -12,6 +16,7 @@ pub struct MouseDevice {
 }
 
 /// Find all mouse devices in the system
+#[cfg(target_os = "linux")]
 pub fn find_mouse_devices() -> Vec<MouseDevice> {
     let mut mice = Vec::new();
 
@@ -50,6 +55,7 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
 }
 
 /// Select a mouse device interactively
+#[cfg(target_os = "linux")]
 pub fn select_mouse() -> Option<Device> {
     let mice = find_mouse_devices();
 
@@ -83,6 +89,7 @@ pub fn select_mouse() -> Option<Device> {
     Some(mice.into_iter().nth(choice - 1)?.device)
 }
 
+// These types are available on all platforms for use in shared code
 #[derive(Debug, Clone)]
 pub enum MouseEvent {
     Move { dx: i32, dy: i32 },
@@ -101,6 +108,7 @@ pub enum MouseButton {
     Unknown,
 }
 
+#[cfg(target_os = "linux")]
 impl From<Key> for MouseButton {
     fn from(key: Key) -> Self {
         match key {
@@ -115,6 +123,7 @@ impl From<Key> for MouseButton {
 }
 
 /// Parse an evdev event into a MouseEvent
+#[cfg(target_os = "linux")]
 pub fn parse_event(event: &evdev::InputEvent) -> Option<MouseEvent> {
     match event.kind() {
         InputEventKind::RelAxis(axis) => {
