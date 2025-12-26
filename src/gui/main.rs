@@ -12,12 +12,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1024.0, 768.0])
             .with_min_inner_size([800.0, 600.0])
-            .with_title("Mouse-TestKit"),
+            .with_title("Mouse TRAP"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Mouse-TestKit",
+        "Mouse TRAP",
         options,
         Box::new(|cc| Ok(Box::new(MouseTestKitApp::new(cc)))),
     )
