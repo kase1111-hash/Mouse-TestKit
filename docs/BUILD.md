@@ -69,9 +69,6 @@ cargo run --release --bin mouse-testkit-gui
 
 # Or run binary directly
 ./target/release/mouse-testkit-gui
-
-# Linux: Run with sudo for full device access
-sudo ./target/release/mouse-testkit-gui
 ```
 
 ---

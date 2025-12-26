@@ -2,7 +2,7 @@
 
 **Test Response And Positioning**
 
-A comprehensive mouse testing utility for analyzing performance, reliability, and accuracy.
+Precision diagnostics for your mouse.
 
 ---
 
@@ -135,7 +135,6 @@ Measures sensor noise when the mouse is stationary.
 
 ## Tips
 
-- Run with `sudo` on Linux for full device access
 - Close other applications for most accurate timing tests
 - Use a consistent mousepad surface
 - Let mouse warm up for a few minutes for best results
