@@ -94,19 +94,6 @@ impl MouseTestKitApp {
                         ear_radius,
                         ThemeColors::accent()
                     );
-
-                    ui.add_space(8.0);
-
-                    ui.label(egui::RichText::new("Mouse TRAP")
-                        .size(22.0)
-                        .strong()
-                        .color(ThemeColors::text_primary()));
-                    ui.label(egui::RichText::new("Test Response And Positioning")
-                        .size(10.0)
-                        .color(ThemeColors::text_muted()));
-                    ui.label(egui::RichText::new("v0.1.0")
-                        .size(11.0)
-                        .color(ThemeColors::text_muted()));
                 });
 
                 ui.add_space(24.0);
