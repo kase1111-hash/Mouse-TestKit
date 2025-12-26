@@ -59,7 +59,7 @@ impl MouseTestKitApp {
     fn render_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("sidebar")
             .resizable(false)
-            .default_width(240.0)
+            .default_width(200.0)
             .frame(egui::Frame::none()
                 .fill(ThemeColors::sidebar_bg())
                 .stroke(egui::Stroke::new(1.0, ThemeColors::border())))
@@ -94,19 +94,6 @@ impl MouseTestKitApp {
                         ear_radius,
                         ThemeColors::accent()
                     );
-
-                    ui.add_space(8.0);
-
-                    ui.label(egui::RichText::new("Mouse TRAP")
-                        .size(22.0)
-                        .strong()
-                        .color(ThemeColors::text_primary()));
-                    ui.label(egui::RichText::new("Test Response And Positioning")
-                        .size(10.0)
-                        .color(ThemeColors::text_muted()));
-                    ui.label(egui::RichText::new("v0.1.0")
-                        .size(11.0)
-                        .color(ThemeColors::text_muted()));
                 });
 
                 ui.add_space(24.0);
@@ -220,15 +207,6 @@ impl MouseTestKitApp {
                     });
 
                     ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        ui.add_space(16.0);
-                        ui.label(egui::RichText::new("Run with sudo for\nfull device access")
-                            .size(11.0)
-                            .color(ThemeColors::text_muted()));
-                    });
-
-                    ui.add_space(8.0);
                 });
             });
     }
@@ -261,7 +239,7 @@ impl MouseTestKitApp {
             .fill(bg_fill)
             .stroke(stroke)
             .rounding(8.0)
-            .min_size(egui::vec2(208.0, 34.0));
+            .min_size(egui::vec2(172.0, 32.0));
 
             let response = ui.add(button);
 
@@ -297,9 +275,9 @@ impl MouseTestKitApp {
     }
 
     fn render_dashboard(&mut self, ui: &mut egui::Ui) {
-        ui.label(theme::heading_style("Welcome to Mouse-TestKit"));
+        ui.label(theme::heading_style("Welcome to Mouse TRAP"));
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("A comprehensive mouse testing utility for analyzing performance, reliability, and accuracy.")
+        ui.label(egui::RichText::new("Test Response And Positioning — precision diagnostics for your mouse.")
             .color(ThemeColors::text_secondary()));
 
         ui.add_space(28.0);
@@ -454,7 +432,7 @@ impl MouseTestKitApp {
                         .color(ThemeColors::text_muted()));
                     ui.add_space(16.0);
 
-                    ui.label(egui::RichText::new("A comprehensive mouse testing utility")
+                    ui.label(egui::RichText::new("Test Response And Positioning")
                         .color(ThemeColors::text_secondary()));
 
                     ui.add_space(16.0);
