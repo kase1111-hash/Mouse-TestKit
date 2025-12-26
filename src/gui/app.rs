@@ -59,7 +59,7 @@ impl MouseTestKitApp {
     fn render_sidebar(&mut self, ctx: &egui::Context) {
         egui::SidePanel::left("sidebar")
             .resizable(false)
-            .default_width(240.0)
+            .default_width(200.0)
             .frame(egui::Frame::none()
                 .fill(ThemeColors::sidebar_bg())
                 .stroke(egui::Stroke::new(1.0, ThemeColors::border())))
@@ -261,7 +261,7 @@ impl MouseTestKitApp {
             .fill(bg_fill)
             .stroke(stroke)
             .rounding(8.0)
-            .min_size(egui::vec2(208.0, 34.0));
+            .min_size(egui::vec2(172.0, 32.0));
 
             let response = ui.add(button);
 

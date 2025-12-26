@@ -10,8 +10,8 @@ use app::MouseTestKitApp;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1024.0, 768.0])
-            .with_min_inner_size([800.0, 600.0])
+            .with_inner_size([900.0, 640.0])
+            .with_min_inner_size([640.0, 480.0])
             .with_title("Mouse TRAP"),
         ..Default::default()
     };
