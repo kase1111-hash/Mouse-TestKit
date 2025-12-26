@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::panels::{
     PollingPanel, StutterPanel, ClickPanel, JitterPanel,
-    DpiPanel, AccelPanel, DoubleClickPanel
+    DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
 };
 use crate::theme::{self, ThemeColors};
 
@@ -14,6 +14,7 @@ pub enum ActiveTest {
     ClickResponse,
     ClickSticky,
     LiftOff,
+    ScrollWheel,
     Dpi,
     AngleSnap,
     Acceleration,
@@ -30,6 +31,7 @@ pub struct MouseTestKitApp {
     dpi_panel: DpiPanel,
     accel_panel: AccelPanel,
     double_click_panel: DoubleClickPanel,
+    scroll_panel: ScrollPanel,
     dark_mode: bool,
     show_about: bool,
 }
@@ -48,6 +50,7 @@ impl MouseTestKitApp {
             dpi_panel: DpiPanel::new(),
             accel_panel: AccelPanel::new(),
             double_click_panel: DoubleClickPanel::new(),
+            scroll_panel: ScrollPanel::new(),
             dark_mode: true,
             show_about: false,
         }
@@ -63,14 +66,46 @@ impl MouseTestKitApp {
             .show(ctx, |ui| {
                 ui.add_space(20.0);
 
-                // Logo/Title with glassy effect
+                // Logo/Title with mouse head icon
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("Mouse-TestKit")
+                    // Draw mouse head icon (1 big circle + 2 ear circles)
+                    let icon_size = 40.0;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+                    let painter = ui.painter();
+                    let center = rect.center();
+
+                    // Main head circle
+                    let head_radius = 14.0;
+                    painter.circle_filled(center, head_radius, ThemeColors::accent());
+
+                    // Left ear
+                    let ear_radius = 7.0;
+                    let ear_offset_x = 12.0;
+                    let ear_offset_y = -10.0;
+                    painter.circle_filled(
+                        egui::pos2(center.x - ear_offset_x, center.y + ear_offset_y),
+                        ear_radius,
+                        ThemeColors::accent()
+                    );
+
+                    // Right ear
+                    painter.circle_filled(
+                        egui::pos2(center.x + ear_offset_x, center.y + ear_offset_y),
+                        ear_radius,
+                        ThemeColors::accent()
+                    );
+
+                    ui.add_space(8.0);
+
+                    ui.label(egui::RichText::new("Mouse TRAP")
                         .size(22.0)
                         .strong()
                         .color(ThemeColors::text_primary()));
+                    ui.label(egui::RichText::new("Test Response And Positioning")
+                        .size(10.0)
+                        .color(ThemeColors::text_muted()));
                     ui.label(egui::RichText::new("v0.1.0")
-                        .size(12.0)
+                        .size(11.0)
                         .color(ThemeColors::text_muted()));
                 });
 
@@ -117,6 +152,7 @@ impl MouseTestKitApp {
                 self.nav_button(ui, "Click Response", ActiveTest::ClickResponse, false);
                 self.nav_button(ui, "Click Stickiness", ActiveTest::ClickSticky, false);
                 self.nav_button(ui, "Lift-Off Jump", ActiveTest::LiftOff, false);
+                self.nav_button(ui, "Scroll Wheel", ActiveTest::ScrollWheel, false);
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
@@ -358,7 +394,7 @@ impl MouseTestKitApp {
     }
 
     fn render_about_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("About Mouse-TestKit")
+        egui::Window::new("About Mouse TRAP")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -375,10 +411,43 @@ impl MouseTestKitApp {
                 }))
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("Mouse-TestKit")
+                    // Draw mouse head icon in About dialog
+                    let icon_size = 50.0;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+                    let painter = ui.painter();
+                    let center = rect.center();
+
+                    // Main head circle
+                    let head_radius = 18.0;
+                    painter.circle_filled(center, head_radius, ThemeColors::accent());
+
+                    // Left ear
+                    let ear_radius = 9.0;
+                    let ear_offset_x = 15.0;
+                    let ear_offset_y = -12.0;
+                    painter.circle_filled(
+                        egui::pos2(center.x - ear_offset_x, center.y + ear_offset_y),
+                        ear_radius,
+                        ThemeColors::accent()
+                    );
+
+                    // Right ear
+                    painter.circle_filled(
+                        egui::pos2(center.x + ear_offset_x, center.y + ear_offset_y),
+                        ear_radius,
+                        ThemeColors::accent()
+                    );
+
+                    ui.add_space(8.0);
+
+                    ui.label(egui::RichText::new("Mouse TRAP")
                         .size(24.0)
                         .strong()
                         .color(ThemeColors::accent()));
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("Test Response And Positioning")
+                        .size(12.0)
+                        .color(ThemeColors::text_secondary()));
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("Version 0.1.0")
                         .size(12.0)
@@ -464,6 +533,7 @@ impl eframe::App for MouseTestKitApp {
                         ActiveTest::ClickResponse => self.click_panel.ui_response(ui, ctx),
                         ActiveTest::ClickSticky => self.click_panel.ui_sticky(ui, ctx),
                         ActiveTest::LiftOff => self.click_panel.ui_liftoff(ui, ctx),
+                        ActiveTest::ScrollWheel => self.scroll_panel.ui(ui, ctx),
                         ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx),
                         ActiveTest::AngleSnap => self.accel_panel.ui_angle(ui, ctx),
                         ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx),
