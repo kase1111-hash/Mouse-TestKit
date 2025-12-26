@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::panels::{
     PollingPanel, StutterPanel, ClickPanel, JitterPanel,
-    DpiPanel, AccelPanel, DoubleClickPanel
+    DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
 };
 use crate::theme::{self, ThemeColors};
 
@@ -14,6 +14,7 @@ pub enum ActiveTest {
     ClickResponse,
     ClickSticky,
     LiftOff,
+    ScrollWheel,
     Dpi,
     AngleSnap,
     Acceleration,
@@ -30,6 +31,7 @@ pub struct MouseTestKitApp {
     dpi_panel: DpiPanel,
     accel_panel: AccelPanel,
     double_click_panel: DoubleClickPanel,
+    scroll_panel: ScrollPanel,
     dark_mode: bool,
     show_about: bool,
 }
@@ -48,6 +50,7 @@ impl MouseTestKitApp {
             dpi_panel: DpiPanel::new(),
             accel_panel: AccelPanel::new(),
             double_click_panel: DoubleClickPanel::new(),
+            scroll_panel: ScrollPanel::new(),
             dark_mode: true,
             show_about: false,
         }
@@ -117,6 +120,7 @@ impl MouseTestKitApp {
                 self.nav_button(ui, "Click Response", ActiveTest::ClickResponse, false);
                 self.nav_button(ui, "Click Stickiness", ActiveTest::ClickSticky, false);
                 self.nav_button(ui, "Lift-Off Jump", ActiveTest::LiftOff, false);
+                self.nav_button(ui, "Scroll Wheel", ActiveTest::ScrollWheel, false);
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
@@ -464,6 +468,7 @@ impl eframe::App for MouseTestKitApp {
                         ActiveTest::ClickResponse => self.click_panel.ui_response(ui, ctx),
                         ActiveTest::ClickSticky => self.click_panel.ui_sticky(ui, ctx),
                         ActiveTest::LiftOff => self.click_panel.ui_liftoff(ui, ctx),
+                        ActiveTest::ScrollWheel => self.scroll_panel.ui(ui, ctx),
                         ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx),
                         ActiveTest::AngleSnap => self.accel_panel.ui_angle(ui, ctx),
                         ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx),
