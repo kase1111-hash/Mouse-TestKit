@@ -1,7 +1,7 @@
 /// Polling Rate Monitor
 /// Displays real-time mouse polling rate in Hz
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::input::{self, MouseEvent};
 
@@ -25,6 +25,7 @@ pub fn run() {
     let mut stats = PollingStats::new();
     let mut last_print = Instant::now();
     let mut timestamps: Vec<Instant> = Vec::new();
+    let mut last_event_time: Option<SystemTime> = None;
 
     crossterm::terminal::enable_raw_mode().ok();
 
@@ -42,7 +43,12 @@ pub fn run() {
         if let Ok(events) = device.fetch_events() {
             for ev in events {
                 if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
-                    timestamps.push(Instant::now());
+                    // Use event timestamp to deduplicate X/Y events from same poll
+                    let event_time = ev.timestamp();
+                    if last_event_time != Some(event_time) {
+                        timestamps.push(Instant::now());
+                        last_event_time = Some(event_time);
+                    }
                 }
             }
         }
