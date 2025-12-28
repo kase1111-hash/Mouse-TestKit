@@ -137,6 +137,7 @@ impl JitterPanel {
 
         // Capture real mouse input during sampling
         if self.is_sampling {
+            ctx.request_repaint();
             if let Some(start) = self.sample_start {
                 if start.elapsed().as_secs() >= 5 {
                     self.finish_sample();

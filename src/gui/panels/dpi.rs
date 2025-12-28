@@ -4,7 +4,7 @@ pub struct DpiPanel {
     is_running: bool,
     target_dpi: u32,
     target_distance_inches: f32,
-    accumulated_counts: i32,
+    accumulated_counts: f32,
     measured_dpi: f32,
     accuracy_percent: f32,
     start_pos: Option<(i32, i32)>,
@@ -24,7 +24,7 @@ impl DpiPanel {
             is_running: false,
             target_dpi: 800,
             target_distance_inches: 2.0,
-            accumulated_counts: 0,
+            accumulated_counts: 0.0,
             measured_dpi: 0.0,
             accuracy_percent: 0.0,
             start_pos: None,
@@ -104,7 +104,7 @@ impl DpiPanel {
                     ui.label(format!("Move mouse exactly {} inches in a straight line.", self.target_distance_inches));
                     ui.label("Use a ruler or mousepad markings for accuracy.");
                     ui.add_space(10.0);
-                    ui.label(format!("Accumulated counts: {}", self.accumulated_counts));
+                    ui.label(format!("Accumulated counts: {:.1}", self.accumulated_counts));
                     ui.label(format!("Expected counts: {:.0}", self.target_dpi as f32 * self.target_distance_inches));
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("Press SPACE when done moving").color(egui::Color32::YELLOW));
@@ -191,7 +191,7 @@ impl DpiPanel {
             if delta.x != 0.0 || delta.y != 0.0 {
                 // Accumulate the distance moved (using Euclidean distance)
                 let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
-                self.accumulated_counts += distance as i32;
+                self.accumulated_counts += distance as f32;
 
                 // Update current position for visualization
                 self.current_pos.0 += delta.x as i32;
@@ -202,13 +202,13 @@ impl DpiPanel {
 
     fn start_measurement(&mut self) {
         self.is_running = true;
-        self.accumulated_counts = 0;
+        self.accumulated_counts = 0.0;
         self.current_pos = (0, 0);
         self.start_pos = Some((0, 0));
     }
 
     fn finish_measurement(&mut self) {
-        if self.accumulated_counts == 0 {
+        if self.accumulated_counts == 0.0 {
             self.is_running = false;
             self.start_pos = None;
             return;
