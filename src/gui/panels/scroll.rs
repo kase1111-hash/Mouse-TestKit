@@ -29,6 +29,7 @@ pub struct ScrollPanel {
 }
 
 struct ScrollEvent {
+    #[allow(dead_code)]
     delta: f32,
     timestamp: Instant,
     direction_up: bool,
@@ -63,11 +64,9 @@ impl ScrollPanel {
                 if ui.button("Stop").clicked() {
                     self.is_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.is_running = true;
-                    self.reset();
-                }
+            } else if ui.button("Start").clicked() {
+                self.is_running = true;
+                self.reset();
             }
 
             if ui.button("Reset").clicked() {

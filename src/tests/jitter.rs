@@ -1,5 +1,5 @@
-/// Jitter Test
-/// Measures micro-movements when mouse is stationary
+//! Jitter Test
+//! Measures micro-movements when mouse is stationary
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
@@ -204,6 +204,7 @@ pub struct JitterSample {
 }
 
 /// Analyze jitter from movement data - exposed for testing
+#[allow(dead_code)]
 pub fn analyze_jitter_pub(movements: &[(i32, i32)]) -> JitterSample {
     analyze_jitter(movements)
 }

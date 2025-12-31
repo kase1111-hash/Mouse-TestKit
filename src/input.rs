@@ -168,7 +168,10 @@ pub enum MouseEvent {
     Move { dx: i32, dy: i32 },
     ButtonPress(MouseButton),
     ButtonRelease(MouseButton),
-    Scroll { delta: i32 },
+    Scroll {
+        #[allow(dead_code)]
+        delta: i32,
+    },
 }
 
 /// Mouse button identifiers.

@@ -1,5 +1,5 @@
-/// Industry Standard Tests
-/// Runs all standard mouse testing protocols
+//! Industry Standard Tests
+//! Runs all standard mouse testing protocols
 
 use std::io::{self, Write};
 

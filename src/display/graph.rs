@@ -1,4 +1,6 @@
-/// Simple ASCII graph renderer for terminal display
+//! Simple ASCII graph renderer for terminal display
+
+#![allow(dead_code)]
 
 pub struct Graph {
     pub title: String,

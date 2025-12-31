@@ -1,5 +1,5 @@
-/// Acceleration Detection
-/// Tests for unwanted mouse acceleration curves
+//! Acceleration Detection
+//! Tests for unwanted mouse acceleration curves
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
@@ -35,7 +35,7 @@ pub fn run() {
     device.grab().ok();
 
     let mut total_counts: i64 = 0;
-    let mut total_time: Duration = Duration::ZERO;
+    let _total_time: Duration = Duration::ZERO;
     let mut move_start: Option<Instant> = None;
     let mut slow_samples: Vec<AccelSample> = Vec::new();
     let mut fast_samples: Vec<AccelSample> = Vec::new();
@@ -206,6 +206,7 @@ fn wait_for_enter() {
 
 struct AccelSample {
     counts: i64,
+    #[allow(dead_code)]
     time: Duration,
     speed: f64,
 }

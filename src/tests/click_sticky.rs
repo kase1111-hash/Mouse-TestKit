@@ -1,5 +1,5 @@
-/// Click Stickiness Test
-/// Tests for stuck or delayed click release
+//! Click Stickiness Test
+//! Tests for stuck or delayed click release
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -138,11 +138,13 @@ fn wait_for_enter() {
 }
 
 pub struct ClickHold {
+    #[allow(dead_code)]
     pub button: String,
     pub duration_ms: f64,
     pub is_sticky: bool,
 }
 
+#[allow(dead_code)]
 pub fn is_sticky(duration_ms: f64) -> bool {
     duration_ms > STICKY_THRESHOLD_MS
 }

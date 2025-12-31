@@ -78,10 +78,8 @@ impl StutterPanel {
                 if ui.button("Stop").clicked() {
                     self.is_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.start();
-                }
+            } else if ui.button("Start").clicked() {
+                self.start();
             }
 
             if ui.button("Reset").clicked() {

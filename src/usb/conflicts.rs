@@ -1,5 +1,5 @@
-/// USB Conflict Scanner
-/// Shows devices connected to the same USB controller/hub
+//! USB Conflict Scanner
+//! Shows devices connected to the same USB controller/hub
 
 use std::fs;
 use std::path::Path;
@@ -214,11 +214,13 @@ pub enum UsbClass {
     Other,
 }
 
+#[allow(dead_code)]
 pub struct UsbBus {
     pub id: u8,
     pub devices: Vec<UsbDevice>,
 }
 
+#[allow(dead_code)]
 impl UsbBus {
     pub fn has_conflicts(&self) -> bool {
         let has_hid = self.devices.iter().any(|d| matches!(d.device_class, UsbClass::Hid));

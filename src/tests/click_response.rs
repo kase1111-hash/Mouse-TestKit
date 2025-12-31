@@ -1,5 +1,5 @@
-/// Click Response Test
-/// Measures click latency and response time
+//! Click Response Test
+//! Measures click latency and response time
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode};
@@ -120,5 +120,6 @@ fn wait_for_enter() {
 #[derive(Clone)]
 pub struct ClickResult {
     pub latency_ms: f64,
+    #[allow(dead_code)]
     pub button: MouseButton,
 }

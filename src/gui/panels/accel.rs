@@ -80,13 +80,11 @@ impl AccelPanel {
                     self.angle_running = false;
                     self.analyze_angle_results();
                 }
-            } else {
-                if ui.button("Start Test").clicked() {
-                    self.angle_running = true;
-                    self.angle_points.clear();
-                    self.angle_result = None;
-                    self.angle_accumulated_pos = (0.0, 0.0);
-                }
+            } else if ui.button("Start Test").clicked() {
+                self.angle_running = true;
+                self.angle_points.clear();
+                self.angle_result = None;
+                self.angle_accumulated_pos = (0.0, 0.0);
             }
 
             if ui.button("Clear Data").clicked() {
@@ -233,7 +231,7 @@ impl AccelPanel {
                 let angle = dy.atan2(dx).to_degrees().abs();
 
                 // Check for near-horizontal (0° or 180°) or near-vertical (90°)
-                if angle < 5.0 || angle > 175.0 {
+                if !(5.0..=175.0).contains(&angle) {
                     h_count += 1;
                 } else if (angle - 90.0).abs() < 5.0 {
                     v_count += 1;
@@ -271,10 +269,8 @@ impl AccelPanel {
                 if ui.button("Stop Test").clicked() {
                     self.stop_test();
                 }
-            } else {
-                if ui.button("Start Test").clicked() {
-                    self.start_test();
-                }
+            } else if ui.button("Start Test").clicked() {
+                self.start_test();
             }
 
             if ui.button("Clear Data").clicked() {
@@ -488,7 +484,7 @@ impl AccelPanel {
         let fast_avg: f64 = self.fast_movements.iter().sum::<f64>() / self.fast_movements.len() as f64;
 
         let accel_factor = fast_avg / slow_avg.max(0.001);
-        let has_acceleration = accel_factor > 1.15 || accel_factor < 0.85;
+        let has_acceleration = !(0.85..=1.15).contains(&accel_factor);
 
         let sample_count = (self.slow_movements.len() + self.fast_movements.len()) as f32;
         let confidence = (sample_count / 50.0 * 100.0).min(100.0);

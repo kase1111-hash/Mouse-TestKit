@@ -1,5 +1,5 @@
-/// Double-Click Test
-/// Detects faulty switches causing unintended double-clicks
+//! Double-Click Test
+//! Detects faulty switches causing unintended double-clicks
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
@@ -189,6 +189,7 @@ fn wait_for_enter() {
 }
 
 struct ClickEvent {
+    #[allow(dead_code)]
     button: MouseButton,
     timestamp: Instant,
 }

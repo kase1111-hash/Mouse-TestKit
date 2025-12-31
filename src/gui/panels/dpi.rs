@@ -108,10 +108,8 @@ impl DpiPanel {
                 self.is_running = false;
                 self.start_pos = None;
             }
-        } else {
-            if space_pressed {
-                self.start_measurement();
-            }
+        } else if space_pressed {
+            self.start_measurement();
         }
 
         // Controls display
@@ -253,7 +251,7 @@ impl DpiPanel {
             return;
         }
 
-        self.measured_dpi = self.accumulated_counts as f32 / self.target_distance_inches;
+        self.measured_dpi = self.accumulated_counts / self.target_distance_inches;
 
         // Calculate accuracy as percentage of target (can be over or under)
         let raw_accuracy = self.measured_dpi / self.target_dpi as f32 * 100.0;

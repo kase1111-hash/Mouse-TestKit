@@ -1,6 +1,6 @@
-/// Configuration persistence for Mouse TRAP
-///
-/// Saves and loads user preferences to a config file
+//! Configuration persistence for Mouse TRAP
+//!
+//! Saves and loads user preferences to a config file
 
 use serde::{Deserialize, Serialize};
 use std::fs;

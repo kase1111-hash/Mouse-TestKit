@@ -122,22 +122,20 @@ impl ClickPanel {
                 if ui.button("Stop").clicked() {
                     self.response_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.response_running = true;
-                    self.response_click_count = 0;
-                    self.response_right_click_count = 0;
-                    self.response_hold_times.clear();
-                    self.response_right_hold_times.clear();
-                    self.response_click_times.clear();
-                    self.response_right_click_times.clear();
-                    self.response_cps = 0.0;
-                    self.response_right_cps = 0.0;
-                    self.response_press_start = None;
-                    self.response_right_press_start = None;
-                    self.response_is_pressed = false;
-                    self.response_right_is_pressed = false;
-                }
+            } else if ui.button("Start").clicked() {
+                self.response_running = true;
+                self.response_click_count = 0;
+                self.response_right_click_count = 0;
+                self.response_hold_times.clear();
+                self.response_right_hold_times.clear();
+                self.response_click_times.clear();
+                self.response_right_click_times.clear();
+                self.response_cps = 0.0;
+                self.response_right_cps = 0.0;
+                self.response_press_start = None;
+                self.response_right_press_start = None;
+                self.response_is_pressed = false;
+                self.response_right_is_pressed = false;
             }
 
             if ui.button("Reset").clicked() {
@@ -371,18 +369,16 @@ impl ClickPanel {
                 if ui.button("Stop").clicked() {
                     self.sticky_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.sticky_running = true;
-                    self.sticky_holds.clear();
-                    self.sticky_right_holds.clear();
-                    self.sticky_count = 0;
-                    self.sticky_right_count = 0;
-                    self.sticky_press_start = None;
-                    self.sticky_right_press_start = None;
-                    self.sticky_is_pressed = false;
-                    self.sticky_right_is_pressed = false;
-                }
+            } else if ui.button("Start").clicked() {
+                self.sticky_running = true;
+                self.sticky_holds.clear();
+                self.sticky_right_holds.clear();
+                self.sticky_count = 0;
+                self.sticky_right_count = 0;
+                self.sticky_press_start = None;
+                self.sticky_right_press_start = None;
+                self.sticky_is_pressed = false;
+                self.sticky_right_is_pressed = false;
             }
 
             if ui.button("Reset").clicked() {
@@ -555,15 +551,13 @@ impl ClickPanel {
                 if ui.button("Stop").clicked() {
                     self.liftoff_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.liftoff_running = true;
-                    self.liftoff_jumps = 0;
-                    self.liftoff_position = (0, 0);
-                    self.liftoff_jump_events.clear();
-                    self.liftoff_is_idle = false;
-                    self.liftoff_last_move = Instant::now();
-                }
+            } else if ui.button("Start").clicked() {
+                self.liftoff_running = true;
+                self.liftoff_jumps = 0;
+                self.liftoff_position = (0, 0);
+                self.liftoff_jump_events.clear();
+                self.liftoff_is_idle = false;
+                self.liftoff_last_move = Instant::now();
             }
 
             if ui.button("Reset").clicked() {
