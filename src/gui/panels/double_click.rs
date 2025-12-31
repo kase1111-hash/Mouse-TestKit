@@ -1,6 +1,8 @@
 use eframe::egui;
 use std::time::Instant;
 
+use crate::export::DoubleClickExport;
+
 pub struct DoubleClickPanel {
     clicks: Vec<Instant>,
     intervals: Vec<f64>,
@@ -226,5 +228,22 @@ impl DoubleClickPanel {
         self.max_interval = 0.0;
         self.double_click_count = 0;
         self.accidental_double_clicks = 0;
+    }
+
+    pub fn export(&self) -> Option<DoubleClickExport> {
+        if self.clicks.is_empty() {
+            return None;
+        }
+        Some(DoubleClickExport {
+            total_clicks: self.clicks.len(),
+            double_click_count: self.double_click_count,
+            accidental_double_clicks: self.accidental_double_clicks,
+            avg_interval_ms: self.avg_interval,
+            min_interval_ms: if self.min_interval == f64::MAX { 0.0 } else { self.min_interval },
+            max_interval_ms: self.max_interval,
+            threshold_ms: self.threshold_ms,
+            consistency_percent: self.calculate_consistency(),
+            intervals: self.intervals.clone(),
+        })
     }
 }

@@ -3,6 +3,8 @@ use egui_plot::{Plot, Line, PlotPoints};
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::export::PollingRateExport;
+
 pub struct PollingPanel {
     is_running: bool,
     current_hz: u32,
@@ -185,5 +187,19 @@ impl PollingPanel {
         self.history.clear();
         self.event_times.clear();
         self.last_hz_calc = None;
+    }
+
+    pub fn export(&self) -> Option<PollingRateExport> {
+        if self.samples == 0 {
+            return None;
+        }
+        Some(PollingRateExport {
+            current_hz: self.current_hz,
+            min_hz: if self.min_hz == u32::MAX { 0 } else { self.min_hz },
+            max_hz: self.max_hz,
+            avg_hz: self.avg_hz,
+            samples: self.samples,
+            history: self.history.iter().cloned().collect(),
+        })
     }
 }
