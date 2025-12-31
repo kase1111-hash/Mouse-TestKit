@@ -44,10 +44,8 @@ impl JitterPanel {
         ui.horizontal(|ui| {
             if self.is_sampling {
                 ui.label("Sampling...");
-            } else {
-                if ui.button("Take Sample (5s)").clicked() {
-                    self.start_sample();
-                }
+            } else if ui.button("Take Sample (5s)").clicked() {
+                self.start_sample();
             }
 
             if ui.button("Clear All").clicked() {

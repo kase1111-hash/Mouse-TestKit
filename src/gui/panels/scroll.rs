@@ -64,11 +64,9 @@ impl ScrollPanel {
                 if ui.button("Stop").clicked() {
                     self.is_running = false;
                 }
-            } else {
-                if ui.button("Start").clicked() {
-                    self.is_running = true;
-                    self.reset();
-                }
+            } else if ui.button("Start").clicked() {
+                self.is_running = true;
+                self.reset();
             }
 
             if ui.button("Reset").clicked() {

@@ -1,7 +1,7 @@
-/// Terminal handling utilities with proper error reporting
-///
-/// Provides safe wrappers around terminal operations that give users
-/// meaningful feedback when something goes wrong.
+//! Terminal handling utilities with proper error reporting
+//!
+//! Provides safe wrappers around terminal operations that give users
+//! meaningful feedback when something goes wrong.
 
 use std::io::{self, Write};
 

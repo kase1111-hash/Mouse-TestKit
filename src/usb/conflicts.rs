@@ -1,5 +1,5 @@
-/// USB Conflict Scanner
-/// Shows devices connected to the same USB controller/hub
+//! USB Conflict Scanner
+//! Shows devices connected to the same USB controller/hub
 
 use std::fs;
 use std::path::Path;
