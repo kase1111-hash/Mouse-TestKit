@@ -12,6 +12,8 @@ pub struct DpiPanel {
     start_pos: Option<(i32, i32)>,
     current_pos: (i32, i32),
     samples: Vec<DpiSample>,
+    last_saved_dpi: u32,
+    last_saved_distance: f32,
 }
 
 struct DpiSample {
@@ -32,7 +34,42 @@ impl DpiPanel {
             start_pos: None,
             current_pos: (0, 0),
             samples: Vec::new(),
+            last_saved_dpi: 800,
+            last_saved_distance: 2.0,
         }
+    }
+
+    /// Set target DPI (from config)
+    pub fn set_target_dpi(&mut self, value: u32) {
+        self.target_dpi = value;
+        self.last_saved_dpi = value;
+    }
+
+    /// Get target DPI
+    pub fn get_target_dpi(&self) -> u32 {
+        self.target_dpi
+    }
+
+    /// Set target distance (from config)
+    pub fn set_target_distance(&mut self, value: f32) {
+        self.target_distance_inches = value;
+        self.last_saved_distance = value;
+    }
+
+    /// Get target distance
+    pub fn get_target_distance(&self) -> f32 {
+        self.target_distance_inches
+    }
+
+    /// Check if settings have changed since last save
+    pub fn settings_changed(&mut self) -> bool {
+        let changed = self.target_dpi != self.last_saved_dpi ||
+                      (self.target_distance_inches - self.last_saved_distance).abs() > 0.01;
+        if changed {
+            self.last_saved_dpi = self.target_dpi;
+            self.last_saved_distance = self.target_distance_inches;
+        }
+        changed
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

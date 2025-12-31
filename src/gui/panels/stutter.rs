@@ -16,6 +16,7 @@ pub struct StutterPanel {
     max_delta: f64,
     last_move_time: Option<Instant>,
     threshold_multiplier: f64,
+    last_saved_threshold: f64,
 }
 
 impl StutterPanel {
@@ -31,7 +32,28 @@ impl StutterPanel {
             max_delta: 0.0,
             last_move_time: None,
             threshold_multiplier: 2.0,
+            last_saved_threshold: 2.0,
         }
+    }
+
+    /// Set the stutter threshold multiplier (from config)
+    pub fn set_threshold_multiplier(&mut self, value: f64) {
+        self.threshold_multiplier = value;
+        self.last_saved_threshold = value;
+    }
+
+    /// Get the current threshold multiplier
+    pub fn get_threshold_multiplier(&self) -> f64 {
+        self.threshold_multiplier
+    }
+
+    /// Check if settings have changed since last save
+    pub fn settings_changed(&mut self) -> bool {
+        let changed = (self.threshold_multiplier - self.last_saved_threshold).abs() > 0.01;
+        if changed {
+            self.last_saved_threshold = self.threshold_multiplier;
+        }
+        changed
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
