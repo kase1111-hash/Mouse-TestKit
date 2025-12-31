@@ -3,7 +3,11 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 pub const JUMP_THRESHOLD_PX: f64 = 50.0;
 pub const IDLE_THRESHOLD_MS: u64 = 100;
@@ -23,6 +27,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut last_event_time = Instant::now();
@@ -49,7 +54,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                if let Some(MouseEvent::Move { dx, dy }) = input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                if let Some(MouseEvent::Move { dx, dy }) = parsed {
                     accumulated_dx += dx;
                     accumulated_dy += dy;
                     position.0 += dx as i64;

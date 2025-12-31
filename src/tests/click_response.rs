@@ -3,7 +3,11 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent, MouseButton};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent, MouseButton};
 
 const NUM_TRIALS: usize = 10;
 
@@ -38,6 +42,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut results: Vec<ClickResult> = Vec::new();
@@ -60,7 +65,12 @@ pub fn run() {
         while prompt_time.elapsed() < timeout {
             if let Ok(events) = device.fetch_events() {
                 for ev in events {
-                    if let Some(MouseEvent::ButtonPress(button)) = input::parse_event(&ev) {
+                    #[cfg(target_os = "linux")]
+                    let parsed = input::parse_event(&ev);
+                    #[cfg(target_os = "windows")]
+                    let parsed = Some(ev);
+
+                    if let Some(MouseEvent::ButtonPress(button)) = parsed {
                         let latency = prompt_time.elapsed().as_secs_f64() * 1000.0;
                         results.push(ClickResult { latency_ms: latency, button });
                         println!("Response time: {:.1} ms ({:?})", latency, button);

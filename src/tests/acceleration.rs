@@ -4,7 +4,11 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 pub fn run() {
     println!("\n=== Acceleration Detection ===");
@@ -27,6 +31,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut total_counts: i64 = 0;
@@ -104,7 +109,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                if let Some(MouseEvent::Move { dx, .. }) = input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                if let Some(MouseEvent::Move { dx, .. }) = parsed {
                     if dx != 0 {
                         if move_start.is_none() {
                             move_start = Some(Instant::now());
