@@ -1,5 +1,5 @@
-/// Lift-Off Distance Jump Test
-/// Tests for cursor jump during mouse lift
+//! Lift-Off Distance Jump Test
+//! Tests for cursor jump during mouse lift
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -149,6 +149,7 @@ impl LiftEvent {
     }
 }
 
+#[allow(dead_code)]
 pub fn is_jump(distance: f64) -> bool {
     distance > JUMP_THRESHOLD_PX
 }

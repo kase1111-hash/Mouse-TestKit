@@ -1,5 +1,5 @@
-/// Angle Snapping Detection
-/// Detects if mouse has angle snapping/prediction enabled
+//! Angle Snapping Detection
+//! Detects if mouse has angle snapping/prediction enabled
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
@@ -207,6 +207,7 @@ pub struct LineAnalysis {
 }
 
 /// Exposed for testing
+#[allow(dead_code)]
 pub fn analyze_line_pub(movements: &[(i32, i32)]) -> LineAnalysis {
     analyze_line(movements)
 }

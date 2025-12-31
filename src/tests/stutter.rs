@@ -1,5 +1,5 @@
-/// Stutter Detection Test
-/// Detects mouse movement stutter and irregularities
+//! Stutter Detection Test
+//! Detects mouse movement stutter and irregularities
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -200,8 +200,11 @@ fn wait_for_enter() {
 
 #[derive(Clone)]
 pub struct StutterEvent {
+    #[allow(dead_code)]
     pub index: usize,
+    #[allow(dead_code)]
     pub delta_ms: f64,
+    #[allow(dead_code)]
     pub deviation_ms: f64,
     pub severity: StutterSeverity,
 }

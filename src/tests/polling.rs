@@ -1,5 +1,5 @@
-/// Polling Rate Monitor
-/// Displays real-time mouse polling rate in Hz
+//! Polling Rate Monitor
+//! Displays real-time mouse polling rate in Hz
 
 use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};

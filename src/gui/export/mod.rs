@@ -316,6 +316,7 @@ impl TestResultsExport {
 }
 
 /// Helper to save export to file
+#[allow(dead_code)]
 pub fn save_to_file(content: &str, path: &std::path::Path) -> std::io::Result<()> {
     std::fs::write(path, content)
 }

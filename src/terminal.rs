@@ -79,10 +79,12 @@ pub fn wait_for_enter() {
 }
 
 /// Cleanup handler for tests - restores terminal state
+#[allow(dead_code)]
 pub struct TerminalGuard {
     raw_mode_enabled: bool,
 }
 
+#[allow(dead_code)]
 impl TerminalGuard {
     pub fn new() -> Self {
         let raw_mode_enabled = enable_raw_mode();

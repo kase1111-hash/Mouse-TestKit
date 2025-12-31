@@ -29,6 +29,7 @@ pub struct ScrollPanel {
 }
 
 struct ScrollEvent {
+    #[allow(dead_code)]
     delta: f32,
     timestamp: Instant,
     direction_up: bool,

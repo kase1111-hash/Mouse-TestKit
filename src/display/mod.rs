@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub mod graph;
 
 /// Prints a simple horizontal bar

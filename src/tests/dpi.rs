@@ -1,5 +1,5 @@
-/// DPI Accuracy Test
-/// Verifies mouse DPI matches advertised/configured value
+//! DPI Accuracy Test
+//! Verifies mouse DPI matches advertised/configured value
 
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
@@ -52,7 +52,7 @@ pub fn run() {
     let mut total_counts_y: i64 = 0;
     let mut samples: Vec<DpiSample> = Vec::new();
     let mut last_print = Instant::now();
-    let mut sample_start = Instant::now();
+    let mut _sample_start = Instant::now();
 
     crossterm::terminal::enable_raw_mode().ok();
 
@@ -67,7 +67,7 @@ pub fn run() {
                     KeyCode::Char('r') => {
                         total_counts_x = 0;
                         total_counts_y = 0;
-                        sample_start = Instant::now();
+                        _sample_start = Instant::now();
                         println!("\r\x1B[KReset. Move one inch and press SPACE.");
                     }
                     KeyCode::Char(' ') => {
@@ -86,7 +86,7 @@ pub fn run() {
 
                             total_counts_x = 0;
                             total_counts_y = 0;
-                            sample_start = Instant::now();
+                            _sample_start = Instant::now();
                         } else {
                             println!("\r\x1B[KNot enough movement detected. Try again.");
                         }
