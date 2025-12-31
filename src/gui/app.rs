@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use crate::config::Config;
 use crate::panels::{
     PollingPanel, StutterPanel, ClickPanel, JitterPanel,
     DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
@@ -36,6 +37,8 @@ pub struct MouseTestKitApp {
     dark_mode: bool,
     show_about: bool,
     export_status: Option<String>,
+    config: Config,
+    config_dirty: bool,
 }
 
 impl MouseTestKitApp {
@@ -43,19 +46,55 @@ impl MouseTestKitApp {
         // Set up custom fonts and style
         theme::setup_custom_style(&cc.egui_ctx);
 
+        // Load saved configuration
+        let config = Config::load();
+
+        // Create panels with config values
+        let mut stutter_panel = StutterPanel::new();
+        stutter_panel.set_threshold_multiplier(config.stutter_threshold_multiplier);
+
+        let mut dpi_panel = DpiPanel::new();
+        dpi_panel.set_target_dpi(config.dpi_target);
+        dpi_panel.set_target_distance(config.dpi_distance_inches);
+
+        let mut double_click_panel = DoubleClickPanel::new();
+        double_click_panel.set_threshold_ms(config.double_click_threshold_ms);
+
         Self {
             active_test: ActiveTest::Dashboard,
             polling_panel: PollingPanel::new(),
-            stutter_panel: StutterPanel::new(),
+            stutter_panel,
             click_panel: ClickPanel::new(),
             jitter_panel: JitterPanel::new(),
-            dpi_panel: DpiPanel::new(),
+            dpi_panel,
             accel_panel: AccelPanel::new(),
-            double_click_panel: DoubleClickPanel::new(),
+            double_click_panel,
             scroll_panel: ScrollPanel::new(),
-            dark_mode: true,
+            dark_mode: config.dark_mode,
             show_about: false,
             export_status: None,
+            config,
+            config_dirty: false,
+        }
+    }
+
+    /// Collect current settings and update config
+    fn update_config(&mut self) {
+        self.config.dark_mode = self.dark_mode;
+        self.config.stutter_threshold_multiplier = self.stutter_panel.get_threshold_multiplier();
+        self.config.dpi_target = self.dpi_panel.get_target_dpi();
+        self.config.dpi_distance_inches = self.dpi_panel.get_target_distance();
+        self.config.double_click_threshold_ms = self.double_click_panel.get_threshold_ms();
+    }
+
+    /// Save config to disk if dirty
+    fn save_config_if_needed(&mut self) {
+        if self.config_dirty {
+            self.update_config();
+            if let Err(e) = self.config.save() {
+                eprintln!("Warning: Failed to save config: {}", e);
+            }
+            self.config_dirty = false;
         }
     }
 
@@ -231,6 +270,7 @@ impl MouseTestKitApp {
 
                         if ui.add(theme_btn).clicked() {
                             self.dark_mode = !self.dark_mode;
+                            self.config_dirty = true;
                         }
 
                         let about_btn = egui::Button::new(
@@ -603,6 +643,16 @@ impl MouseTestKitApp {
 
 impl eframe::App for MouseTestKitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check if any panel settings changed and mark config dirty
+        if self.stutter_panel.settings_changed() ||
+           self.dpi_panel.settings_changed() ||
+           self.double_click_panel.settings_changed() {
+            self.config_dirty = true;
+        }
+
+        // Save config if dirty (debounced - only saves once changes stop)
+        self.save_config_if_needed();
+
         // Apply theme - always reapply custom style after setting visuals
         if self.dark_mode {
             ctx.set_visuals(egui::Visuals::dark());

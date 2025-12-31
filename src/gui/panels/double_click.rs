@@ -12,6 +12,7 @@ pub struct DoubleClickPanel {
     double_click_count: u32,
     accidental_double_clicks: u32,
     threshold_ms: f64,
+    last_saved_threshold: f64,
 }
 
 impl DoubleClickPanel {
@@ -25,7 +26,28 @@ impl DoubleClickPanel {
             double_click_count: 0,
             accidental_double_clicks: 0,
             threshold_ms: 50.0,
+            last_saved_threshold: 50.0,
         }
+    }
+
+    /// Set threshold (from config)
+    pub fn set_threshold_ms(&mut self, value: f64) {
+        self.threshold_ms = value;
+        self.last_saved_threshold = value;
+    }
+
+    /// Get threshold
+    pub fn get_threshold_ms(&self) -> f64 {
+        self.threshold_ms
+    }
+
+    /// Check if settings have changed since last save
+    pub fn settings_changed(&mut self) -> bool {
+        let changed = (self.threshold_ms - self.last_saved_threshold).abs() > 0.01;
+        if changed {
+            self.last_saved_threshold = self.threshold_ms;
+        }
+        changed
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
