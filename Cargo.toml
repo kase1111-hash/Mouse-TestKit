@@ -20,7 +20,7 @@ rfd = "0.15"
 evdev = "0.12"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "errhandlingapi", "libloaderapi"] }
+winapi = { version = "0.3", features = ["winuser", "errhandlingapi", "libloaderapi", "hidusage"] }
 raw-window-handle = "0.6"
 
 [[bin]]

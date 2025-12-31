@@ -4,7 +4,11 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 const MIN_SAMPLES: usize = 100;
 
@@ -26,6 +30,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut movements: Vec<(i32, i32)> = Vec::new();
@@ -67,7 +72,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                if let Some(MouseEvent::Move { dx, dy }) = input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                if let Some(MouseEvent::Move { dx, dy }) = parsed {
                     if dx != 0 || dy != 0 {
                         movements.push((dx, dy));
                     }

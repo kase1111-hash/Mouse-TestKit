@@ -4,7 +4,11 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent, MouseButton};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent, MouseButton};
 
 const DOUBLE_CLICK_THRESHOLD_MS: f64 = 50.0; // Clicks faster than this are suspicious
 
@@ -26,6 +30,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut clicks: Vec<ClickEvent> = Vec::new();
@@ -47,7 +52,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                if let Some(MouseEvent::ButtonPress(button)) = input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                if let Some(MouseEvent::ButtonPress(button)) = parsed {
                     let now = Instant::now();
 
                     // Check for double-click

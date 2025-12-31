@@ -4,7 +4,11 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 pub fn run() {
     println!("\n=== DPI Accuracy Test ===");
@@ -41,6 +45,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut total_counts_x: i64 = 0;
@@ -93,7 +98,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                if let Some(MouseEvent::Move { dx, dy }) = input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                if let Some(MouseEvent::Move { dx, dy }) = parsed {
                     total_counts_x += dx as i64;
                     total_counts_y += dy as i64;
                 }

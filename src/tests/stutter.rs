@@ -3,7 +3,11 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 const STUTTER_THRESHOLD_MS: f64 = 4.0;
 
@@ -21,7 +25,9 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
+    // Windows doesn't require device grab - Raw Input works without exclusive access
 
     let mut timestamps: Vec<Instant> = Vec::new();
     let mut deltas: Vec<f64> = Vec::new();
@@ -39,9 +45,26 @@ pub fn run() {
             }
         }
 
+        #[cfg(target_os = "linux")]
         if let Ok(events) = device.fetch_events() {
             for ev in events {
                 if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
+                    let now = Instant::now();
+                    if let Some(last) = timestamps.last() {
+                        let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
+                        deltas.push(delta);
+                        if deltas.len() > 100 { deltas.remove(0); }
+                    }
+                    timestamps.push(now);
+                    if timestamps.len() > 1000 { timestamps.remove(0); }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if let Ok(events) = device.fetch_events() {
+            for ev in events {
+                if let MouseEvent::Move { .. } = ev {
                     let now = Instant::now();
                     if let Some(last) = timestamps.last() {
                         let delta = now.duration_since(*last).as_secs_f64() * 1000.0;

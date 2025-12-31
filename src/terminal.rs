@@ -5,6 +5,10 @@
 
 use std::io::{self, Write};
 
+// Windows-specific imports
+#[cfg(target_os = "windows")]
+use crate::input_windows::MouseDevice;
+
 /// Enable raw mode with error reporting
 /// Returns true if successful, false otherwise
 pub fn enable_raw_mode() -> bool {
@@ -45,6 +49,15 @@ pub fn grab_device(device: &mut evdev::Device) -> bool {
             false
         }
     }
+}
+
+/// Grab a device on Windows (no-op, Raw Input handles this differently)
+/// Returns true always since Windows Raw Input doesn't require exclusive access
+#[cfg(target_os = "windows")]
+pub fn grab_device(_device: &mut MouseDevice) -> bool {
+    // Windows Raw Input API doesn't require exclusive device grabbing
+    // The input is received via WM_INPUT messages without blocking other apps
+    true
 }
 
 /// Flush stdout with error handling

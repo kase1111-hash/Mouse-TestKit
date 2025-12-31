@@ -3,7 +3,11 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+
+#[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent, MouseButton};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent, MouseButton};
 
 pub const STICKY_THRESHOLD_MS: f64 = 100.0;
 
@@ -22,6 +26,7 @@ pub fn run() {
         }
     };
 
+    #[cfg(target_os = "linux")]
     device.grab().ok();
 
     let mut click_holds: Vec<ClickHold> = Vec::new();
@@ -41,7 +46,12 @@ pub fn run() {
 
         if let Ok(events) = device.fetch_events() {
             for ev in events {
-                match input::parse_event(&ev) {
+                #[cfg(target_os = "linux")]
+                let parsed = input::parse_event(&ev);
+                #[cfg(target_os = "windows")]
+                let parsed = Some(ev);
+
+                match parsed {
                     Some(MouseEvent::ButtonPress(button)) => {
                         pending_presses.push((Instant::now(), button));
                     }

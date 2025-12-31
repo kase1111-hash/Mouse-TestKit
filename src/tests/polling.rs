@@ -3,8 +3,12 @@
 
 use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use crate::input::{self, MouseEvent};
 use crate::terminal;
+
+#[cfg(target_os = "linux")]
+use crate::input::{self, MouseEvent};
+#[cfg(target_os = "windows")]
+use crate::input_windows::{self as input, MouseEvent};
 
 pub fn run() {
     println!("\n=== Polling Rate Monitor ===");
@@ -41,6 +45,7 @@ pub fn run() {
         }
 
         // Read mouse events
+        #[cfg(target_os = "linux")]
         if let Ok(events) = device.fetch_events() {
             for ev in events {
                 if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
@@ -50,6 +55,16 @@ pub fn run() {
                         timestamps.push(Instant::now());
                         last_event_time = Some(event_time);
                     }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        if let Ok(events) = device.fetch_events() {
+            for ev in events {
+                if let MouseEvent::Move { .. } = ev {
+                    // Windows Raw Input already deduplicates events
+                    timestamps.push(Instant::now());
                 }
             }
         }
