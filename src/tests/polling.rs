@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant, SystemTime};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::input::{self, MouseEvent};
+use crate::terminal;
 
 pub fn run() {
     println!("\n=== Polling Rate Monitor ===");
@@ -19,15 +20,15 @@ pub fn run() {
         }
     };
 
-    // Set non-blocking
-    device.grab().ok(); // Grab device for exclusive access
+    // Set non-blocking and grab device
+    terminal::grab_device(&mut device);
 
     let mut stats = PollingStats::new();
     let mut last_print = Instant::now();
     let mut timestamps: Vec<Instant> = Vec::new();
     let mut last_event_time: Option<SystemTime> = None;
 
-    crossterm::terminal::enable_raw_mode().ok();
+    terminal::enable_raw_mode();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
@@ -95,7 +96,7 @@ pub fn run() {
         }
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    terminal::disable_raw_mode();
 
     println!("\n\nPolling rate test complete.");
     if stats.min_hz < u32::MAX {
@@ -103,13 +104,11 @@ pub fn run() {
             stats.min_hz, stats.max_hz, stats.avg_hz);
     }
 
-    wait_for_enter();
+    terminal::wait_for_enter();
 }
 
 fn wait_for_enter() {
-    println!("\nPress Enter to return to menu...");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
+    terminal::wait_for_enter();
 }
 
 pub struct PollingStats {

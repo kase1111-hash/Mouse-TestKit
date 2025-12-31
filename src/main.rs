@@ -4,6 +4,8 @@ mod usb;
 mod display;
 #[cfg(target_os = "linux")]
 mod input;
+#[cfg(target_os = "linux")]
+mod terminal;
 
 #[cfg(target_os = "linux")]
 use std::io::{self, Write};
@@ -83,9 +85,17 @@ fn print_menu() {
 #[cfg(target_os = "linux")]
 fn get_input(prompt: &str) -> String {
     print!("{}", prompt);
-    io::stdout().flush().unwrap();
+    if let Err(e) = io::stdout().flush() {
+        eprintln!("Warning: Failed to flush output: {}", e);
+    }
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input
+    match io::stdin().read_line(&mut input) {
+        Ok(_) => input,
+        Err(e) => {
+            eprintln!("Error reading input: {}", e);
+            eprintln!("Please check that stdin is available and try again.");
+            String::new()
+        }
+    }
 }

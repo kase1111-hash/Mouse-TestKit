@@ -118,7 +118,7 @@ pub fn run() {
         let avg_accuracy: f64 = samples.iter().map(|s| s.accuracy).sum::<f64>() / samples.len() as f64;
 
         let mut dpis: Vec<f64> = samples.iter().map(|s| s.measured_dpi).collect();
-        dpis.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        dpis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("Expected DPI: {:.0}", expected_dpi);
         println!("Samples taken: {}\n", samples.len());

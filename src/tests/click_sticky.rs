@@ -98,7 +98,7 @@ pub fn run() {
         let avg = click_holds.iter().map(|h| h.duration_ms).sum::<f64>() / total as f64;
 
         let mut durations: Vec<f64> = click_holds.iter().map(|h| h.duration_ms).collect();
-        durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("Total clicks analyzed: {}", total);
         println!("Sticky clicks (>{}ms): {}", STICKY_THRESHOLD_MS, sticky_count);

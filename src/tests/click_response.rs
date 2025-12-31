@@ -82,7 +82,7 @@ pub fn run() {
     if !results.is_empty() {
         let avg = results.iter().map(|r| r.latency_ms).sum::<f64>() / results.len() as f64;
         let mut sorted: Vec<f64> = results.iter().map(|r| r.latency_ms).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("Results ({} clicks):", results.len());
         println!("  Average: {:.1} ms", avg);
