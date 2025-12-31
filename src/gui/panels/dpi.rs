@@ -1,5 +1,7 @@
 use eframe::egui;
 
+use crate::export::{DpiExport, DpiSampleExport};
+
 pub struct DpiPanel {
     is_running: bool,
     target_dpi: u32,
@@ -234,5 +236,21 @@ impl DpiPanel {
 
         self.is_running = false;
         self.start_pos = None;
+    }
+
+    pub fn export(&self) -> Option<DpiExport> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let avg_accuracy = self.samples.iter().map(|s| s.accuracy).sum::<f32>() / self.samples.len() as f32;
+        Some(DpiExport {
+            target_dpi: self.target_dpi,
+            samples: self.samples.iter().map(|s| DpiSampleExport {
+                target_dpi: s.target_dpi,
+                measured_dpi: s.measured_dpi,
+                accuracy_percent: s.accuracy,
+            }).collect(),
+            avg_accuracy_percent: avg_accuracy,
+        })
     }
 }

@@ -1,6 +1,8 @@
 use eframe::egui;
 use std::time::Instant;
 
+use crate::export::{ClickResponseExport, ClickButtonExport, ClickStickyExport, StickyButtonExport, LiftOffExport};
+
 /// Jump threshold in pixels - movements larger than this after idle are considered jumps
 const JUMP_THRESHOLD_PX: f64 = 15.0;
 /// Time in milliseconds without movement to consider mouse "idle" (potential lift)
@@ -681,5 +683,75 @@ impl ClickPanel {
                 }
             }
         }
+    }
+
+    pub fn export_response(&self) -> Option<ClickResponseExport> {
+        if self.response_click_count == 0 && self.response_right_click_count == 0 {
+            return None;
+        }
+        Some(ClickResponseExport {
+            left: ClickButtonExport {
+                click_count: self.response_click_count,
+                cps: self.response_cps,
+                avg_hold_ms: if self.response_hold_times.is_empty() { 0.0 } else {
+                    self.response_hold_times.iter().sum::<f64>() / self.response_hold_times.len() as f64
+                },
+                min_hold_ms: self.response_hold_times.iter().cloned().fold(f64::MAX, f64::min),
+                max_hold_ms: self.response_hold_times.iter().cloned().fold(0.0, f64::max),
+                hold_times: self.response_hold_times.clone(),
+            },
+            right: ClickButtonExport {
+                click_count: self.response_right_click_count,
+                cps: self.response_right_cps,
+                avg_hold_ms: if self.response_right_hold_times.is_empty() { 0.0 } else {
+                    self.response_right_hold_times.iter().sum::<f64>() / self.response_right_hold_times.len() as f64
+                },
+                min_hold_ms: self.response_right_hold_times.iter().cloned().fold(f64::MAX, f64::min),
+                max_hold_ms: self.response_right_hold_times.iter().cloned().fold(0.0, f64::max),
+                hold_times: self.response_right_hold_times.clone(),
+            },
+        })
+    }
+
+    pub fn export_sticky(&self) -> Option<ClickStickyExport> {
+        if self.sticky_holds.is_empty() && self.sticky_right_holds.is_empty() {
+            return None;
+        }
+        Some(ClickStickyExport {
+            left: StickyButtonExport {
+                click_count: self.sticky_holds.len(),
+                sticky_count: self.sticky_count,
+                avg_hold_ms: if self.sticky_holds.is_empty() { 0.0 } else {
+                    self.sticky_holds.iter().sum::<f64>() / self.sticky_holds.len() as f64
+                },
+                max_hold_ms: self.sticky_holds.iter().cloned().fold(0.0, f64::max),
+                hold_times: self.sticky_holds.clone(),
+            },
+            right: StickyButtonExport {
+                click_count: self.sticky_right_holds.len(),
+                sticky_count: self.sticky_right_count,
+                avg_hold_ms: if self.sticky_right_holds.is_empty() { 0.0 } else {
+                    self.sticky_right_holds.iter().sum::<f64>() / self.sticky_right_holds.len() as f64
+                },
+                max_hold_ms: self.sticky_right_holds.iter().cloned().fold(0.0, f64::max),
+                hold_times: self.sticky_right_holds.clone(),
+            },
+        })
+    }
+
+    pub fn export_liftoff(&self) -> Option<LiftOffExport> {
+        if self.liftoff_jump_events.is_empty() && self.liftoff_jumps == 0 {
+            return None;
+        }
+        let avg = if self.liftoff_jump_events.is_empty() { 0.0 } else {
+            self.liftoff_jump_events.iter().sum::<f64>() / self.liftoff_jump_events.len() as f64
+        };
+        let max = self.liftoff_jump_events.iter().cloned().fold(0.0, f64::max);
+        Some(LiftOffExport {
+            jump_count: self.liftoff_jumps,
+            avg_distance_px: avg,
+            max_distance_px: max,
+            jump_distances: self.liftoff_jump_events.clone(),
+        })
     }
 }

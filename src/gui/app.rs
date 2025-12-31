@@ -5,6 +5,7 @@ use crate::panels::{
     DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
 };
 use crate::theme::{self, ThemeColors};
+use crate::export::{TestResultsExport, ExportInfo};
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum ActiveTest {
@@ -34,6 +35,7 @@ pub struct MouseTestKitApp {
     scroll_panel: ScrollPanel,
     dark_mode: bool,
     show_about: bool,
+    export_status: Option<String>,
 }
 
 impl MouseTestKitApp {
@@ -53,6 +55,60 @@ impl MouseTestKitApp {
             scroll_panel: ScrollPanel::new(),
             dark_mode: true,
             show_about: false,
+            export_status: None,
+        }
+    }
+
+    fn collect_results(&self) -> TestResultsExport {
+        TestResultsExport {
+            export_info: ExportInfo::new(),
+            polling_rate: self.polling_panel.export(),
+            stutter: self.stutter_panel.export(),
+            click_response: self.click_panel.export_response(),
+            click_sticky: self.click_panel.export_sticky(),
+            liftoff: self.click_panel.export_liftoff(),
+            jitter: self.jitter_panel.export(),
+            double_click: self.double_click_panel.export(),
+            dpi: self.dpi_panel.export(),
+            acceleration: self.accel_panel.export_accel(),
+            angle_snap: self.accel_panel.export_angle(),
+            scroll: self.scroll_panel.export(),
+        }
+    }
+
+    fn export_json(&mut self) {
+        let results = self.collect_results();
+        match results.to_json() {
+            Ok(json) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Export Results as JSON")
+                    .set_file_name("mouse-trap-results.json")
+                    .add_filter("JSON", &["json"])
+                    .save_file()
+                {
+                    match std::fs::write(&path, json) {
+                        Ok(_) => self.export_status = Some(format!("Exported to {}", path.display())),
+                        Err(e) => self.export_status = Some(format!("Error: {}", e)),
+                    }
+                }
+            }
+            Err(e) => self.export_status = Some(format!("Error: {}", e)),
+        }
+    }
+
+    fn export_csv(&mut self) {
+        let results = self.collect_results();
+        let csv = results.to_csv();
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Export Results as CSV")
+            .set_file_name("mouse-trap-results.csv")
+            .add_filter("CSV", &["csv"])
+            .save_file()
+        {
+            match std::fs::write(&path, csv) {
+                Ok(_) => self.export_status = Some(format!("Exported to {}", path.display())),
+                Err(e) => self.export_status = Some(format!("Error: {}", e)),
+            }
         }
     }
 
@@ -160,7 +216,7 @@ impl MouseTestKitApp {
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(16.0);
 
-                    // Bottom buttons
+                    // Bottom buttons row 1: Theme and About
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
 
@@ -192,7 +248,57 @@ impl MouseTestKitApp {
                         }
                     });
 
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
+
+                    // Export buttons row
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+
+                        let json_btn = egui::Button::new(
+                            egui::RichText::new("JSON")
+                                .size(11.0)
+                                .color(ThemeColors::accent())
+                        )
+                        .fill(ThemeColors::accent_dim())
+                        .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
+                        .rounding(6.0)
+                        .min_size(egui::vec2(50.0, 28.0));
+
+                        if ui.add(json_btn).on_hover_text("Export all results to JSON").clicked() {
+                            self.export_json();
+                        }
+
+                        let csv_btn = egui::Button::new(
+                            egui::RichText::new("CSV")
+                                .size(11.0)
+                                .color(ThemeColors::accent())
+                        )
+                        .fill(ThemeColors::accent_dim())
+                        .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
+                        .rounding(6.0)
+                        .min_size(egui::vec2(50.0, 28.0));
+
+                        if ui.add(csv_btn).on_hover_text("Export all results to CSV").clicked() {
+                            self.export_csv();
+                        }
+                    });
+
+                    // Export status message
+                    if let Some(ref status) = self.export_status {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(egui::RichText::new(status)
+                                .size(10.0)
+                                .color(if status.starts_with("Error") {
+                                    egui::Color32::RED
+                                } else {
+                                    ThemeColors::success()
+                                }));
+                        });
+                    }
+
+                    ui.add_space(8.0);
 
                     // Separator
                     ui.horizontal(|ui| {
@@ -204,6 +310,17 @@ impl MouseTestKitApp {
                             egui::Stroke::new(1.0, ThemeColors::border())
                         );
                         ui.add_space(ui.available_width());
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Export section header
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(egui::RichText::new("EXPORT RESULTS")
+                            .size(10.0)
+                            .strong()
+                            .color(ThemeColors::text_muted()));
                     });
 
                     ui.add_space(8.0);

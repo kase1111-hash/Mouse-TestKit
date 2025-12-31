@@ -2,6 +2,8 @@ use eframe::egui;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::export::ScrollExport;
+
 pub struct ScrollPanel {
     is_running: bool,
     /// Scroll events with their delta values
@@ -360,5 +362,41 @@ impl ScrollPanel {
         self.last_scroll_time = None;
         self.missed_events = 0;
         self.current_speed = 0.0;
+    }
+
+    pub fn export(&self) -> Option<ScrollExport> {
+        if self.step_count == 0 {
+            return None;
+        }
+        let avg_speed = if self.speed_samples.is_empty() {
+            0.0
+        } else {
+            self.speed_samples.iter().sum::<f64>() / self.speed_samples.len() as f64
+        };
+
+        let speed_variance = if self.speed_samples.len() >= 2 {
+            let mean = avg_speed;
+            self.speed_samples.iter()
+                .map(|x| (x - mean).powi(2))
+                .sum::<f64>() / self.speed_samples.len() as f64
+        } else {
+            0.0
+        };
+        let speed_std = speed_variance.sqrt();
+
+        let consistency = if avg_speed > 0.0 {
+            ((1.0 - (speed_std / avg_speed).min(1.0)) * 100.0) as u32
+        } else {
+            0
+        };
+
+        Some(ScrollExport {
+            total_steps: self.step_count,
+            scroll_up: self.total_up,
+            scroll_down: self.total_down,
+            direction_changes: self.direction_changes,
+            avg_speed_sps: avg_speed,
+            consistency_percent: consistency,
+        })
     }
 }

@@ -3,6 +3,8 @@ use egui_plot::{Plot, Line, PlotPoints, HLine};
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::export::StutterExport;
+
 pub struct StutterPanel {
     is_running: bool,
     deltas: VecDeque<f64>,
@@ -300,5 +302,24 @@ impl StutterPanel {
         self.avg_delta = 0.0;
         self.min_delta = f64::MAX;
         self.max_delta = 0.0;
+    }
+
+    pub fn export(&self) -> Option<StutterExport> {
+        if self.total_samples == 0 {
+            return None;
+        }
+        let polling_rate = if self.avg_delta > 0.0 { 1000.0 / self.avg_delta } else { 0.0 };
+        let stutter_rate = self.total_stutter_count as f64 / self.total_samples as f64 * 100.0;
+        Some(StutterExport {
+            total_stutter_count: self.total_stutter_count,
+            total_samples: self.total_samples,
+            avg_delta_ms: self.avg_delta,
+            min_delta_ms: if self.min_delta == f64::MAX { 0.0 } else { self.min_delta },
+            max_delta_ms: self.max_delta,
+            polling_rate_hz: polling_rate,
+            threshold_multiplier: self.threshold_multiplier,
+            stutter_rate_percent: stutter_rate,
+            deltas: self.deltas.iter().cloned().collect(),
+        })
     }
 }

@@ -3,6 +3,8 @@ use egui_plot::{Plot, Line, PlotPoints, Points};
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use crate::export::{AccelerationExport, AngleSnapExport};
+
 pub struct AccelPanel {
     // Acceleration detection
     is_running: bool,
@@ -496,5 +498,24 @@ impl AccelPanel {
             accel_factor,
             confidence,
         });
+    }
+
+    pub fn export_accel(&self) -> Option<AccelerationExport> {
+        self.detection_result.as_ref().map(|result| AccelerationExport {
+            has_acceleration: result.has_acceleration,
+            accel_factor: result.accel_factor,
+            confidence_percent: result.confidence,
+            slow_sample_count: self.slow_movements.len(),
+            fast_sample_count: self.fast_movements.len(),
+        })
+    }
+
+    pub fn export_angle(&self) -> Option<AngleSnapExport> {
+        self.angle_result.as_ref().map(|result| AngleSnapExport {
+            has_snapping: result.has_snapping,
+            snap_strength_percent: result.snap_strength * 100.0,
+            dominant_angles: result.dominant_angles.clone(),
+            point_count: self.angle_points.len(),
+        })
     }
 }

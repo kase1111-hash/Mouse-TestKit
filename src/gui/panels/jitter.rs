@@ -2,6 +2,8 @@ use eframe::egui;
 use egui_plot::{Plot, Points, PlotPoints};
 use std::time::Instant;
 
+use crate::export::{JitterExport, JitterSampleExport};
+
 pub struct JitterPanel {
     is_sampling: bool,
     samples: Vec<JitterSample>,
@@ -187,5 +189,37 @@ impl JitterPanel {
 
         self.is_sampling = false;
         self.sample_start = None;
+    }
+
+    pub fn export(&self) -> Option<JitterExport> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let avg_events = self.samples.iter().map(|s| s.events as f64).sum::<f64>() / self.samples.len() as f64;
+        let avg_distance = self.samples.iter().map(|s| s.total_distance).sum::<f64>() / self.samples.len() as f64;
+        let max_jitter = self.samples.iter().map(|s| s.max_single).fold(0.0, f64::max);
+
+        let rating = if avg_distance < 1.0 {
+            "Excellent"
+        } else if avg_distance < 5.0 {
+            "Good"
+        } else if avg_distance < 20.0 {
+            "Moderate"
+        } else {
+            "High Jitter"
+        };
+
+        Some(JitterExport {
+            sample_count: self.samples.len(),
+            avg_events,
+            avg_distance_px: avg_distance,
+            max_jitter_px: max_jitter,
+            rating: rating.to_string(),
+            samples: self.samples.iter().map(|s| JitterSampleExport {
+                events: s.events,
+                total_distance: s.total_distance,
+                max_single: s.max_single,
+            }).collect(),
+        })
     }
 }
