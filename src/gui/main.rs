@@ -1,3 +1,23 @@
+//! Mouse TRAP GUI Application
+//!
+//! A graphical mouse testing utility built with egui/eframe. Provides a modern,
+//! responsive interface for comprehensive mouse diagnostics.
+//!
+//! # Features
+//!
+//! - Real-time polling rate monitoring with live graphs
+//! - Stutter detection and timing analysis
+//! - Click response testing (latency, stickiness, double-click)
+//! - DPI accuracy verification
+//! - Sensor analysis (jitter, acceleration, angle snapping)
+//! - Export results to JSON or CSV
+//! - Persistent configuration across sessions
+//!
+//! # Architecture
+//!
+//! The GUI is organized into panels, each handling a specific test type.
+//! The main app manages navigation, theming, and configuration persistence.
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;

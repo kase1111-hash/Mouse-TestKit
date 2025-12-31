@@ -1,5 +1,16 @@
-/// Windows input handling module
-/// Provides mouse device detection and event reading via Raw Input API
+//! Input handling module for Windows
+//!
+//! Provides mouse device detection and raw event reading via the Windows Raw Input API.
+//! This module handles:
+//! - Enumerating connected mouse devices
+//! - Registering for raw input events
+//! - Running a background message loop to capture input
+//! - Parsing raw mouse data into structured MouseEvent types
+//!
+//! # Architecture
+//!
+//! Uses a background thread with a hidden window to receive WM_INPUT messages.
+//! Events are sent via an mpsc channel to the main thread for processing.
 
 use std::mem;
 use std::ptr;
@@ -20,7 +31,7 @@ use winapi::um::winuser::{
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
-// Mouse event types (shared with Linux input module)
+/// Parsed mouse event types (shared with Linux input module).
 #[derive(Debug, Clone)]
 pub enum MouseEvent {
     Move { dx: i32, dy: i32 },
@@ -29,12 +40,15 @@ pub enum MouseEvent {
     Scroll { delta: i32 },
 }
 
+/// Mouse button identifiers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
+    /// Side button (often "back" on gaming mice)
     Side,
+    /// Extra button (often "forward" on gaming mice)
     Extra,
     Unknown,
 }

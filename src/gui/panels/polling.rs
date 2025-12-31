@@ -1,3 +1,8 @@
+//! Polling rate monitoring panel
+//!
+//! Measures and displays the mouse's polling rate in real-time.
+//! Shows current, min, max, and average Hz with a live graph.
+
 use eframe::egui;
 use egui_plot::{Plot, Line, PlotPoints};
 use std::collections::VecDeque;
@@ -5,6 +10,10 @@ use std::time::Instant;
 
 use crate::export::PollingRateExport;
 
+/// Panel for measuring mouse polling rate.
+///
+/// Calculates polling rate by counting mouse movement events per second.
+/// Displays real-time statistics and a scrolling graph of polling rate history.
 pub struct PollingPanel {
     is_running: bool,
     current_hz: u32,

@@ -1,3 +1,8 @@
+//! Main application module for Mouse TRAP GUI
+//!
+//! Contains the primary application struct and UI rendering logic.
+//! Manages navigation between test panels, theming, and result export.
+
 use eframe::egui;
 
 use crate::config::Config;
@@ -8,6 +13,7 @@ use crate::panels::{
 use crate::theme::{self, ThemeColors};
 use crate::export::{TestResultsExport, ExportInfo};
 
+/// Represents the currently active test or view in the application.
 #[derive(PartialEq, Clone, Copy)]
 pub enum ActiveTest {
     Dashboard,
@@ -24,20 +30,38 @@ pub enum ActiveTest {
     Jitter,
 }
 
+/// Main application struct for Mouse TRAP.
+///
+/// Manages all test panels, navigation state, theming, and configuration.
+/// Implements `eframe::App` to integrate with the egui framework.
 pub struct MouseTestKitApp {
+    /// Currently displayed test panel
     active_test: ActiveTest,
+    /// Polling rate measurement panel
     polling_panel: PollingPanel,
+    /// Stutter detection panel
     stutter_panel: StutterPanel,
+    /// Click testing panel (response, sticky, liftoff)
     click_panel: ClickPanel,
+    /// Sensor jitter analysis panel
     jitter_panel: JitterPanel,
+    /// DPI accuracy verification panel
     dpi_panel: DpiPanel,
+    /// Acceleration and angle snapping panel
     accel_panel: AccelPanel,
+    /// Double-click detection panel
     double_click_panel: DoubleClickPanel,
+    /// Scroll wheel testing panel
     scroll_panel: ScrollPanel,
+    /// Current theme (true = dark mode)
     dark_mode: bool,
+    /// Whether to show the About dialog
     show_about: bool,
+    /// Status message from last export operation
     export_status: Option<String>,
+    /// User configuration
     config: Config,
+    /// Whether config needs to be saved to disk
     config_dirty: bool,
 }
 

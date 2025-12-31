@@ -1,6 +1,14 @@
+//! Theme and styling module for Mouse TRAP GUI
+//!
+//! Provides a consistent, modern "glassy" visual theme across the application.
+//! Includes color definitions, frame styles, and text formatting utilities.
+
 use eframe::egui;
 
-/// Modern glassy theme colors
+/// Modern glassy theme color palette.
+///
+/// All colors are designed for a dark mode interface with subtle transparency
+/// effects for a frosted glass appearance.
 pub struct ThemeColors;
 
 impl ThemeColors {

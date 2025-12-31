@@ -1,8 +1,18 @@
+//! Double-click detection panel
+//!
+//! Tests click timing consistency and detects accidental double-clicks,
+//! which can indicate failing mouse switches (a common issue with aging mice).
+
 use eframe::egui;
 use std::time::Instant;
 
 use crate::export::DoubleClickExport;
 
+/// Panel for testing double-click behavior and switch health.
+///
+/// Measures intervals between clicks to detect accidental double-clicks
+/// (clicks faster than humanly possible), which often indicate switch bounce
+/// or switch failure. Also tracks intentional double-click timing consistency.
 pub struct DoubleClickPanel {
     clicks: Vec<Instant>,
     intervals: Vec<f64>,
