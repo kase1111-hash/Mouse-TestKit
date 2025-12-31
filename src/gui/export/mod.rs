@@ -1,7 +1,16 @@
+//! Test results export module
+//!
+//! Provides data structures and serialization for exporting test results
+//! to JSON and CSV formats. Each test type has a corresponding export struct
+//! containing all relevant metrics and raw data.
+
 use serde::Serialize;
 use chrono::{DateTime, Local};
 
-/// Complete export of all test results
+/// Complete export of all test results.
+///
+/// Contains optional results from each test type. Tests that haven't been
+/// run will have `None` values. Can be serialized to JSON or CSV format.
 #[derive(Serialize)]
 pub struct TestResultsExport {
     pub export_info: ExportInfo,
@@ -18,6 +27,7 @@ pub struct TestResultsExport {
     pub scroll: Option<ScrollExport>,
 }
 
+/// Metadata about the export including app version and timestamp.
 #[derive(Serialize)]
 pub struct ExportInfo {
     pub app_name: String,
@@ -40,6 +50,7 @@ impl ExportInfo {
     }
 }
 
+/// Polling rate test results with statistics and history.
 #[derive(Serialize)]
 pub struct PollingRateExport {
     pub current_hz: u32,
@@ -50,6 +61,7 @@ pub struct PollingRateExport {
     pub history: Vec<f64>,
 }
 
+/// Stutter detection results with timing deltas and stutter events.
 #[derive(Serialize)]
 pub struct StutterExport {
     pub total_stutter_count: usize,
@@ -63,12 +75,14 @@ pub struct StutterExport {
     pub deltas: Vec<f64>,
 }
 
+/// Click response test results for left and right buttons.
 #[derive(Serialize)]
 pub struct ClickResponseExport {
     pub left: ClickButtonExport,
     pub right: ClickButtonExport,
 }
 
+/// Click metrics for a single button (CPS, hold times).
 #[derive(Serialize)]
 pub struct ClickButtonExport {
     pub click_count: usize,
@@ -79,12 +93,14 @@ pub struct ClickButtonExport {
     pub hold_times: Vec<f64>,
 }
 
+/// Click stickiness test results (buttons failing to release properly).
 #[derive(Serialize)]
 pub struct ClickStickyExport {
     pub left: StickyButtonExport,
     pub right: StickyButtonExport,
 }
 
+/// Stickiness metrics for a single button.
 #[derive(Serialize)]
 pub struct StickyButtonExport {
     pub click_count: usize,
@@ -94,6 +110,7 @@ pub struct StickyButtonExport {
     pub hold_times: Vec<f64>,
 }
 
+/// Lift-off distance test results (cursor jump when lifting mouse).
 #[derive(Serialize)]
 pub struct LiftOffExport {
     pub jump_count: usize,
@@ -102,6 +119,7 @@ pub struct LiftOffExport {
     pub jump_distances: Vec<f64>,
 }
 
+/// Jitter test results (sensor noise when mouse is stationary).
 #[derive(Serialize)]
 pub struct JitterExport {
     pub sample_count: usize,
@@ -112,6 +130,7 @@ pub struct JitterExport {
     pub samples: Vec<JitterSampleExport>,
 }
 
+/// Individual jitter sample measurement.
 #[derive(Serialize)]
 pub struct JitterSampleExport {
     pub events: usize,
@@ -119,6 +138,7 @@ pub struct JitterSampleExport {
     pub max_single: f64,
 }
 
+/// Double-click test results (detecting switch issues).
 #[derive(Serialize)]
 pub struct DoubleClickExport {
     pub total_clicks: usize,
@@ -132,6 +152,7 @@ pub struct DoubleClickExport {
     pub intervals: Vec<f64>,
 }
 
+/// DPI accuracy test results.
 #[derive(Serialize)]
 pub struct DpiExport {
     pub target_dpi: u32,
@@ -139,6 +160,7 @@ pub struct DpiExport {
     pub avg_accuracy_percent: f32,
 }
 
+/// Individual DPI measurement sample.
 #[derive(Serialize)]
 pub struct DpiSampleExport {
     pub target_dpi: u32,
@@ -146,6 +168,7 @@ pub struct DpiSampleExport {
     pub accuracy_percent: f32,
 }
 
+/// Acceleration detection results (pointer acceleration enabled).
 #[derive(Serialize)]
 pub struct AccelerationExport {
     pub has_acceleration: bool,
@@ -155,6 +178,7 @@ pub struct AccelerationExport {
     pub fast_sample_count: usize,
 }
 
+/// Angle snapping detection results (prediction/smoothing enabled).
 #[derive(Serialize)]
 pub struct AngleSnapExport {
     pub has_snapping: bool,
@@ -163,6 +187,7 @@ pub struct AngleSnapExport {
     pub point_count: usize,
 }
 
+/// Scroll wheel test results.
 #[derive(Serialize)]
 pub struct ScrollExport {
     pub total_steps: usize,

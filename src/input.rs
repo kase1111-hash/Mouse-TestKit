@@ -1,5 +1,15 @@
-/// Input handling module
-/// Provides mouse device detection and event reading via evdev (Linux only)
+//! Input handling module for Linux
+//!
+//! Provides mouse device detection and raw event reading via the evdev subsystem.
+//! This module handles:
+//! - Enumerating available mouse devices in /dev/input
+//! - Interactive device selection
+//! - Parsing raw input events into structured MouseEvent types
+//!
+//! # Permissions
+//!
+//! Requires read access to /dev/input/event* devices. Users may need to be
+//! added to the 'input' group: `sudo usermod -aG input $USER`
 
 #[cfg(target_os = "linux")]
 use evdev::{Device, InputEventKind, RelativeAxisType, Key};
@@ -8,10 +18,14 @@ use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
+/// Represents a detected mouse device on Linux.
 #[cfg(target_os = "linux")]
 pub struct MouseDevice {
+    /// The evdev Device handle
     pub device: Device,
+    /// Human-readable device name
     pub name: String,
+    /// Path to the device file (e.g., /dev/input/event5)
     pub path: PathBuf,
 }
 
@@ -146,7 +160,9 @@ pub fn select_mouse() -> Option<Device> {
     Some(mice.into_iter().nth(choice - 1)?.device)
 }
 
-// These types are available on all platforms for use in shared code
+/// Parsed mouse event types.
+///
+/// These types are available on all platforms for use in shared code.
 #[derive(Debug, Clone)]
 pub enum MouseEvent {
     Move { dx: i32, dy: i32 },
@@ -155,12 +171,15 @@ pub enum MouseEvent {
     Scroll { delta: i32 },
 }
 
+/// Mouse button identifiers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
+    /// Side button (often "back" on gaming mice)
     Side,
+    /// Extra button (often "forward" on gaming mice)
     Extra,
     Unknown,
 }

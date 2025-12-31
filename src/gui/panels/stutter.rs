@@ -1,3 +1,8 @@
+//! Stutter detection panel
+//!
+//! Detects movement irregularities by analyzing the time delta between
+//! consecutive mouse movement events. Spikes in delta time indicate stutters.
+
 use eframe::egui;
 use egui_plot::{Plot, Line, PlotPoints, HLine};
 use std::collections::VecDeque;
@@ -5,6 +10,11 @@ use std::time::Instant;
 
 use crate::export::StutterExport;
 
+/// Panel for detecting mouse movement stutters.
+///
+/// Measures the time between consecutive movement events and flags
+/// any that exceed the configured threshold as stutters. Provides
+/// real-time visualization and statistics.
 pub struct StutterPanel {
     is_running: bool,
     deltas: VecDeque<f64>,

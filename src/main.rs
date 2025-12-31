@@ -1,3 +1,22 @@
+//! Mouse-TestKit CLI Application
+//!
+//! A terminal-based mouse testing utility that provides comprehensive diagnostics
+//! for mouse hardware and performance. This CLI version requires Linux or Windows
+//! for raw input device access.
+//!
+//! # Features
+//!
+//! - **Stutter Detection**: Identifies movement irregularities and timing issues
+//! - **Polling Rate Monitor**: Measures actual polling rate in Hz
+//! - **Click Testing**: Response time, stickiness, and double-click detection
+//! - **DPI Accuracy**: Verifies mouse DPI settings against actual movement
+//! - **Sensor Analysis**: Jitter, acceleration, and angle snapping detection
+//!
+//! # Usage
+//!
+//! Run the binary and select tests from the interactive menu.
+//! Most tests require moving or clicking the mouse to gather data.
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod tests;
 mod usb;
@@ -61,6 +80,7 @@ fn main() {
     println!("Run: cargo run --bin mouse-testkit-gui");
 }
 
+/// Displays the main menu with all available test options.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn print_menu() {
     println!("┌─────────────────────────────────────┐");
@@ -84,6 +104,9 @@ fn print_menu() {
     println!("└─────────────────────────────────────┘");
 }
 
+/// Prompts the user for input and returns the entered string.
+///
+/// Handles input errors gracefully by returning an empty string.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn get_input(prompt: &str) -> String {
     print!("{}", prompt);
