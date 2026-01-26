@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode};
+use crate::terminal;
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent, MouseButton};
@@ -37,7 +38,7 @@ pub fn run() {
         Some(d) => d,
         None => {
             println!("\nNo mouse selected. Returning to menu...");
-            wait_for_enter();
+            terminal::wait_for_enter();
             return;
         }
     };
@@ -108,13 +109,7 @@ pub fn run() {
         println!("No clicks recorded.");
     }
 
-    wait_for_enter();
-}
-
-fn wait_for_enter() {
-    println!("\nPress Enter to return to menu...");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
+    terminal::wait_for_enter();
 }
 
 #[derive(Clone)]

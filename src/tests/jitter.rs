@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode};
+use crate::terminal;
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -25,7 +26,7 @@ pub fn run() {
         Some(d) => d,
         None => {
             println!("\nNo mouse selected. Returning to menu...");
-            wait_for_enter();
+            terminal::wait_for_enter();
             return;
         }
     };
@@ -159,7 +160,7 @@ pub fn run() {
         println!("No samples recorded.");
     }
 
-    wait_for_enter();
+    terminal::wait_for_enter();
 }
 
 fn analyze_jitter(movements: &[(i32, i32)]) -> JitterSample {
@@ -187,12 +188,6 @@ fn analyze_jitter(movements: &[(i32, i32)]) -> JitterSample {
         avg_magnitude: total_distance / movements.len() as f64,
         max_single_move: max_single,
     }
-}
-
-fn wait_for_enter() {
-    println!("\nPress Enter to return to menu...");
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok();
 }
 
 #[derive(Clone, Debug, PartialEq)]

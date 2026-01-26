@@ -19,7 +19,7 @@ pub fn run() {
         Some(d) => d,
         None => {
             println!("\nNo mouse selected. Returning to menu...");
-            wait_for_enter();
+            terminal::wait_for_enter();
             return;
         }
     };
@@ -119,10 +119,6 @@ pub fn run() {
             stats.min_hz, stats.max_hz, stats.avg_hz);
     }
 
-    terminal::wait_for_enter();
-}
-
-fn wait_for_enter() {
     terminal::wait_for_enter();
 }
 

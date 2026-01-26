@@ -4,6 +4,7 @@
 use std::time::{Duration, Instant};
 use std::io::{self, Write};
 use crossterm::event::{self, Event, KeyCode};
+use crate::terminal;
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -26,7 +27,7 @@ pub fn run() {
         Some(d) => d,
         None => {
             println!("\nNo mouse selected. Returning to menu...");
-            wait_for_enter();
+            terminal::wait_for_enter();
             return;
         }
     };
@@ -195,13 +196,7 @@ pub fn run() {
         println!("Slow samples: {}, Fast samples: {}", slow_samples.len(), fast_samples.len());
     }
 
-    wait_for_enter();
-}
-
-fn wait_for_enter() {
-    println!("\nPress Enter to return to menu...");
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).ok();
+    terminal::wait_for_enter();
 }
 
 struct AccelSample {
