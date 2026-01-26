@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crate::terminal;
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -20,7 +21,7 @@ pub fn run() {
         Some(d) => d,
         None => {
             println!("\nNo mouse selected. Returning to menu...");
-            wait_for_enter();
+            terminal::wait_for_enter();
             return;
         }
     };
@@ -119,7 +120,7 @@ pub fn run() {
         println!("  Minor (2-4ms):    {}", minor);
     }
 
-    wait_for_enter();
+    terminal::wait_for_enter();
 }
 
 fn render_stutter_graph(deltas: &[f64], avg: f64) -> String {
@@ -190,12 +191,6 @@ pub fn analyze_stutter(deltas: &[f64]) -> Vec<StutterEvent> {
         }
     }
     events
-}
-
-fn wait_for_enter() {
-    println!("\nPress Enter to return to menu...");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).ok();
 }
 
 #[derive(Clone)]
