@@ -149,7 +149,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(loaded.dark_mode, false);
+        assert!(!loaded.dark_mode);
         assert_eq!(loaded.stutter_threshold_multiplier, 3.0);
         assert_eq!(loaded.dpi_target, 1600);
         assert_eq!(loaded.dpi_distance_inches, 4.0);
