@@ -1,6 +1,7 @@
 //! Stutter Detection Test
 //! Detects mouse movement stutter and irregularities
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::terminal;
@@ -31,8 +32,8 @@ pub fn run() {
     device.grab().ok();
     // Windows doesn't require device grab - Raw Input works without exclusive access
 
-    let mut timestamps: Vec<Instant> = Vec::new();
-    let mut deltas: Vec<f64> = Vec::new();
+    let mut timestamps: VecDeque<Instant> = VecDeque::new();
+    let mut deltas: VecDeque<f64> = VecDeque::new();
     let mut stutter_events: Vec<StutterEvent> = Vec::new();
     let mut last_print = Instant::now();
 
@@ -52,13 +53,13 @@ pub fn run() {
             for ev in events {
                 if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
                     let now = Instant::now();
-                    if let Some(last) = timestamps.last() {
+                    if let Some(last) = timestamps.back() {
                         let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
-                        deltas.push(delta);
-                        if deltas.len() > 100 { deltas.remove(0); }
+                        deltas.push_back(delta);
+                        if deltas.len() > 100 { deltas.pop_front(); }
                     }
-                    timestamps.push(now);
-                    if timestamps.len() > 1000 { timestamps.remove(0); }
+                    timestamps.push_back(now);
+                    if timestamps.len() > 1000 { timestamps.pop_front(); }
                 }
             }
         }
@@ -68,26 +69,27 @@ pub fn run() {
             for ev in events {
                 if let MouseEvent::Move { .. } = ev {
                     let now = Instant::now();
-                    if let Some(last) = timestamps.last() {
+                    if let Some(last) = timestamps.back() {
                         let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
-                        deltas.push(delta);
-                        if deltas.len() > 100 { deltas.remove(0); }
+                        deltas.push_back(delta);
+                        if deltas.len() > 100 { deltas.pop_front(); }
                     }
-                    timestamps.push(now);
-                    if timestamps.len() > 1000 { timestamps.remove(0); }
+                    timestamps.push_back(now);
+                    if timestamps.len() > 1000 { timestamps.pop_front(); }
                 }
             }
         }
 
         if last_print.elapsed() >= Duration::from_millis(200) && deltas.len() >= 10 {
-            let new_stutters = analyze_stutter(&deltas);
+            let deltas_slice = deltas.make_contiguous();
+            let new_stutters = analyze_stutter(deltas_slice);
             stutter_events.extend(new_stutters.iter().cloned());
 
-            let avg_delta: f64 = deltas.iter().sum::<f64>() / deltas.len() as f64;
-            let max_delta = deltas.iter().cloned().fold(f64::MIN, f64::max);
-            let min_delta = deltas.iter().cloned().fold(f64::MAX, f64::min);
+            let avg_delta: f64 = deltas_slice.iter().sum::<f64>() / deltas_slice.len() as f64;
+            let max_delta = deltas_slice.iter().cloned().fold(f64::MIN, f64::max);
+            let min_delta = deltas_slice.iter().cloned().fold(f64::MAX, f64::min);
 
-            let stutter_count = deltas.iter()
+            let stutter_count = deltas_slice.iter()
                 .filter(|d| (**d - avg_delta).abs() > STUTTER_THRESHOLD_MS)
                 .count();
 
@@ -97,7 +99,7 @@ pub fn run() {
                 avg_delta, min_delta, max_delta);
             println!("Stutters detected: {} (threshold: {:.1}ms deviation)\n",
                 stutter_count, STUTTER_THRESHOLD_MS);
-            println!("{}", render_stutter_graph(&deltas, avg_delta));
+            println!("{}", render_stutter_graph(deltas_slice, avg_delta));
             println!("\nTotal stutter events this session: {}", stutter_events.len());
             println!("\nPress 'q' to quit");
 

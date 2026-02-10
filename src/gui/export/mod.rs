@@ -198,6 +198,15 @@ pub struct ScrollExport {
     pub consistency_percent: u32,
 }
 
+/// Escape a string value for safe CSV embedding (RFC 4180).
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 impl TestResultsExport {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
@@ -209,11 +218,11 @@ impl TestResultsExport {
         // Header
         csv.push_str("Test,Metric,Value\n");
 
-        // Export info
-        csv.push_str(&format!("Info,App Name,{}\n", self.export_info.app_name));
-        csv.push_str(&format!("Info,Version,{}\n", self.export_info.app_version));
-        csv.push_str(&format!("Info,Export Time,{}\n", self.export_info.export_time));
-        csv.push_str(&format!("Info,Platform,{}\n", self.export_info.platform));
+        // Export info — string values are escaped
+        csv.push_str(&format!("Info,App Name,{}\n", csv_escape(&self.export_info.app_name)));
+        csv.push_str(&format!("Info,Version,{}\n", csv_escape(&self.export_info.app_version)));
+        csv.push_str(&format!("Info,Export Time,{}\n", csv_escape(&self.export_info.export_time)));
+        csv.push_str(&format!("Info,Platform,{}\n", csv_escape(&self.export_info.platform)));
 
         // Polling rate
         if let Some(ref p) = self.polling_rate {
@@ -266,7 +275,7 @@ impl TestResultsExport {
             csv.push_str(&format!("Jitter,Avg Events,{:.1}\n", j.avg_events));
             csv.push_str(&format!("Jitter,Avg Distance (px),{:.2}\n", j.avg_distance_px));
             csv.push_str(&format!("Jitter,Max Jitter (px),{:.2}\n", j.max_jitter_px));
-            csv.push_str(&format!("Jitter,Rating,{}\n", j.rating));
+            csv.push_str(&format!("Jitter,Rating,{}\n", csv_escape(&j.rating)));
         }
 
         // Double-click

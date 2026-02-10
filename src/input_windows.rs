@@ -25,9 +25,9 @@ use winapi::shared::hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
 use winapi::shared::minwindef::UINT;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::winuser::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetRawInputData,
-    PeekMessageW, RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-    HRAWINPUT, MSG, PM_REMOVE, RAWINPUT, RAWINPUTHEADER, RID_INPUT, WM_INPUT,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetRawInputData,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+    HRAWINPUT, MSG, RAWINPUT, RAWINPUTHEADER, RID_INPUT, WM_INPUT,
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
@@ -320,25 +320,21 @@ fn run_input_loop(sender: Sender<RawMouseData>) {
             return;
         }
 
-        // Message loop
+        // Blocking message loop — no heartbeat or busy-wait needed.
+        // GetMessageW blocks until a message arrives, yielding the CPU.
         let mut msg: MSG = mem::zeroed();
         loop {
-            // Non-blocking peek
-            if PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_INPUT {
-                    process_raw_input(msg.lParam as HRAWINPUT, &sender);
-                }
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            } else {
-                // Small sleep to avoid busy loop
-                thread::sleep(std::time::Duration::from_micros(100));
-            }
-
-            // Check if channel is closed
-            if sender.send(RawMouseData { dx: 0, dy: 0, button_flags: 0, button_data: 0 }).is_err() {
+            let ret = GetMessageW(&mut msg, hwnd, 0, 0);
+            if ret <= 0 {
+                // 0 = WM_QUIT, -1 = error — exit either way
                 break;
             }
+
+            if msg.message == WM_INPUT {
+                process_raw_input(msg.lParam as HRAWINPUT, &sender);
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
     }
 }
