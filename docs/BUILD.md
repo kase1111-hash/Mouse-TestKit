@@ -1,4 +1,4 @@
-# Building Mouse TRAP
+# Building Mouse-TestKit
 
 ## Prerequisites
 
@@ -41,6 +41,11 @@ cargo build --bin mouse-testkit-gui
 cargo build --release --bin mouse-testkit-gui
 ```
 
+### CLI Build (Linux/Windows)
+```bash
+cargo build --release --bin mouse-testkit
+```
+
 ### Ultra-Compact Build
 ```bash
 cargo build --profile keychain --bin mouse-testkit-gui
@@ -52,23 +57,28 @@ cargo build --profile keychain --bin mouse-testkit-gui
 
 | Build Type | Binary Location |
 |------------|-----------------|
-| Debug | `target/debug/mouse-testkit-gui` |
-| Release | `target/release/mouse-testkit-gui` |
-| Keychain | `target/keychain/mouse-testkit-gui` |
+| Debug (GUI) | `target/debug/mouse-testkit-gui` |
+| Release (GUI) | `target/release/mouse-testkit-gui` |
+| Release (CLI) | `target/release/mouse-testkit` |
+| Keychain (GUI) | `target/keychain/mouse-testkit-gui` |
 
 ---
 
 ## Running
 
 ```bash
-# Debug
+# GUI (Debug)
 cargo run --bin mouse-testkit-gui
 
-# Release
+# GUI (Release)
 cargo run --release --bin mouse-testkit-gui
 
-# Or run binary directly
+# CLI (Linux/Windows, requires raw input access)
+cargo run --release --bin mouse-testkit
+
+# Or run binaries directly
 ./target/release/mouse-testkit-gui
+./target/release/mouse-testkit
 ```
 
 ---

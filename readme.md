@@ -23,7 +23,7 @@ Mouse-TestKit is a cross-platform mouse testing utility designed to analyze and 
 - **Acceleration Detection** - Tests for unwanted acceleration curves
 - **Double-Click Test** - Detects switch failures causing unintended double-clicks
 - **Jitter Test** - Measures sensor noise when stationary
-- **Scroll Wheel Test** - Scroll functionality validation
+- **Scroll Wheel Test** - Scroll functionality validation (GUI only)
 
 ## Installation
 
@@ -78,10 +78,10 @@ For detailed build instructions, see [docs/BUILD.md](docs/BUILD.md).
 cargo run --release --bin mouse-testkit-gui
 ```
 
-### CLI Application (Linux only)
+### CLI Application (Linux/Windows)
 
 ```bash
-# Run the CLI application
+# Run the CLI application (requires raw input access)
 cargo run --release --bin mouse-testkit
 ```
 
@@ -98,9 +98,11 @@ For detailed usage instructions, see the [User Manual](docs/USER_MANUAL.md).
 | Platform | GUI | CLI | Notes |
 |----------|-----|-----|-------|
 | Linux (x64) | Yes | Yes | X11 and Wayland supported |
-| Windows (x64) | Yes | No | Windows 10+ |
-| macOS (ARM64) | Yes | No | Apple Silicon |
-| macOS (x64) | Yes | No | Intel Macs |
+| Windows (x64) | Yes | Yes | Windows 10+ |
+| macOS (ARM64) | Yes | No | Apple Silicon; GUI uses framework input |
+| macOS (x64) | Yes | No | Intel Macs; GUI uses framework input |
+
+> **Note:** On macOS, the GUI falls back to framework-level input since raw input access (IOKit/HID) is not yet implemented. Timing-sensitive tests (polling rate, stutter detection) will be less accurate on macOS.
 
 ## Contributing
 

@@ -42,35 +42,51 @@ cargo clippy -- -D warnings   # Lint with strict warnings
 ```
 src/
 ├── main.rs                   # CLI entry point (Linux/Windows)
+├── lib.rs                    # Library re-exports (types, analysis)
+├── types.rs                  # Shared MouseEvent and MouseButton types
 ├── input.rs                  # Linux input via evdev
 ├── input_windows.rs          # Windows input via Raw Input API
 ├── terminal.rs               # Terminal utilities
+├── analysis/                 # Shared analysis logic
+│   ├── mod.rs
+│   ├── polling.rs            # Polling rate statistics (PollingStats)
+│   └── stutter.rs            # Stutter detection algorithm
 ├── gui/
 │   ├── main.rs               # GUI entry point
 │   ├── app.rs                # Main application state
 │   ├── config.rs             # Configuration persistence (JSON)
 │   ├── theme.rs              # Dark theme styling
+│   ├── input_bridge.rs       # Raw input bridge for GUI
 │   ├── panels/               # Individual test UI panels
+│   │   ├── mod.rs
 │   │   ├── polling.rs        # Polling rate monitor
 │   │   ├── stutter.rs        # Movement irregularity detection
-│   │   ├── click.rs          # Click testing
+│   │   ├── click.rs          # Click response, stickiness, and lift-off tests
 │   │   ├── dpi.rs            # DPI verification
-│   │   ├── accel.rs          # Acceleration testing
+│   │   ├── accel.rs          # Acceleration and angle snapping detection
 │   │   ├── double_click.rs   # Double-click detection
 │   │   ├── jitter.rs         # Sensor noise measurement
-│   │   └── scroll.rs         # Scroll wheel testing
+│   │   └── scroll.rs         # Scroll wheel testing (GUI only)
 │   └── export/
 │       └── mod.rs            # JSON/CSV export
 ├── tests/                    # Test implementations (CLI)
+│   ├── mod.rs
 │   ├── polling.rs            # Real-time Hz measurement
 │   ├── stutter.rs            # Stutter detection
 │   ├── click_response.rs     # Button latency
+│   ├── click_sticky.rs       # Stuck click detection
+│   ├── liftoff.rs            # Lift-off distance testing
+│   ├── dpi.rs                # DPI accuracy verification
+│   ├── angle_snap.rs         # Angle snapping detection
+│   ├── acceleration.rs       # Acceleration detection
 │   ├── double_click.rs       # Switch failure detection
 │   ├── jitter.rs             # Sensor noise testing
 │   └── standard.rs           # Batch test runner
 ├── usb/
-│   └── conflicts.rs          # USB conflict detection
+│   ├── mod.rs
+│   └── conflicts.rs          # USB conflict detection (Linux only)
 └── display/
+    ├── mod.rs
     └── graph.rs              # ASCII graph rendering
 ```
 

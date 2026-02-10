@@ -145,17 +145,28 @@ Documentation improvements are always appreciated:
 ```
 Mouse-TestKit/
 ├── src/
-│   ├── main.rs           # CLI entry point
-│   ├── input.rs          # Cross-platform input handling
-│   ├── gui/              # GUI application
-│   │   ├── main.rs       # GUI entry point
-│   │   ├── app.rs        # Main application state
-│   │   └── panels/       # Individual test panels
-│   ├── tests/            # Test implementations
-│   ├── display/          # Graphing utilities
-│   └── usb/              # USB device detection
-├── docs/                 # Documentation
-└── Cargo.toml            # Project manifest
+│   ├── main.rs              # CLI entry point (Linux/Windows)
+│   ├── lib.rs               # Library re-exports (types, analysis)
+│   ├── types.rs             # Shared MouseEvent and MouseButton types
+│   ├── input.rs             # Linux input via evdev
+│   ├── input_windows.rs     # Windows input via Raw Input API
+│   ├── terminal.rs          # Terminal utilities for CLI
+│   ├── analysis/            # Shared analysis logic
+│   │   ├── polling.rs       # Polling rate statistics
+│   │   └── stutter.rs       # Stutter detection algorithm
+│   ├── gui/                 # GUI application
+│   │   ├── main.rs          # GUI entry point
+│   │   ├── app.rs           # Main application state
+│   │   ├── config.rs        # Configuration persistence (JSON)
+│   │   ├── theme.rs         # Dark theme styling
+│   │   ├── input_bridge.rs  # Raw input bridge for GUI
+│   │   ├── panels/          # Individual test panels
+│   │   └── export/          # JSON/CSV export
+│   ├── tests/               # CLI test implementations
+│   ├── display/             # ASCII graph rendering
+│   └── usb/                 # USB conflict detection (Linux)
+├── docs/                    # Documentation
+└── Cargo.toml               # Project manifest
 ```
 
 ## Questions?

@@ -204,7 +204,7 @@ All advertised features are implemented:
 - ✅ Acceleration detection
 - ✅ Double-click switch testing
 - ✅ Jitter analysis
-- ✅ Scroll wheel testing
+- ✅ Scroll wheel testing (GUI only)
 - ✅ Export to JSON/CSV
 
 ### 7.3 User Experience
