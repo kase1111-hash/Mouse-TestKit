@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::export::StutterExport;
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 /// Panel for detecting mouse movement stutters.
 ///
@@ -66,10 +67,27 @@ impl StutterPanel {
         changed
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Stutter Detection");
         ui.add_space(5.0);
         ui.label("Detects movement irregularities and timing stutters.");
+        if !has_bridge {
+            ui.label(
+                egui::RichText::new("Note: Raw input unavailable — using framework input (reduced accuracy)")
+                    .color(egui::Color32::YELLOW)
+                    .size(11.0),
+            );
+        }
         ui.add_space(15.0);
 
         // Controls
@@ -262,52 +280,82 @@ impl StutterPanel {
                 ui.label(egui::RichText::new("A flat, consistent line near the average indicates smooth tracking.").weak());
             });
 
-        // Capture real mouse input and measure timing
+        // Capture input and measure timing
         if self.is_running {
-            // IMPORTANT: Request continuous repaints for accurate timing measurement
-            ctx.request_repaint();
+            if has_bridge {
+                self.process_raw_events(raw_events);
+            } else {
+                self.process_egui_fallback(ctx);
+            }
+        }
+    }
 
-            let delta = ctx.input(|i| i.pointer.delta());
+    /// Process raw input events from the InputBridge (accurate timestamps)
+    fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
+        for event in raw_events {
+            if let RawInputKind::Move { .. } = &event.kind {
+                let event_time = event.timestamp;
 
-            // Only record timing when mouse is actually moving
-            if delta.x != 0.0 || delta.y != 0.0 {
-                let now = Instant::now();
-
-                // If we have a previous movement, calculate the delta time
                 if let Some(last_time) = self.last_move_time {
-                    let time_since_last = now.duration_since(last_time).as_secs_f64() * 1000.0;
+                    let time_since_last = event_time.duration_since(last_time).as_secs_f64() * 1000.0;
 
                     // Only record reasonable deltas (ignore gaps > 100ms when mouse was stopped)
                     if time_since_last < 100.0 && time_since_last > 0.1 {
-                        self.deltas.push_back(time_since_last);
-                        if self.deltas.len() > 200 {
-                            self.deltas.pop_front();
-                        }
-
-                        self.total_samples += 1;
-
-                        // Calculate stats
-                        self.avg_delta = self.deltas.iter().sum::<f64>() / self.deltas.len() as f64;
-                        self.min_delta = self.deltas.iter().cloned().fold(f64::MAX, f64::min);
-                        self.max_delta = self.deltas.iter().cloned().fold(0.0, f64::max);
-
-                        // Check if this is a stutter
-                        let threshold = self.avg_delta * self.threshold_multiplier;
-                        if time_since_last > threshold {
-                            self.total_stutter_count += 1;
-                        }
-
-                        // Count stutters in current window
-                        self.window_stutter_count = self.deltas.iter()
-                            .filter(|d| **d > threshold)
-                            .count();
+                        self.record_delta(time_since_last);
                     }
                 }
 
-                // Always update last move time when mouse moves
-                self.last_move_time = Some(now);
+                self.last_move_time = Some(event_time);
             }
         }
+    }
+
+    /// Fallback: read egui pointer delta (frame-rate limited, reduced accuracy)
+    fn process_egui_fallback(&mut self, ctx: &egui::Context) {
+        let delta = ctx.input(|i| i.pointer.delta());
+
+        // Only record timing when mouse is actually moving
+        if delta.x != 0.0 || delta.y != 0.0 {
+            let now = Instant::now();
+
+            if let Some(last_time) = self.last_move_time {
+                let time_since_last = now.duration_since(last_time).as_secs_f64() * 1000.0;
+
+                // Only record reasonable deltas (ignore gaps > 100ms when mouse was stopped)
+                if time_since_last < 100.0 && time_since_last > 0.1 {
+                    self.record_delta(time_since_last);
+                }
+            }
+
+            // Always update last move time when mouse moves
+            self.last_move_time = Some(now);
+        }
+    }
+
+    /// Record a delta time sample and update statistics
+    fn record_delta(&mut self, time_since_last: f64) {
+        self.deltas.push_back(time_since_last);
+        if self.deltas.len() > 200 {
+            self.deltas.pop_front();
+        }
+
+        self.total_samples += 1;
+
+        // Calculate stats
+        self.avg_delta = self.deltas.iter().sum::<f64>() / self.deltas.len() as f64;
+        self.min_delta = self.deltas.iter().cloned().fold(f64::MAX, f64::min);
+        self.max_delta = self.deltas.iter().cloned().fold(0.0, f64::max);
+
+        // Check if this is a stutter
+        let threshold = self.avg_delta * self.threshold_multiplier;
+        if time_since_last > threshold {
+            self.total_stutter_count += 1;
+        }
+
+        // Count stutters in current window
+        self.window_stutter_count = self.deltas.iter()
+            .filter(|d| **d > threshold)
+            .count();
     }
 
     fn start(&mut self) {

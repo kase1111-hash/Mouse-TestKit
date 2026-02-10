@@ -23,6 +23,7 @@
 mod app;
 mod config;
 mod export;
+pub mod input_bridge;
 mod panels;
 mod theme;
 
