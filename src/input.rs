@@ -160,46 +160,8 @@ pub fn select_mouse() -> Option<Device> {
     Some(mice.into_iter().nth(choice - 1)?.device)
 }
 
-/// Parsed mouse event types.
-///
-/// These types are available on all platforms for use in shared code.
-#[derive(Debug, Clone)]
-pub enum MouseEvent {
-    Move { dx: i32, dy: i32 },
-    ButtonPress(MouseButton),
-    ButtonRelease(MouseButton),
-    Scroll {
-        #[allow(dead_code)]
-        delta: i32,
-    },
-}
-
-/// Mouse button identifiers.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
-    /// Side button (often "back" on gaming mice)
-    Side,
-    /// Extra button (often "forward" on gaming mice)
-    Extra,
-    Unknown,
-}
-
-#[cfg(target_os = "linux")]
-impl From<Key> for MouseButton {
-    fn from(key: Key) -> Self {
-        match key {
-            Key::BTN_LEFT => MouseButton::Left,
-            Key::BTN_RIGHT => MouseButton::Right,
-            Key::BTN_MIDDLE => MouseButton::Middle,
-            Key::BTN_SIDE => MouseButton::Side,
-            Key::BTN_EXTRA => MouseButton::Extra,
-            _ => MouseButton::Unknown,
-        }
-    }
-}
+// Re-export canonical types from the shared library crate.
+pub use mouse_testkit::types::{MouseEvent, MouseButton};
 
 /// Parse an evdev event into a MouseEvent
 #[cfg(target_os = "linux")]
