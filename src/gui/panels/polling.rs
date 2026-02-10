@@ -2,6 +2,9 @@
 //!
 //! Measures and displays the mouse's polling rate in real-time.
 //! Shows current, min, max, and average Hz with a live graph.
+//!
+//! When an InputBridge is available, uses raw input events for accurate
+//! measurement. Falls back to egui pointer delta on unsupported platforms.
 
 use eframe::egui;
 use egui_plot::{Plot, Line, PlotPoints};
@@ -9,6 +12,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::export::PollingRateExport;
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 /// Panel for measuring mouse polling rate.
 ///
@@ -38,15 +42,32 @@ impl PollingPanel {
             avg_hz: 0.0,
             samples: 0,
             history: VecDeque::with_capacity(200),
-            event_times: VecDeque::with_capacity(1000),
+            event_times: VecDeque::with_capacity(2000),
             last_hz_calc: None,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Polling Rate Monitor");
         ui.add_space(5.0);
         ui.label("Measures your mouse's polling rate in real-time.");
+        if !has_bridge {
+            ui.label(
+                egui::RichText::new("Note: Raw input unavailable — using framework input (reduced accuracy)")
+                    .color(egui::Color32::YELLOW)
+                    .size(11.0),
+            );
+        }
         ui.add_space(15.0);
 
         // Control buttons
@@ -124,50 +145,74 @@ impl PollingPanel {
                 ui.label(egui::RichText::new("Common polling rates: 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz").weak());
             });
 
-        // Capture real mouse input and calculate polling rate
+        // Capture input and calculate polling rate
         if self.is_running {
-            let delta = ctx.input(|i| i.pointer.delta());
-            let now = Instant::now();
+            if has_bridge {
+                self.process_raw_events(raw_events);
+            } else {
+                self.process_egui_fallback(ctx);
+            }
+            self.calculate_hz();
+        }
+    }
 
-            // Record timestamp when mouse moves
-            if delta.x != 0.0 || delta.y != 0.0 {
-                self.event_times.push_back(now);
+    /// Process raw input events from the InputBridge (accurate)
+    fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
+        let now = Instant::now();
+        for event in raw_events {
+            if let RawInputKind::Move { .. } = &event.kind {
+                self.event_times.push_back(event.timestamp);
+            }
+        }
+        // Prune events older than 1 second
+        while let Some(front) = self.event_times.front() {
+            if now.duration_since(*front).as_secs_f64() > 1.0 {
+                self.event_times.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
 
-                // Keep only events from the last second
-                while let Some(front) = self.event_times.front() {
-                    if now.duration_since(*front).as_secs_f64() > 1.0 {
-                        self.event_times.pop_front();
-                    } else {
-                        break;
-                    }
+    /// Fallback: read egui pointer delta (frame-rate limited)
+    fn process_egui_fallback(&mut self, ctx: &egui::Context) {
+        let delta = ctx.input(|i| i.pointer.delta());
+        let now = Instant::now();
+        if delta.x != 0.0 || delta.y != 0.0 {
+            self.event_times.push_back(now);
+            while let Some(front) = self.event_times.front() {
+                if now.duration_since(*front).as_secs_f64() > 1.0 {
+                    self.event_times.pop_front();
+                } else {
+                    break;
                 }
             }
+        }
+    }
 
-            // Calculate Hz every 100ms
-            let should_calc = match self.last_hz_calc {
-                None => true,
-                Some(last) => now.duration_since(last).as_millis() >= 100,
-            };
+    /// Calculate Hz from event count in the last second (runs every 100ms)
+    fn calculate_hz(&mut self) {
+        let now = Instant::now();
+        let should_calc = match self.last_hz_calc {
+            None => true,
+            Some(last) => now.duration_since(last).as_millis() >= 100,
+        };
 
-            if should_calc && self.event_times.len() >= 2 {
-                // Calculate Hz from events in the last second
-                let hz = self.event_times.len() as u32;
-
-                if hz > 0 {
-                    self.current_hz = hz;
-                    self.min_hz = self.min_hz.min(hz);
-                    self.max_hz = self.max_hz.max(hz);
-                    self.samples += 1;
-                    self.avg_hz = (self.avg_hz * (self.samples - 1) as f64 + hz as f64) / self.samples as f64;
-
-                    self.history.push_back(hz as f64);
-                    if self.history.len() > 200 {
-                        self.history.pop_front();
-                    }
+        if should_calc && self.event_times.len() >= 2 {
+            let hz = self.event_times.len() as u32;
+            if hz > 0 {
+                self.current_hz = hz;
+                self.min_hz = self.min_hz.min(hz);
+                self.max_hz = self.max_hz.max(hz);
+                self.samples += 1;
+                self.avg_hz = (self.avg_hz * (self.samples - 1) as f64 + hz as f64)
+                    / self.samples as f64;
+                self.history.push_back(hz as f64);
+                if self.history.len() > 200 {
+                    self.history.pop_front();
                 }
-
-                self.last_hz_calc = Some(now);
             }
+            self.last_hz_calc = Some(now);
         }
     }
 

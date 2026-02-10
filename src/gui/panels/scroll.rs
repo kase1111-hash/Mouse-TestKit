@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::export::ScrollExport;
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 pub struct ScrollPanel {
     is_running: bool,
@@ -52,7 +53,11 @@ impl ScrollPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Scroll Wheel Test");
         ui.add_space(5.0);
         ui.label("Tests scroll wheel functionality, consistency, and detects missed steps.");
@@ -290,61 +295,119 @@ impl ScrollPanel {
 
         // Capture scroll input
         if self.is_running {
-            ctx.request_repaint();
+            if has_bridge {
+                // Use raw input events from the input bridge (no hover check needed)
+                for event in raw_events {
+                    if let RawInputKind::Scroll { delta } = &event.kind {
+                        let now = event.timestamp;
+                        let direction_up = *delta > 0;
+                        let abs_delta = (*delta).unsigned_abs() as f32;
 
-            let scroll_delta = ctx.input(|i| i.raw_scroll_delta);
-            let in_test_area = response.hovered();
+                        // Record event
+                        self.scroll_events.push_back(ScrollEvent {
+                            delta: if direction_up { abs_delta } else { -abs_delta },
+                            timestamp: now,
+                            direction_up,
+                        });
 
-            if in_test_area && scroll_delta.y != 0.0 {
-                let now = Instant::now();
-                let direction_up = scroll_delta.y > 0.0;
+                        // Keep only last 500 events
+                        while self.scroll_events.len() > 500 {
+                            self.scroll_events.pop_front();
+                        }
 
-                // Record event
-                self.scroll_events.push_back(ScrollEvent {
-                    delta: scroll_delta.y,
-                    timestamp: now,
-                    direction_up,
-                });
+                        // Update totals
+                        if direction_up {
+                            self.total_up += abs_delta;
+                        } else {
+                            self.total_down += abs_delta;
+                        }
 
-                // Keep only last 500 events
-                while self.scroll_events.len() > 500 {
-                    self.scroll_events.pop_front();
-                }
+                        self.step_count += 1;
 
-                // Update totals
-                if direction_up {
-                    self.total_up += scroll_delta.y.abs();
-                } else {
-                    self.total_down += scroll_delta.y.abs();
-                }
+                        // Check for direction change
+                        if let Some(last_dir) = self.last_direction {
+                            if last_dir != direction_up {
+                                self.direction_changes += 1;
+                            }
+                        }
+                        self.last_direction = Some(direction_up);
 
-                self.step_count += 1;
+                        // Calculate scroll speed
+                        if let Some(last_time) = self.last_scroll_time {
+                            let delta_secs = now.duration_since(last_time).as_secs_f64();
+                            if delta_secs > 0.0 && delta_secs < 1.0 {
+                                let speed = 1.0 / delta_secs;
+                                self.speed_samples.push_back(speed);
+                                if self.speed_samples.len() > 100 {
+                                    self.speed_samples.pop_front();
+                                }
+                            }
+                        }
+                        self.last_scroll_time = Some(now);
 
-                // Check for direction change
-                if let Some(last_dir) = self.last_direction {
-                    if last_dir != direction_up {
-                        self.direction_changes += 1;
-                    }
-                }
-                self.last_direction = Some(direction_up);
-
-                // Calculate scroll speed
-                if let Some(last_time) = self.last_scroll_time {
-                    let delta_secs = now.duration_since(last_time).as_secs_f64();
-                    if delta_secs > 0.0 && delta_secs < 1.0 {
-                        let speed = 1.0 / delta_secs;
-                        self.speed_samples.push_back(speed);
-                        if self.speed_samples.len() > 100 {
-                            self.speed_samples.pop_front();
+                        // Update current speed (rolling average of last 10 samples)
+                        let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
+                        if !recent.is_empty() {
+                            self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
                         }
                     }
                 }
-                self.last_scroll_time = Some(now);
+            } else {
+                // Fallback: use egui scroll input (requires hover over test area)
+                let scroll_delta = ctx.input(|i| i.raw_scroll_delta);
+                let in_test_area = response.hovered();
 
-                // Update current speed (rolling average of last 10 samples)
-                let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
-                if !recent.is_empty() {
-                    self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
+                if in_test_area && scroll_delta.y != 0.0 {
+                    let now = Instant::now();
+                    let direction_up = scroll_delta.y > 0.0;
+
+                    // Record event
+                    self.scroll_events.push_back(ScrollEvent {
+                        delta: scroll_delta.y,
+                        timestamp: now,
+                        direction_up,
+                    });
+
+                    // Keep only last 500 events
+                    while self.scroll_events.len() > 500 {
+                        self.scroll_events.pop_front();
+                    }
+
+                    // Update totals
+                    if direction_up {
+                        self.total_up += scroll_delta.y.abs();
+                    } else {
+                        self.total_down += scroll_delta.y.abs();
+                    }
+
+                    self.step_count += 1;
+
+                    // Check for direction change
+                    if let Some(last_dir) = self.last_direction {
+                        if last_dir != direction_up {
+                            self.direction_changes += 1;
+                        }
+                    }
+                    self.last_direction = Some(direction_up);
+
+                    // Calculate scroll speed
+                    if let Some(last_time) = self.last_scroll_time {
+                        let delta_secs = now.duration_since(last_time).as_secs_f64();
+                        if delta_secs > 0.0 && delta_secs < 1.0 {
+                            let speed = 1.0 / delta_secs;
+                            self.speed_samples.push_back(speed);
+                            if self.speed_samples.len() > 100 {
+                                self.speed_samples.pop_front();
+                            }
+                        }
+                    }
+                    self.last_scroll_time = Some(now);
+
+                    // Update current speed (rolling average of last 10 samples)
+                    let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
+                    if !recent.is_empty() {
+                        self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
+                    }
                 }
             }
         }

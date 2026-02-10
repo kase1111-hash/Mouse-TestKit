@@ -1,7 +1,9 @@
 use eframe::egui;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::export::{ClickResponseExport, ClickButtonExport, ClickStickyExport, StickyButtonExport, LiftOffExport};
+use crate::input_bridge::{RawInputEvent, RawInputKind, RawButton};
 
 /// Jump threshold in pixels - movements larger than this after idle are considered jumps
 const JUMP_THRESHOLD_PX: f64 = 15.0;
@@ -22,8 +24,8 @@ pub struct ClickPanel {
     response_click_count: usize,
     response_right_click_count: usize,
     /// Hold durations in ms
-    response_hold_times: Vec<f64>,
-    response_right_hold_times: Vec<f64>,
+    response_hold_times: VecDeque<f64>,
+    response_right_hold_times: VecDeque<f64>,
     /// When the current click started (button pressed)
     response_press_start: Option<Instant>,
     response_right_press_start: Option<Instant>,
@@ -31,8 +33,8 @@ pub struct ClickPanel {
     response_is_pressed: bool,
     response_right_is_pressed: bool,
     /// Timestamps of recent clicks for CPS calculation
-    response_click_times: std::collections::VecDeque<Instant>,
-    response_right_click_times: std::collections::VecDeque<Instant>,
+    response_click_times: VecDeque<Instant>,
+    response_right_click_times: VecDeque<Instant>,
     /// Current CPS
     response_cps: f64,
     response_right_cps: f64,
@@ -70,14 +72,14 @@ impl ClickPanel {
             response_button: TestButton::Left,
             response_click_count: 0,
             response_right_click_count: 0,
-            response_hold_times: Vec::new(),
-            response_right_hold_times: Vec::new(),
+            response_hold_times: VecDeque::new(),
+            response_right_hold_times: VecDeque::new(),
             response_press_start: None,
             response_right_press_start: None,
             response_is_pressed: false,
             response_right_is_pressed: false,
-            response_click_times: std::collections::VecDeque::with_capacity(100),
-            response_right_click_times: std::collections::VecDeque::with_capacity(100),
+            response_click_times: VecDeque::with_capacity(100),
+            response_right_click_times: VecDeque::with_capacity(100),
             response_cps: 0.0,
             response_right_cps: 0.0,
 
@@ -101,7 +103,11 @@ impl ClickPanel {
         }
     }
 
-    pub fn ui_response(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.response_running || self.sticky_running || self.liftoff_running
+    }
+
+    pub fn ui_response(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Click Test");
         ui.add_space(5.0);
         ui.label("Tests mouse button response - measures click registration and hold duration.");
@@ -205,9 +211,9 @@ impl ClickPanel {
         ui.add_space(20.0);
 
         // Stats display - show stats for selected button
-        let (click_count, cps, hold_times) = match self.response_button {
-            TestButton::Left => (self.response_click_count, self.response_cps, &self.response_hold_times),
-            TestButton::Right => (self.response_right_click_count, self.response_right_cps, &self.response_right_hold_times),
+        let (click_count, cps, hold_times_slice): (usize, f64, Vec<f64>) = match self.response_button {
+            TestButton::Left => (self.response_click_count, self.response_cps, self.response_hold_times.iter().cloned().collect()),
+            TestButton::Right => (self.response_right_click_count, self.response_right_cps, self.response_right_hold_times.iter().cloned().collect()),
         };
 
         egui::Frame::dark_canvas(ui.style())
@@ -227,24 +233,24 @@ impl ClickPanel {
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Avg Hold");
-                        let avg_hold = if hold_times.is_empty() {
+                        let avg_hold = if hold_times_slice.is_empty() {
                             0.0
                         } else {
-                            hold_times.iter().sum::<f64>() / hold_times.len() as f64
+                            hold_times_slice.iter().sum::<f64>() / hold_times_slice.len() as f64
                         };
                         ui.label(egui::RichText::new(format!("{:.1} ms", avg_hold)).size(24.0));
                     });
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Min Hold");
-                        let min_hold = hold_times.iter().cloned().fold(f64::MAX, f64::min);
+                        let min_hold = hold_times_slice.iter().cloned().fold(f64::MAX, f64::min);
                         let min_str = if min_hold == f64::MAX { "- ms".to_string() } else { format!("{:.1} ms", min_hold) };
                         ui.label(egui::RichText::new(min_str).size(24.0).color(egui::Color32::LIGHT_GREEN));
                     });
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Max Hold");
-                        let max_hold = hold_times.iter().cloned().fold(0.0, f64::max);
+                        let max_hold = hold_times_slice.iter().cloned().fold(0.0, f64::max);
                         ui.label(egui::RichText::new(format!("{:.1} ms", max_hold)).size(24.0).color(egui::Color32::LIGHT_RED));
                     });
                 });
@@ -268,76 +274,129 @@ impl ClickPanel {
 
         // Capture real mouse button input
         if self.response_running {
-            // Request continuous repaints while running
-            ctx.request_repaint();
-
             let now = Instant::now();
-            let pointer = ctx.input(|i| i.pointer.clone());
-            let is_primary_down = pointer.primary_down();
-            let is_secondary_down = pointer.secondary_down();
 
-            // Only track clicks that start within the test area
-            let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
+            if has_bridge {
+                // Raw input path: process all button events from the bridge
+                for event in raw_events {
+                    match &event.kind {
+                        // Left click handling via raw input
+                        RawInputKind::ButtonPress(RawButton::Left) => {
+                            if !self.response_is_pressed {
+                                self.response_is_pressed = true;
+                                self.response_press_start = Some(event.timestamp);
+                            }
+                        }
+                        RawInputKind::ButtonRelease(RawButton::Left) => {
+                            if self.response_is_pressed {
+                                self.response_is_pressed = false;
+                                self.response_click_count += 1;
+                                self.response_click_times.push_back(event.timestamp);
 
-            // Left click handling
-            if in_test_area && is_primary_down && !self.response_is_pressed {
-                self.response_is_pressed = true;
-                self.response_press_start = Some(now);
-            }
+                                if let Some(start) = self.response_press_start {
+                                    let hold_ms = event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                    self.response_hold_times.push_back(hold_ms);
+                                    if self.response_hold_times.len() > 100 {
+                                        self.response_hold_times.pop_front();
+                                    }
+                                }
+                                self.response_press_start = None;
+                            }
+                        }
+                        // Right click handling via raw input
+                        RawInputKind::ButtonPress(RawButton::Right) => {
+                            if !self.response_right_is_pressed {
+                                self.response_right_is_pressed = true;
+                                self.response_right_press_start = Some(event.timestamp);
+                            }
+                        }
+                        RawInputKind::ButtonRelease(RawButton::Right) => {
+                            if self.response_right_is_pressed {
+                                self.response_right_is_pressed = false;
+                                self.response_right_click_count += 1;
+                                self.response_right_click_times.push_back(event.timestamp);
 
-            if !is_primary_down && self.response_is_pressed {
-                self.response_is_pressed = false;
-                self.response_click_count += 1;
-                self.response_click_times.push_back(now);
-
-                if let Some(start) = self.response_press_start {
-                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                    self.response_hold_times.push(hold_ms);
-                    if self.response_hold_times.len() > 100 {
-                        self.response_hold_times.remove(0);
+                                if let Some(start) = self.response_right_press_start {
+                                    let hold_ms = event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                    self.response_right_hold_times.push_back(hold_ms);
+                                    if self.response_right_hold_times.len() > 100 {
+                                        self.response_right_hold_times.pop_front();
+                                    }
+                                }
+                                self.response_right_press_start = None;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                self.response_press_start = None;
+            } else {
+                // Fallback: egui pointer input
+                let pointer = ctx.input(|i| i.pointer.clone());
+                let is_primary_down = pointer.primary_down();
+                let is_secondary_down = pointer.secondary_down();
 
-                while let Some(front) = self.response_click_times.front() {
-                    if now.duration_since(*front).as_secs_f64() > 1.0 {
-                        self.response_click_times.pop_front();
-                    } else {
-                        break;
+                // Only track clicks that start within the test area
+                let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
+
+                // Left click handling
+                if in_test_area && is_primary_down && !self.response_is_pressed {
+                    self.response_is_pressed = true;
+                    self.response_press_start = Some(now);
+                }
+
+                if !is_primary_down && self.response_is_pressed {
+                    self.response_is_pressed = false;
+                    self.response_click_count += 1;
+                    self.response_click_times.push_back(now);
+
+                    if let Some(start) = self.response_press_start {
+                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                        self.response_hold_times.push_back(hold_ms);
+                        if self.response_hold_times.len() > 100 {
+                            self.response_hold_times.pop_front();
+                        }
                     }
+                    self.response_press_start = None;
+                }
+
+                // Right click handling
+                if in_test_area && is_secondary_down && !self.response_right_is_pressed {
+                    self.response_right_is_pressed = true;
+                    self.response_right_press_start = Some(now);
+                }
+
+                if !is_secondary_down && self.response_right_is_pressed {
+                    self.response_right_is_pressed = false;
+                    self.response_right_click_count += 1;
+                    self.response_right_click_times.push_back(now);
+
+                    if let Some(start) = self.response_right_press_start {
+                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                        self.response_right_hold_times.push_back(hold_ms);
+                        if self.response_right_hold_times.len() > 100 {
+                            self.response_right_hold_times.pop_front();
+                        }
+                    }
+                    self.response_right_press_start = None;
                 }
             }
 
-            // Right click handling
-            if in_test_area && is_secondary_down && !self.response_right_is_pressed {
-                self.response_right_is_pressed = true;
-                self.response_right_press_start = Some(now);
-            }
-
-            if !is_secondary_down && self.response_right_is_pressed {
-                self.response_right_is_pressed = false;
-                self.response_right_click_count += 1;
-                self.response_right_click_times.push_back(now);
-
-                if let Some(start) = self.response_right_press_start {
-                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                    self.response_right_hold_times.push(hold_ms);
-                    if self.response_right_hold_times.len() > 100 {
-                        self.response_right_hold_times.remove(0);
-                    }
+            // Prune old click times and update CPS for both buttons
+            while let Some(front) = self.response_click_times.front() {
+                if now.duration_since(*front).as_secs_f64() > 1.0 {
+                    self.response_click_times.pop_front();
+                } else {
+                    break;
                 }
-                self.response_right_press_start = None;
-
-                while let Some(front) = self.response_right_click_times.front() {
-                    if now.duration_since(*front).as_secs_f64() > 1.0 {
-                        self.response_right_click_times.pop_front();
-                    } else {
-                        break;
-                    }
+            }
+            while let Some(front) = self.response_right_click_times.front() {
+                if now.duration_since(*front).as_secs_f64() > 1.0 {
+                    self.response_right_click_times.pop_front();
+                } else {
+                    break;
                 }
             }
 
-            // Update CPS for both buttons
             let one_sec_ago = now - std::time::Duration::from_secs(1);
             self.response_cps = self.response_click_times.iter()
                 .filter(|t| **t > one_sec_ago)
@@ -348,7 +407,7 @@ impl ClickPanel {
         }
     }
 
-    pub fn ui_sticky(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui_sticky(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Click Stickiness Test");
         ui.add_space(5.0);
         ui.label("Tests for stuck or delayed click releases. Long holds (>100ms) may indicate sticky switches.");
@@ -486,60 +545,112 @@ impl ClickPanel {
 
         // Capture real mouse button input
         if self.sticky_running {
-            // Request continuous repaints while running
-            ctx.request_repaint();
-
             let now = Instant::now();
-            let pointer = ctx.input(|i| i.pointer.clone());
-            let is_primary_down = pointer.primary_down();
-            let is_secondary_down = pointer.secondary_down();
 
-            // Only track clicks that start within the test area
-            let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
+            if has_bridge {
+                // Raw input path: process all button events from the bridge
+                for event in raw_events {
+                    match &event.kind {
+                        // Left click handling via raw input
+                        RawInputKind::ButtonPress(RawButton::Left) => {
+                            if !self.sticky_is_pressed {
+                                self.sticky_is_pressed = true;
+                                self.sticky_press_start = Some(event.timestamp);
+                            }
+                        }
+                        RawInputKind::ButtonRelease(RawButton::Left) => {
+                            if self.sticky_is_pressed {
+                                self.sticky_is_pressed = false;
 
-            // Left click handling
-            if in_test_area && is_primary_down && !self.sticky_is_pressed {
-                self.sticky_is_pressed = true;
-                self.sticky_press_start = Some(now);
-            }
+                                if let Some(start) = self.sticky_press_start {
+                                    let hold_ms = event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                    self.sticky_holds.push(hold_ms);
 
-            if !is_primary_down && self.sticky_is_pressed {
-                self.sticky_is_pressed = false;
+                                    if hold_ms > 100.0 {
+                                        self.sticky_count += 1;
+                                    }
+                                }
+                                self.sticky_press_start = None;
+                            }
+                        }
+                        // Right click handling via raw input
+                        RawInputKind::ButtonPress(RawButton::Right) => {
+                            if !self.sticky_right_is_pressed {
+                                self.sticky_right_is_pressed = true;
+                                self.sticky_right_press_start = Some(event.timestamp);
+                            }
+                        }
+                        RawInputKind::ButtonRelease(RawButton::Right) => {
+                            if self.sticky_right_is_pressed {
+                                self.sticky_right_is_pressed = false;
 
-                if let Some(start) = self.sticky_press_start {
-                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                    self.sticky_holds.push(hold_ms);
+                                if let Some(start) = self.sticky_right_press_start {
+                                    let hold_ms = event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                    self.sticky_right_holds.push(hold_ms);
 
-                    if hold_ms > 100.0 {
-                        self.sticky_count += 1;
+                                    if hold_ms > 100.0 {
+                                        self.sticky_right_count += 1;
+                                    }
+                                }
+                                self.sticky_right_press_start = None;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                self.sticky_press_start = None;
-            }
+            } else {
+                // Fallback: egui pointer input
+                let pointer = ctx.input(|i| i.pointer.clone());
+                let is_primary_down = pointer.primary_down();
+                let is_secondary_down = pointer.secondary_down();
 
-            // Right click handling
-            if in_test_area && is_secondary_down && !self.sticky_right_is_pressed {
-                self.sticky_right_is_pressed = true;
-                self.sticky_right_press_start = Some(now);
-            }
+                // Only track clicks that start within the test area
+                let in_test_area = pointer.hover_pos().map(|pos| rect.contains(pos)).unwrap_or(false);
 
-            if !is_secondary_down && self.sticky_right_is_pressed {
-                self.sticky_right_is_pressed = false;
-
-                if let Some(start) = self.sticky_right_press_start {
-                    let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                    self.sticky_right_holds.push(hold_ms);
-
-                    if hold_ms > 100.0 {
-                        self.sticky_right_count += 1;
-                    }
+                // Left click handling
+                if in_test_area && is_primary_down && !self.sticky_is_pressed {
+                    self.sticky_is_pressed = true;
+                    self.sticky_press_start = Some(now);
                 }
-                self.sticky_right_press_start = None;
+
+                if !is_primary_down && self.sticky_is_pressed {
+                    self.sticky_is_pressed = false;
+
+                    if let Some(start) = self.sticky_press_start {
+                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                        self.sticky_holds.push(hold_ms);
+
+                        if hold_ms > 100.0 {
+                            self.sticky_count += 1;
+                        }
+                    }
+                    self.sticky_press_start = None;
+                }
+
+                // Right click handling
+                if in_test_area && is_secondary_down && !self.sticky_right_is_pressed {
+                    self.sticky_right_is_pressed = true;
+                    self.sticky_right_press_start = Some(now);
+                }
+
+                if !is_secondary_down && self.sticky_right_is_pressed {
+                    self.sticky_right_is_pressed = false;
+
+                    if let Some(start) = self.sticky_right_press_start {
+                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
+                        self.sticky_right_holds.push(hold_ms);
+
+                        if hold_ms > 100.0 {
+                            self.sticky_right_count += 1;
+                        }
+                    }
+                    self.sticky_right_press_start = None;
+                }
             }
         }
     }
 
-    pub fn ui_liftoff(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui_liftoff(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Lift-Off Jump Test");
         ui.add_space(5.0);
         ui.label("Detects cursor jumps when lifting the mouse.");
@@ -646,34 +757,66 @@ impl ClickPanel {
 
         // Capture real mouse input and detect jumps
         if self.liftoff_running {
-            // Request continuous repaints for idle detection timing
-            ctx.request_repaint();
-
-            let delta = ctx.input(|i| i.pointer.delta());
             let now = Instant::now();
 
-            if delta.x != 0.0 || delta.y != 0.0 {
-                // Mouse is moving
-                let distance = ((delta.x as f64).powi(2) + (delta.y as f64).powi(2)).sqrt();
+            if has_bridge {
+                // Raw input path: use Move events with their timestamps for idle detection
+                for event in raw_events {
+                    if let RawInputKind::Move { dx, dy } = &event.kind {
+                        let distance = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
 
-                // Check for jump: large movement after being idle
-                if self.liftoff_is_idle && distance > JUMP_THRESHOLD_PX {
-                    self.liftoff_jumps += 1;
-                    self.liftoff_jump_events.push(distance);
+                        // Check time gap since last movement for idle detection
+                        let gap_ms = event.timestamp.duration_since(self.liftoff_last_move).as_millis() as u64;
+                        let was_idle = gap_ms > IDLE_THRESHOLD_MS;
+
+                        // Check for jump: large movement after being idle
+                        if was_idle && distance > JUMP_THRESHOLD_PX {
+                            self.liftoff_jumps += 1;
+                            self.liftoff_jump_events.push(distance);
+                        }
+
+                        // Update position
+                        self.liftoff_position.0 += *dx as i64;
+                        self.liftoff_position.1 += *dy as i64;
+
+                        // Reset idle state
+                        self.liftoff_is_idle = false;
+                        self.liftoff_last_move = event.timestamp;
+                    }
                 }
 
-                // Update position
-                self.liftoff_position.0 += delta.x as i64;
-                self.liftoff_position.1 += delta.y as i64;
-
-                // Reset idle state
-                self.liftoff_is_idle = false;
-                self.liftoff_last_move = now;
-            } else {
-                // No movement - check if we've been idle long enough
+                // Check if currently idle (no move events recently)
                 let time_since_move = now.duration_since(self.liftoff_last_move).as_millis() as u64;
                 if time_since_move > IDLE_THRESHOLD_MS {
                     self.liftoff_is_idle = true;
+                }
+            } else {
+                // Fallback: egui pointer delta
+                let delta = ctx.input(|i| i.pointer.delta());
+
+                if delta.x != 0.0 || delta.y != 0.0 {
+                    // Mouse is moving
+                    let distance = ((delta.x as f64).powi(2) + (delta.y as f64).powi(2)).sqrt();
+
+                    // Check for jump: large movement after being idle
+                    if self.liftoff_is_idle && distance > JUMP_THRESHOLD_PX {
+                        self.liftoff_jumps += 1;
+                        self.liftoff_jump_events.push(distance);
+                    }
+
+                    // Update position
+                    self.liftoff_position.0 += delta.x as i64;
+                    self.liftoff_position.1 += delta.y as i64;
+
+                    // Reset idle state
+                    self.liftoff_is_idle = false;
+                    self.liftoff_last_move = now;
+                } else {
+                    // No movement - check if we've been idle long enough
+                    let time_since_move = now.duration_since(self.liftoff_last_move).as_millis() as u64;
+                    if time_since_move > IDLE_THRESHOLD_MS {
+                        self.liftoff_is_idle = true;
+                    }
                 }
             }
         }
@@ -692,7 +835,7 @@ impl ClickPanel {
                 },
                 min_hold_ms: self.response_hold_times.iter().cloned().fold(f64::MAX, f64::min),
                 max_hold_ms: self.response_hold_times.iter().cloned().fold(0.0, f64::max),
-                hold_times: self.response_hold_times.clone(),
+                hold_times: self.response_hold_times.iter().cloned().collect(),
             },
             right: ClickButtonExport {
                 click_count: self.response_right_click_count,
@@ -702,7 +845,7 @@ impl ClickPanel {
                 },
                 min_hold_ms: self.response_right_hold_times.iter().cloned().fold(f64::MAX, f64::min),
                 max_hold_ms: self.response_right_hold_times.iter().cloned().fold(0.0, f64::max),
-                hold_times: self.response_right_hold_times.clone(),
+                hold_times: self.response_right_hold_times.iter().cloned().collect(),
             },
         })
     }

@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::export::{DpiExport, DpiSampleExport};
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 pub struct DpiPanel {
     is_running: bool,
@@ -72,7 +73,11 @@ impl DpiPanel {
         changed
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("DPI Accuracy Test");
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
@@ -220,19 +225,31 @@ impl DpiPanel {
             }
         }
 
-        // Capture real mouse input while running
+        // Capture mouse input while running
         if self.is_running {
-            ctx.request_repaint();
+            if has_bridge {
+                // Use raw input events — integer counts are exactly what DPI is
+                // defined against, so Euclidean distance from raw counts is the
+                // most accurate measurement.
+                for ev in raw_events {
+                    if let RawInputKind::Move { dx, dy } = ev.kind {
+                        let distance = (((dx as f64) * (dx as f64)) + ((dy as f64) * (dy as f64))).sqrt();
+                        self.accumulated_counts += distance as f32;
 
-            let delta = ctx.input(|i| i.pointer.delta());
-            if delta.x != 0.0 || delta.y != 0.0 {
-                // Accumulate the distance moved (using Euclidean distance)
-                let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
-                self.accumulated_counts += distance as f32;
+                        self.current_pos.0 += dx;
+                        self.current_pos.1 += dy;
+                    }
+                }
+            } else {
+                // Fallback: use egui's pointer delta when no raw input bridge
+                let delta = ctx.input(|i| i.pointer.delta());
+                if delta.x != 0.0 || delta.y != 0.0 {
+                    let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
+                    self.accumulated_counts += distance as f32;
 
-                // Update current position for visualization
-                self.current_pos.0 += delta.x as i32;
-                self.current_pos.1 += delta.y as i32;
+                    self.current_pos.0 += delta.x as i32;
+                    self.current_pos.1 += delta.y as i32;
+                }
             }
         }
     }

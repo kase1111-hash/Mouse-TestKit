@@ -3,6 +3,7 @@ use egui_plot::{Plot, Points, PlotPoints};
 use std::time::Instant;
 
 use crate::export::{JitterExport, JitterSampleExport};
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 pub struct JitterPanel {
     is_sampling: bool,
@@ -34,7 +35,11 @@ impl JitterPanel {
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_sampling
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Jitter Test");
         ui.add_space(5.0);
         ui.label("Measures sensor noise when the mouse is stationary.");
@@ -137,12 +142,29 @@ impl JitterPanel {
 
         // Capture real mouse input during sampling
         if self.is_sampling {
-            ctx.request_repaint();
             if let Some(start) = self.sample_start {
                 if start.elapsed().as_secs() >= 5 {
                     self.finish_sample();
+                } else if has_bridge {
+                    // Raw integer counts are more accurate than float pixels for jitter
+                    for event in raw_events {
+                        if let RawInputKind::Move { dx, dy } = &event.kind {
+                            let dx_f = *dx as f64;
+                            let dy_f = *dy as f64;
+                            if dx_f != 0.0 || dy_f != 0.0 {
+                                // Store raw delta for jitter calculation
+                                self.current_deltas.push((dx_f, dy_f));
+                                // Accumulate position for visualization
+                                // Negate Y because raw counts have Y increasing downward,
+                                // but plot coordinates have Y increasing upward
+                                self.accumulated_pos.0 += dx_f;
+                                self.accumulated_pos.1 -= dy_f;
+                                self.current_positions.push((self.accumulated_pos.0, self.accumulated_pos.1));
+                            }
+                        }
+                    }
                 } else {
-                    // Read real mouse delta from egui input
+                    // Fallback: read mouse delta from egui input
                     let delta = ctx.input(|i| i.pointer.delta());
                     if delta.x != 0.0 || delta.y != 0.0 {
                         // Store raw delta for jitter calculation

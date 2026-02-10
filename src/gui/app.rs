@@ -6,6 +6,7 @@
 use eframe::egui;
 
 use crate::config::Config;
+use crate::input_bridge::InputBridge;
 use crate::panels::{
     PollingPanel, StutterPanel, ClickPanel, JitterPanel,
     DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
@@ -63,6 +64,8 @@ pub struct MouseTestKitApp {
     config: Config,
     /// Whether config needs to be saved to disk
     config_dirty: bool,
+    /// Background raw input thread (None on unsupported platforms)
+    input_bridge: Option<InputBridge>,
 }
 
 impl MouseTestKitApp {
@@ -84,6 +87,12 @@ impl MouseTestKitApp {
         let mut double_click_panel = DoubleClickPanel::new();
         double_click_panel.set_threshold_ms(config.double_click_threshold_ms);
 
+        // Start background raw input thread
+        let input_bridge = InputBridge::start();
+        if input_bridge.is_none() {
+            eprintln!("Note: Raw input not available. GUI tests will use framework input.");
+        }
+
         Self {
             active_test: ActiveTest::Dashboard,
             polling_panel: PollingPanel::new(),
@@ -99,6 +108,7 @@ impl MouseTestKitApp {
             export_status: None,
             config,
             config_dirty: false,
+            input_bridge,
         }
     }
 
@@ -667,6 +677,14 @@ impl MouseTestKitApp {
 
 impl eframe::App for MouseTestKitApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll raw input events from the background thread (once per frame).
+        // Use a local variable so the borrow checker doesn't conflict with &mut self in the closure.
+        let frame_events = match &self.input_bridge {
+            Some(bridge) => bridge.poll(),
+            None => Vec::new(),
+        };
+        let has_bridge = self.input_bridge.is_some();
+
         // Check if any panel settings changed and mark config dirty
         if self.stutter_panel.settings_changed() ||
            self.dpi_panel.settings_changed() ||
@@ -688,6 +706,8 @@ impl eframe::App for MouseTestKitApp {
         // Render sidebar
         self.render_sidebar(ctx);
 
+        let raw_events = &frame_events;
+
         // Render main content with styled central panel
         egui::CentralPanel::default()
             .frame(egui::Frame::none()
@@ -697,17 +717,17 @@ impl eframe::App for MouseTestKitApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     match self.active_test {
                         ActiveTest::Dashboard => self.render_dashboard(ui),
-                        ActiveTest::PollingRate => self.polling_panel.ui(ui, ctx),
-                        ActiveTest::Stutter => self.stutter_panel.ui(ui, ctx),
-                        ActiveTest::ClickResponse => self.click_panel.ui_response(ui, ctx),
-                        ActiveTest::ClickSticky => self.click_panel.ui_sticky(ui, ctx),
-                        ActiveTest::LiftOff => self.click_panel.ui_liftoff(ui, ctx),
-                        ActiveTest::ScrollWheel => self.scroll_panel.ui(ui, ctx),
-                        ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx),
-                        ActiveTest::AngleSnap => self.accel_panel.ui_angle(ui, ctx),
-                        ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx),
+                        ActiveTest::PollingRate => self.polling_panel.ui(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::Stutter => self.stutter_panel.ui(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::ClickResponse => self.click_panel.ui_response(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::ClickSticky => self.click_panel.ui_sticky(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::LiftOff => self.click_panel.ui_liftoff(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::ScrollWheel => self.scroll_panel.ui(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::AngleSnap => self.accel_panel.ui_angle(ui, ctx, raw_events, has_bridge),
+                        ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx, raw_events, has_bridge),
                         ActiveTest::DoubleClick => self.double_click_panel.ui(ui, ctx),
-                        ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx),
+                        ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
                     }
                 });
             });
@@ -717,7 +737,16 @@ impl eframe::App for MouseTestKitApp {
             self.render_about_window(ctx);
         }
 
-        // Request repaint for real-time updates
-        ctx.request_repaint();
+        // Only request continuous repaints when a test is actively running
+        let any_test_running = self.polling_panel.is_running()
+            || self.stutter_panel.is_running()
+            || self.click_panel.is_running()
+            || self.jitter_panel.is_running()
+            || self.dpi_panel.is_running()
+            || self.accel_panel.is_running()
+            || self.scroll_panel.is_running();
+        if any_test_running {
+            ctx.request_repaint();
+        }
     }
 }

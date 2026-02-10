@@ -4,11 +4,12 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::export::{AccelerationExport, AngleSnapExport};
+use crate::input_bridge::{RawInputEvent, RawInputKind};
 
 pub struct AccelPanel {
     // Acceleration detection
     is_running: bool,
-    samples: Vec<AccelSample>,
+    samples: VecDeque<AccelSample>,
     slow_movements: VecDeque<f64>,
     fast_movements: VecDeque<f64>,
     current_velocity: f64,
@@ -21,7 +22,7 @@ pub struct AccelPanel {
 
     // Angle snapping detection
     angle_running: bool,
-    angle_points: Vec<(f64, f64)>,
+    angle_points: VecDeque<(f64, f64)>,
     angle_result: Option<AngleResult>,
     /// Accumulated position for angle visualization
     angle_accumulated_pos: (f64, f64),
@@ -48,7 +49,7 @@ impl AccelPanel {
     pub fn new() -> Self {
         Self {
             is_running: false,
-            samples: Vec::new(),
+            samples: VecDeque::new(),
             slow_movements: VecDeque::with_capacity(100),
             fast_movements: VecDeque::with_capacity(100),
             current_velocity: 0.0,
@@ -57,17 +58,21 @@ impl AccelPanel {
             accumulated_distance: 0.0,
             reference_distance: None,
             angle_running: false,
-            angle_points: Vec::new(),
+            angle_points: VecDeque::new(),
             angle_result: None,
             angle_accumulated_pos: (0.0, 0.0),
         }
     }
 
-    pub fn ui_accel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        self.ui(ui, ctx);
+    pub fn is_running(&self) -> bool {
+        self.is_running || self.angle_running
     }
 
-    pub fn ui_angle(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui_accel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+        self.ui(ui, ctx, raw_events, has_bridge);
+    }
+
+    pub fn ui_angle(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Angle Snapping Detection");
         ui.add_space(5.0);
         ui.label("Detects if your mouse firmware corrects diagonal movements to straight lines.");
@@ -191,22 +196,39 @@ impl AccelPanel {
                 });
         }
 
-        // Capture real mouse input while running
+        // Capture mouse input while running
         if self.angle_running {
-            ctx.request_repaint();
+            if has_bridge {
+                // Use raw input events for accurate angle measurement
+                for event in raw_events {
+                    if let RawInputKind::Move { dx, dy } = event.kind {
+                        self.angle_accumulated_pos.0 += dx as f64;
+                        // Negate Y because screen coordinates have Y increasing downward,
+                        // but plot coordinates have Y increasing upward
+                        self.angle_accumulated_pos.1 -= dy as f64;
+                        self.angle_points.push_back((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
 
-            let delta = ctx.input(|i| i.pointer.delta());
-            if delta.x != 0.0 || delta.y != 0.0 {
-                // Accumulate position from deltas
-                // Negate Y because screen coordinates have Y increasing downward,
-                // but plot coordinates have Y increasing upward
-                self.angle_accumulated_pos.0 += delta.x as f64;
-                self.angle_accumulated_pos.1 -= delta.y as f64;
-                self.angle_points.push((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
+                        // Keep a reasonable number of points
+                        if self.angle_points.len() > 2000 {
+                            self.angle_points.pop_front();
+                        }
+                    }
+                }
+            } else {
+                // Fall back to egui pointer delta
+                let delta = ctx.input(|i| i.pointer.delta());
+                if delta.x != 0.0 || delta.y != 0.0 {
+                    // Accumulate position from deltas
+                    // Negate Y because screen coordinates have Y increasing downward,
+                    // but plot coordinates have Y increasing upward
+                    self.angle_accumulated_pos.0 += delta.x as f64;
+                    self.angle_accumulated_pos.1 -= delta.y as f64;
+                    self.angle_points.push_back((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
 
-                // Keep a reasonable number of points
-                if self.angle_points.len() > 2000 {
-                    self.angle_points.remove(0);
+                    // Keep a reasonable number of points
+                    if self.angle_points.len() > 2000 {
+                        self.angle_points.pop_front();
+                    }
                 }
             }
         }
@@ -257,7 +279,7 @@ impl AccelPanel {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
         ui.label("Detects mouse acceleration (pointer speed varies with movement speed).");
@@ -391,63 +413,118 @@ impl AccelPanel {
                 });
         }
 
-        // Capture real mouse input
+        // Capture mouse input
         if self.is_running {
-            ctx.request_repaint();
+            if has_bridge {
+                // Use raw input events for accurate velocity/distance measurement
+                for event in raw_events {
+                    if let RawInputKind::Move { dx, dy } = event.kind {
+                        let distance = ((dx as f64).powi(2) + (dy as f64).powi(2)).sqrt();
 
-            let delta = ctx.input(|i| i.pointer.delta());
-            let now = Instant::now();
+                        // Calculate velocity using raw event timestamps
+                        if let Some(last_time) = self.last_move_time {
+                            let dt = event.timestamp.duration_since(last_time).as_secs_f64();
+                            if dt > 0.0 && dt < 0.5 {
+                                let velocity = distance / dt;
+                                self.current_velocity = velocity;
 
-            if delta.x != 0.0 || delta.y != 0.0 {
-                let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
+                                // Accumulate distance
+                                self.accumulated_distance += distance;
 
-                // Calculate velocity (pixels per second)
-                if let Some(last_time) = self.last_move_time {
-                    let dt = now.duration_since(last_time).as_secs_f64();
-                    if dt > 0.0 && dt < 0.5 {
-                        let velocity = distance / dt;
-                        self.current_velocity = velocity;
+                                // Categorize by velocity
+                                if velocity < 400.0 {
+                                    // Slow movement
+                                    self.slow_movements.push_back(distance);
+                                    if self.slow_movements.len() > 100 {
+                                        self.slow_movements.pop_front();
+                                    }
+                                } else {
+                                    // Fast movement
+                                    self.fast_movements.push_back(distance);
+                                    if self.fast_movements.len() > 100 {
+                                        self.fast_movements.pop_front();
+                                    }
+                                }
 
-                        // Accumulate distance
-                        self.accumulated_distance += distance;
+                                // Calculate ratio based on velocity comparison
+                                let slow_avg = if self.slow_movements.is_empty() {
+                                    1.0
+                                } else {
+                                    self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
+                                };
 
-                        // Categorize by velocity
-                        if velocity < 400.0 {
-                            // Slow movement
-                            self.slow_movements.push_back(distance);
-                            if self.slow_movements.len() > 100 {
-                                self.slow_movements.pop_front();
-                            }
-                        } else {
-                            // Fast movement
-                            self.fast_movements.push_back(distance);
-                            if self.fast_movements.len() > 100 {
-                                self.fast_movements.pop_front();
+                                let ratio = distance / slow_avg.max(1.0);
+
+                                self.samples.push_back(AccelSample {
+                                    velocity,
+                                    distance_ratio: ratio,
+                                });
+
+                                if self.samples.len() > 500 {
+                                    self.samples.pop_front();
+                                }
                             }
                         }
 
-                        // Calculate ratio based on velocity comparison
-                        // With acceleration, faster movements should cover more distance per count
-                        let slow_avg = if self.slow_movements.is_empty() {
-                            1.0
-                        } else {
-                            self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
-                        };
-
-                        let ratio = distance / slow_avg.max(1.0);
-
-                        self.samples.push(AccelSample {
-                            velocity,
-                            distance_ratio: ratio,
-                        });
-
-                        if self.samples.len() > 500 {
-                            self.samples.remove(0);
-                        }
+                        self.last_move_time = Some(event.timestamp);
                     }
                 }
+            } else {
+                // Fall back to egui pointer delta
+                let delta = ctx.input(|i| i.pointer.delta());
+                let now = Instant::now();
 
-                self.last_move_time = Some(now);
+                if delta.x != 0.0 || delta.y != 0.0 {
+                    let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
+
+                    // Calculate velocity (pixels per second)
+                    if let Some(last_time) = self.last_move_time {
+                        let dt = now.duration_since(last_time).as_secs_f64();
+                        if dt > 0.0 && dt < 0.5 {
+                            let velocity = distance / dt;
+                            self.current_velocity = velocity;
+
+                            // Accumulate distance
+                            self.accumulated_distance += distance;
+
+                            // Categorize by velocity
+                            if velocity < 400.0 {
+                                // Slow movement
+                                self.slow_movements.push_back(distance);
+                                if self.slow_movements.len() > 100 {
+                                    self.slow_movements.pop_front();
+                                }
+                            } else {
+                                // Fast movement
+                                self.fast_movements.push_back(distance);
+                                if self.fast_movements.len() > 100 {
+                                    self.fast_movements.pop_front();
+                                }
+                            }
+
+                            // Calculate ratio based on velocity comparison
+                            // With acceleration, faster movements should cover more distance per count
+                            let slow_avg = if self.slow_movements.is_empty() {
+                                1.0
+                            } else {
+                                self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
+                            };
+
+                            let ratio = distance / slow_avg.max(1.0);
+
+                            self.samples.push_back(AccelSample {
+                                velocity,
+                                distance_ratio: ratio,
+                            });
+
+                            if self.samples.len() > 500 {
+                                self.samples.pop_front();
+                            }
+                        }
+                    }
+
+                    self.last_move_time = Some(now);
+                }
             }
         }
     }
