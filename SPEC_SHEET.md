@@ -102,16 +102,7 @@ Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and d
 | Output | Jitter magnitude in pixels/counts |
 | Use Case | Evaluating sensor stability and noise floor |
 
-### 12. Button Durability Test
-
-| Specification | Description |
-|---------------|-------------|
-| Function | Rapid click endurance test for switch reliability |
-| Method | High-speed click counting with failure detection |
-| Metrics | Click count, failures, timing consistency |
-| Use Case | Stress testing switches for quality assurance |
-
-### 13. Run All Standard Tests
+### 12. Run All Standard Tests
 
 | Specification | Description |
 |---------------|-------------|

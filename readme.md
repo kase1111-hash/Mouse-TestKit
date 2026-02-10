@@ -23,7 +23,6 @@ Mouse-TestKit is a cross-platform mouse testing utility designed to analyze and 
 - **Acceleration Detection** - Tests for unwanted acceleration curves
 - **Double-Click Test** - Detects switch failures causing unintended double-clicks
 - **Jitter Test** - Measures sensor noise when stationary
-- **Button Durability Test** - Click endurance and reliability testing
 - **Scroll Wheel Test** - Scroll functionality validation
 
 ## Installation

@@ -289,23 +289,9 @@ impl MouseTestKitApp {
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                     ui.add_space(16.0);
 
-                    // Bottom buttons row 1: Theme and About
+                    // Bottom buttons row
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
-
-                        let theme_btn = egui::Button::new(
-                            egui::RichText::new(if self.dark_mode { "☀" } else { "🌙" })
-                                .size(14.0)
-                        )
-                        .fill(ThemeColors::bg_glass())
-                        .stroke(egui::Stroke::new(1.0, ThemeColors::border()))
-                        .rounding(8.0)
-                        .min_size(egui::vec2(36.0, 32.0));
-
-                        if ui.add(theme_btn).clicked() {
-                            self.dark_mode = !self.dark_mode;
-                            self.config_dirty = true;
-                        }
 
                         let about_btn = egui::Button::new(
                             egui::RichText::new("About")
@@ -696,11 +682,8 @@ impl eframe::App for MouseTestKitApp {
         self.save_config_if_needed();
 
         // Apply theme - always reapply custom style after setting visuals
-        if self.dark_mode {
-            ctx.set_visuals(egui::Visuals::dark());
-        } else {
-            ctx.set_visuals(egui::Visuals::light());
-        }
+        // Always dark — light mode theme not yet implemented.
+        ctx.set_visuals(egui::Visuals::dark());
         theme::setup_custom_style(ctx);
 
         // Render sidebar
