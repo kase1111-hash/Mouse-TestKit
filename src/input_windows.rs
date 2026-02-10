@@ -31,27 +31,8 @@ use winapi::um::winuser::{
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
-/// Parsed mouse event types (shared with Linux input module).
-#[derive(Debug, Clone)]
-pub enum MouseEvent {
-    Move { dx: i32, dy: i32 },
-    ButtonPress(MouseButton),
-    ButtonRelease(MouseButton),
-    Scroll { delta: i32 },
-}
-
-/// Mouse button identifiers.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MouseButton {
-    Left,
-    Right,
-    Middle,
-    /// Side button (often "back" on gaming mice)
-    Side,
-    /// Extra button (often "forward" on gaming mice)
-    Extra,
-    Unknown,
-}
+// Re-export canonical types from the shared library crate.
+pub use mouse_testkit::types::{MouseEvent, MouseButton};
 
 /// Represents a connected mouse device on Windows
 pub struct MouseDevice {
