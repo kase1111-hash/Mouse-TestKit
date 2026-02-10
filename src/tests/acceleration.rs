@@ -43,7 +43,7 @@ pub fn run() {
     let mut last_print = Instant::now();
     let mut recording_slow = true;
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("Recording SLOW movements first. Press 's' for slow, 'f' for fast mode.");
     println!("Press SPACE to record, 'r' to reset, 'q' to finish.\n");
@@ -139,7 +139,7 @@ pub fn run() {
         }
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== Acceleration Detection Complete ===\n");
 

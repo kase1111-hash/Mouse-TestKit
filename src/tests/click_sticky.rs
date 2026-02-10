@@ -34,7 +34,7 @@ pub fn run() {
     let mut pending_presses: Vec<(Instant, MouseButton)> = Vec::new();
     let mut last_print = Instant::now();
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
@@ -99,7 +99,7 @@ pub fn run() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== Click Stickiness Test Complete ===\n");
 

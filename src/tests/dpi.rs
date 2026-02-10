@@ -55,7 +55,7 @@ pub fn run() {
     let mut last_print = Instant::now();
     let mut _sample_start = Instant::now();
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("\nMove mouse horizontally one inch, then press SPACE to record.");
     println!("Press 'r' to reset, 'q' to finish.\n");
@@ -120,7 +120,7 @@ pub fn run() {
         }
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== DPI Accuracy Test Complete ===\n");
 

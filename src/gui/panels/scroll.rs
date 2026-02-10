@@ -30,8 +30,6 @@ pub struct ScrollPanel {
 }
 
 struct ScrollEvent {
-    #[allow(dead_code)]
-    delta: f32,
     timestamp: Instant,
     direction_up: bool,
 }
@@ -305,7 +303,6 @@ impl ScrollPanel {
 
                         // Record event
                         self.scroll_events.push_back(ScrollEvent {
-                            delta: if direction_up { abs_delta } else { -abs_delta },
                             timestamp: now,
                             direction_up,
                         });
@@ -363,7 +360,6 @@ impl ScrollPanel {
 
                     // Record event
                     self.scroll_events.push_back(ScrollEvent {
-                        delta: scroll_delta.y,
                         timestamp: now,
                         direction_up,
                     });
