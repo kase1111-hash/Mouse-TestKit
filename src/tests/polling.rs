@@ -33,7 +33,7 @@ pub fn run() {
     let mut timestamps: Vec<Instant> = Vec::new();
     let mut last_event_time: Option<SystemTime> = None;
 
-    terminal::enable_raw_mode();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
@@ -112,7 +112,7 @@ pub fn run() {
         }
     }
 
-    terminal::disable_raw_mode();
+    drop(_guard);
 
     println!("\n\nPolling rate test complete.");
     if stats.min_hz < u32::MAX {

@@ -213,20 +213,3 @@ pub enum UsbClass {
     Hub,
     Other,
 }
-
-#[allow(dead_code)]
-pub struct UsbBus {
-    pub id: u8,
-    pub devices: Vec<UsbDevice>,
-}
-
-#[allow(dead_code)]
-impl UsbBus {
-    pub fn has_conflicts(&self) -> bool {
-        let has_hid = self.devices.iter().any(|d| matches!(d.device_class, UsbClass::Hid));
-        let has_high_bandwidth = self.devices.iter().any(|d|
-            matches!(d.device_class, UsbClass::MassStorage | UsbClass::Audio | UsbClass::Video)
-        );
-        has_hid && has_high_bandwidth
-    }
-}

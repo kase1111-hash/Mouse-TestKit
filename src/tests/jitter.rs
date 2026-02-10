@@ -40,7 +40,7 @@ pub fn run() {
     let mut sample_start: Option<Instant> = None;
     let mut last_print = Instant::now();
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("Press SPACE to start sampling (don't touch mouse!), 'q' to finish.\n");
 
@@ -112,7 +112,7 @@ pub fn run() {
         std::thread::sleep(Duration::from_millis(1));
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== Jitter Test Complete ===\n");
 

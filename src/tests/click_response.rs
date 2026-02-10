@@ -18,21 +18,19 @@ pub fn run() {
     println!("When you see 'CLICK NOW!', click as fast as possible.");
     println!("Press any key to start, or 'q' to quit...\n");
 
-    crossterm::terminal::enable_raw_mode().ok();
-
-    loop {
-        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.code == KeyCode::Char('q') {
-                    crossterm::terminal::disable_raw_mode().ok();
-                    return;
+    {
+        let _guard = terminal::TerminalGuard::new();
+        loop {
+            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.code == KeyCode::Char('q') {
+                        return; // _guard drops on return
+                    }
+                    break;
                 }
-                break;
             }
         }
-    }
-
-    crossterm::terminal::disable_raw_mode().ok();
+    } // _guard drops here
 
     let mut device = match input::select_mouse() {
         Some(d) => d,

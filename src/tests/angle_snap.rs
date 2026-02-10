@@ -38,7 +38,7 @@ pub fn run() {
     let mut last_print = Instant::now();
     let mut analysis_results: Vec<LineAnalysis> = Vec::new();
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("Draw diagonal lines... Press SPACE to analyze, 'q' to finish.\n");
 
@@ -95,7 +95,7 @@ pub fn run() {
         }
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== Angle Snapping Detection Complete ===\n");
 

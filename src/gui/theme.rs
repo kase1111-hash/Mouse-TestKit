@@ -82,20 +82,6 @@ impl ThemeColors {
         egui::Color32::from_rgb(80, 200, 120)
     }
 
-    #[allow(dead_code)]
-    pub fn warning() -> egui::Color32 {
-        egui::Color32::from_rgb(245, 180, 60)
-    }
-
-    #[allow(dead_code)]
-    pub fn error() -> egui::Color32 {
-        egui::Color32::from_rgb(240, 80, 90)
-    }
-
-    #[allow(dead_code)]
-    pub fn info() -> egui::Color32 {
-        egui::Color32::from_rgb(80, 160, 240)
-    }
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
@@ -209,47 +195,6 @@ pub fn card_frame(_ui: &egui::Ui) -> egui::Frame {
         })
 }
 
-/// Creates a subtle accent card
-#[allow(dead_code)]
-pub fn accent_card_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(ThemeColors::accent_dim())
-        .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
-        .rounding(10.0)
-        .inner_margin(16.0)
-}
-
-/// Status indicator frame
-#[allow(dead_code)]
-pub fn status_frame(good: bool) -> egui::Frame {
-    let color = if good { ThemeColors::success() } else { ThemeColors::error() };
-    egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 20))
-        .stroke(egui::Stroke::new(1.0, color))
-        .rounding(8.0)
-        .inner_margin(12.0)
-}
-
-// Utility color functions for consistent theming across panels
-#[allow(dead_code)]
-pub fn status_color(good: bool) -> egui::Color32 {
-    if good {
-        ThemeColors::success()
-    } else {
-        ThemeColors::error()
-    }
-}
-
-#[allow(dead_code)]
-pub fn warning_color() -> egui::Color32 {
-    ThemeColors::warning()
-}
-
-#[allow(dead_code)]
-pub fn info_color() -> egui::Color32 {
-    ThemeColors::info()
-}
-
 /// Style for section headings
 pub fn heading_style(text: &str) -> egui::RichText {
     egui::RichText::new(text)
@@ -264,23 +209,6 @@ pub fn subheading_style(text: &str) -> egui::RichText {
         .size(14.0)
         .strong()
         .color(ThemeColors::text_secondary())
-}
-
-/// Style for muted/hint text
-#[allow(dead_code)]
-pub fn muted_style(text: &str) -> egui::RichText {
-    egui::RichText::new(text)
-        .size(12.0)
-        .color(ThemeColors::text_muted())
-}
-
-/// Style for metric values
-#[allow(dead_code)]
-pub fn metric_style(text: &str) -> egui::RichText {
-    egui::RichText::new(text)
-        .size(28.0)
-        .strong()
-        .color(ThemeColors::text_primary())
 }
 
 /// Style for metric labels

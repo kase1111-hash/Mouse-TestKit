@@ -37,7 +37,7 @@ pub fn run() {
     let mut stutter_events: Vec<StutterEvent> = Vec::new();
     let mut last_print = Instant::now();
 
-    crossterm::terminal::enable_raw_mode().ok();
+    let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
@@ -109,7 +109,7 @@ pub fn run() {
         }
     }
 
-    crossterm::terminal::disable_raw_mode().ok();
+    drop(_guard);
 
     println!("\n\n=== Stutter Test Complete ===");
     println!("Total stutter events: {}", stutter_events.len());
