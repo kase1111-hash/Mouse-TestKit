@@ -1,6 +1,4 @@
-# Mouse TRAP User Manual
-
-**Test Response And Positioning**
+# Mouse-TestKit User Manual
 
 Precision diagnostics for your mouse.
 
@@ -66,8 +64,17 @@ Detects cursor jumps when lifting the mouse off the surface.
 
 ---
 
-### Scroll Wheel
-Tests scroll wheel functionality and consistency.
+### USB Conflict Detection (CLI, Linux only)
+Shows other devices connected to the same USB controller/hub that may cause bandwidth conflicts.
+
+1. Select **USB Conflict Detection** from the CLI menu
+2. The scanner reads `/sys/bus/usb/devices` to enumerate connected devices
+3. Review results for potential bandwidth contention
+
+---
+
+### Scroll Wheel (GUI only)
+Tests scroll wheel functionality and consistency. This test is only available in the GUI application.
 
 1. Click **Start**
 2. Hover over the test area

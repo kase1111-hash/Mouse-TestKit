@@ -88,7 +88,7 @@ Test logic is reimplemented between CLI and GUI rather than shared. Stutter anal
 - USB conflict scanner (`src/usb/conflicts.rs`) — Linux-only, reads `/sys/bus/usb/devices`, tangential to mouse performance testing. Useful but belongs in a separate "USB diagnostics" scope.
 
 **Wrong Product:**
-- None — but "Button Durability Test" is advertised in `readme.md:26` and `SPEC_SHEET.md` with no implementation anywhere in the codebase. This is a documentation lie.
+- None — but "Button Durability Test" was listed in `CHANGELOG.md` with no implementation anywhere in the codebase. This has been corrected.
 
 **Scope Verdict:** Focused — the feature set is cohesive and correctly prioritized. The test suite covers the diagnostics that matter to the target user. No feature creep.
 
@@ -99,7 +99,7 @@ Test logic is reimplemented between CLI and GUI rather than shared. Stutter anal
 **CUT:**
 - `#[allow(dead_code)]` items in `src/gui/theme.rs` — either use them or delete them
 - Empty heartbeat messages in `src/input_windows.rs:358` — replace with proper channel health check
-- "Button Durability Test" from README/SPEC_SHEET until it's actually implemented
+- "Button Durability Test" from CHANGELOG until it's actually implemented
 - `UsbBus` struct in `src/usb/conflicts.rs:218-232` — unused, dead code
 
 **DEFER:**

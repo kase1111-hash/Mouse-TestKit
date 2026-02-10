@@ -27,8 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Acceleration Detection** - Unwanted acceleration curve testing
 - **Double-Click Test** - Switch failure detection
 - **Jitter Test** - Sensor noise measurement at rest
-- **Button Durability Test** - Click endurance testing
-- **Scroll Wheel Test** - Scroll functionality validation
+- **Scroll Wheel Test** - Scroll functionality validation (GUI only)
 - **Run All Tests** - Complete test suite execution
 - Cross-platform support (Linux, Windows, macOS)
 - Test result export functionality

@@ -102,7 +102,17 @@ Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and d
 | Output | Jitter magnitude in pixels/counts |
 | Use Case | Evaluating sensor stability and noise floor |
 
-### 12. Run All Standard Tests
+### 12. Scroll Wheel Test
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Tests scroll wheel functionality and consistency |
+| Measurement | Step count, speed, direction changes |
+| Detection | Identifies missed scroll steps and inconsistent behavior |
+| Availability | GUI only |
+| Use Case | Validating scroll wheel reliability and encoder quality |
+
+### 13. Run All Standard Tests
 
 | Specification | Description |
 |---------------|-------------|
@@ -116,7 +126,8 @@ Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and d
 
 | Component | Requirement |
 |-----------|-------------|
-| Platform | Cross-platform (TBD) |
+| Platform | Linux x64, Windows x64, macOS ARM64/x64 |
+| Rust | 1.70 or later |
 | USB | USB 2.0 or higher |
 | Input | HID-compliant mouse device |
 
@@ -134,4 +145,4 @@ Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and d
 
 ## Version
 
-**Version:** 1.0.0 (Initial Specification)
+**Version:** 0.1.0
