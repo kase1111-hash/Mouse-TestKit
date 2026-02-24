@@ -9,9 +9,6 @@ use std::path::PathBuf;
 /// User configuration that persists between sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Application theme
-    pub dark_mode: bool,
-
     /// Stutter detection sensitivity (lower = more sensitive)
     pub stutter_threshold_multiplier: f64,
 
@@ -28,7 +25,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            dark_mode: true,
             stutter_threshold_multiplier: 2.0,
             dpi_target: 800,
             dpi_distance_inches: 2.0,
@@ -129,7 +125,6 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert!(config.dark_mode);
         assert_eq!(config.stutter_threshold_multiplier, 2.0);
         assert_eq!(config.dpi_target, 800);
         assert_eq!(config.dpi_distance_inches, 2.0);
@@ -139,7 +134,6 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = Config {
-            dark_mode: false,
             stutter_threshold_multiplier: 3.0,
             dpi_target: 1600,
             dpi_distance_inches: 4.0,
@@ -149,7 +143,6 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
 
-        assert!(!loaded.dark_mode);
         assert_eq!(loaded.stutter_threshold_multiplier, 3.0);
         assert_eq!(loaded.dpi_target, 1600);
         assert_eq!(loaded.dpi_distance_inches, 4.0);

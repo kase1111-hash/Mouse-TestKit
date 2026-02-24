@@ -54,8 +54,6 @@ pub struct MouseTestKitApp {
     double_click_panel: DoubleClickPanel,
     /// Scroll wheel testing panel
     scroll_panel: ScrollPanel,
-    /// Current theme (true = dark mode)
-    dark_mode: bool,
     /// Whether to show the About dialog
     show_about: bool,
     /// Status message from last export operation
@@ -103,7 +101,6 @@ impl MouseTestKitApp {
             accel_panel: AccelPanel::new(),
             double_click_panel,
             scroll_panel: ScrollPanel::new(),
-            dark_mode: config.dark_mode,
             show_about: false,
             export_status: None,
             config,
@@ -114,7 +111,6 @@ impl MouseTestKitApp {
 
     /// Collect current settings and update config
     fn update_config(&mut self) {
-        self.config.dark_mode = self.dark_mode;
         self.config.stutter_threshold_multiplier = self.stutter_panel.get_threshold_multiplier();
         self.config.dpi_target = self.dpi_panel.get_target_dpi();
         self.config.dpi_distance_inches = self.dpi_panel.get_target_distance();
@@ -681,8 +677,7 @@ impl eframe::App for MouseTestKitApp {
         // Save config if dirty (debounced - only saves once changes stop)
         self.save_config_if_needed();
 
-        // Apply theme - always reapply custom style after setting visuals
-        // Always dark — light mode theme not yet implemented.
+        // Apply dark theme
         ctx.set_visuals(egui::Visuals::dark());
         theme::setup_custom_style(ctx);
 
