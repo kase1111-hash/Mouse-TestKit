@@ -1,6 +1,6 @@
-# Contributing to Mouse-TestKit
+# Contributing to Mouse TRAP
 
-Thank you for your interest in contributing to Mouse-TestKit! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to Mouse TRAP! This document provides guidelines and information for contributors.
 
 ## Getting Started
 

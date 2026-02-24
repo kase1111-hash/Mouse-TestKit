@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2025-01-01
 
 ### Added
-- Initial release of Mouse-TestKit
+- Initial release of Mouse TRAP
 - GUI application with egui framework
 - CLI application for Linux
 - **Polling Rate Monitor** - Real-time Hz measurement with graph visualization

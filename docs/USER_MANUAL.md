@@ -1,4 +1,4 @@
-# Mouse-TestKit User Manual
+# Mouse TRAP User Manual
 
 Precision diagnostics for your mouse.
 

@@ -271,7 +271,7 @@ pub fn select_mouse() -> Option<MouseDevice> {
 fn run_input_loop(sender: Sender<RawMouseData>) {
     unsafe {
         // Register window class
-        let class_name: Vec<u16> = "MouseTestKitInput\0".encode_utf16().collect();
+        let class_name: Vec<u16> = "MouseTrapInput\0".encode_utf16().collect();
         let hinstance = GetModuleHandleW(ptr::null());
 
         let wc = WNDCLASSW {

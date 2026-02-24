@@ -1,4 +1,4 @@
-# Building Mouse-TestKit
+# Building Mouse TRAP
 
 ## Prerequisites
 
