@@ -1,4 +1,4 @@
-//! Mouse-TestKit shared library
+//! Mouse TRAP shared library
 //!
 //! Contains types and analysis functions shared between the CLI and GUI binaries.
 

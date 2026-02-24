@@ -1,4 +1,4 @@
-# Mouse-TestKit
+# Mouse TRAP (Mouse-TestKit)
 
 A comprehensive mouse diagnostics and testing utility for precision performance analysis.
 
@@ -8,7 +8,7 @@ A comprehensive mouse diagnostics and testing utility for precision performance 
 
 ## Overview
 
-Mouse-TestKit is a cross-platform mouse testing utility designed to analyze and diagnose mouse performance, connectivity, and reliability. Whether you're a competitive gamer validating your equipment, a QA engineer testing peripherals, or troubleshooting mouse issues, this tool provides comprehensive diagnostics.
+Mouse TRAP is a cross-platform mouse testing utility designed to analyze and diagnose mouse performance, connectivity, and reliability. Whether you're a competitive gamer validating your equipment, a QA engineer testing peripherals, or troubleshooting mouse issues, this tool provides comprehensive diagnostics.
 
 ## Features
 

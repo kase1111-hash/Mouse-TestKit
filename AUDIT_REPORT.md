@@ -1,4 +1,4 @@
-# Software Audit Report: Mouse-TestKit
+# Software Audit Report: Mouse TRAP
 
 **Audit Date:** 2026-01-28
 **Auditor:** Claude Code (Automated Analysis)
@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Mouse-TestKit is a **well-designed, correctly implemented** cross-platform mouse diagnostics utility. The codebase demonstrates solid software engineering practices with comprehensive test coverage, proper error handling, and clean architecture. The software is **fit for its stated purpose** of providing mouse performance diagnostics for gamers, QA engineers, and troubleshooting scenarios.
+Mouse TRAP is a **well-designed, correctly implemented** cross-platform mouse diagnostics utility. The codebase demonstrates solid software engineering practices with comprehensive test coverage, proper error handling, and clean architecture. The software is **fit for its stated purpose** of providing mouse performance diagnostics for gamers, QA engineers, and troubleshooting scenarios.
 
 **Overall Assessment: PASS**
 
@@ -245,7 +245,7 @@ The software is ready for production use as a diagnostic tool.
 
 ## 10. Conclusion
 
-**Mouse-TestKit is CORRECT and FIT FOR PURPOSE.**
+**Mouse TRAP is CORRECT and FIT FOR PURPOSE.**
 
 The codebase demonstrates:
 - Sound software engineering practices

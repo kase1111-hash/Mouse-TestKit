@@ -1,8 +1,8 @@
-# Mouse-TestKit Specification Sheet
+# Mouse TRAP Specification Sheet
 
 ## Overview
 
-Mouse-TestKit is a comprehensive mouse testing utility designed to analyze and diagnose mouse performance, connectivity, and reliability.
+Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diagnose mouse performance, connectivity, and reliability.
 
 ---
 

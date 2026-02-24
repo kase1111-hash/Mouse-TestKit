@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-The following versions of Mouse-TestKit are currently supported with security updates:
+The following versions of Mouse TRAP are currently supported with security updates:
 
 | Version | Supported          |
 | ------- | ------------------ |

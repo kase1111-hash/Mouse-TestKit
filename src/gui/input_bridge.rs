@@ -74,6 +74,67 @@ impl InputBridge {
     }
 }
 
+/// Coalesces separate REL_X and REL_Y evdev events that share the
+/// same kernel timestamp into a single (dx, dy) pair.
+///
+/// Linux evdev emits REL_X and REL_Y as separate events for each
+/// hardware poll. Without coalescing, polling rate would read 2x actual.
+pub(crate) struct EventCoalescer {
+    pending_dx: i32,
+    pending_dy: i32,
+    last_ts: Option<std::time::SystemTime>,
+}
+
+impl EventCoalescer {
+    pub fn new() -> Self {
+        Self {
+            pending_dx: 0,
+            pending_dy: 0,
+            last_ts: None,
+        }
+    }
+
+    /// Feed a relative-axis event at the given kernel timestamp.
+    /// Returns `Some((dx, dy))` if a previous batch needs flushing
+    /// because the timestamp has changed.
+    pub fn accumulate(
+        &mut self,
+        ts: std::time::SystemTime,
+        dx: i32,
+        dy: i32,
+    ) -> Option<(i32, i32)> {
+        let flushed = if let Some(prev_ts) = self.last_ts {
+            if ts != prev_ts && (self.pending_dx != 0 || self.pending_dy != 0) {
+                let result = (self.pending_dx, self.pending_dy);
+                self.pending_dx = 0;
+                self.pending_dy = 0;
+                Some(result)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.last_ts = Some(ts);
+        self.pending_dx += dx;
+        self.pending_dy += dy;
+        flushed
+    }
+
+    /// Flush any remaining accumulated movement.
+    /// Call after processing a batch of events.
+    pub fn flush(&mut self) -> Option<(i32, i32)> {
+        if self.pending_dx != 0 || self.pending_dy != 0 {
+            let result = (self.pending_dx, self.pending_dy);
+            self.pending_dx = 0;
+            self.pending_dy = 0;
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
 // ─── Linux implementation ───────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -165,55 +226,41 @@ impl InputBridge {
     /// for polling rate measurement (one physical poll → one Move event).
     fn linux_event_loop(mut device: evdev::Device, sender: mpsc::Sender<RawInputEvent>) {
         use evdev::{InputEventKind, RelativeAxisType, Key};
-        use std::time::SystemTime;
+
+        let mut coalescer = EventCoalescer::new();
 
         loop {
             match device.fetch_events() {
                 Ok(events) => {
-                    // Accumulate dx/dy per kernel timestamp to merge X+Y into one Move
-                    let mut pending_dx: i32 = 0;
-                    let mut pending_dy: i32 = 0;
-                    let mut last_ts: Option<SystemTime> = None;
-
                     for ev in events {
                         let ts = ev.timestamp();
 
-                        // Flush accumulated move when kernel timestamp changes
-                        if let Some(prev_ts) = last_ts {
-                            if ts != prev_ts && (pending_dx != 0 || pending_dy != 0) {
-                                if sender
-                                    .send(RawInputEvent {
-                                        kind: RawInputKind::Move {
-                                            dx: pending_dx,
-                                            dy: pending_dy,
-                                        },
-                                        timestamp: Instant::now(),
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                                pending_dx = 0;
-                                pending_dy = 0;
-                            }
-                        }
-                        last_ts = Some(ts);
-
                         match ev.kind() {
-                            InputEventKind::RelAxis(axis) => match axis {
-                                RelativeAxisType::REL_X => {
-                                    pending_dx += ev.value();
-                                }
-                                RelativeAxisType::REL_Y => {
-                                    pending_dy += ev.value();
-                                }
-                                RelativeAxisType::REL_WHEEL
-                                | RelativeAxisType::REL_WHEEL_HI_RES => {
+                            InputEventKind::RelAxis(axis) => {
+                                let (dx, dy) = match axis {
+                                    RelativeAxisType::REL_X => (ev.value(), 0),
+                                    RelativeAxisType::REL_Y => (0, ev.value()),
+                                    RelativeAxisType::REL_WHEEL
+                                    | RelativeAxisType::REL_WHEEL_HI_RES => {
+                                        if sender
+                                            .send(RawInputEvent {
+                                                kind: RawInputKind::Scroll {
+                                                    delta: ev.value(),
+                                                },
+                                                timestamp: Instant::now(),
+                                            })
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                        continue;
+                                    }
+                                    _ => continue,
+                                };
+                                if let Some((fdx, fdy)) = coalescer.accumulate(ts, dx, dy) {
                                     if sender
                                         .send(RawInputEvent {
-                                            kind: RawInputKind::Scroll {
-                                                delta: ev.value(),
-                                            },
+                                            kind: RawInputKind::Move { dx: fdx, dy: fdy },
                                             timestamp: Instant::now(),
                                         })
                                         .is_err()
@@ -221,8 +268,7 @@ impl InputBridge {
                                         return;
                                     }
                                 }
-                                _ => {}
-                            },
+                            }
                             InputEventKind::Key(key) => {
                                 let button = match key {
                                     Key::BTN_LEFT => Some(RawButton::Left),
@@ -256,13 +302,10 @@ impl InputBridge {
                     }
 
                     // Flush any remaining accumulated move after processing the batch
-                    if pending_dx != 0 || pending_dy != 0 {
+                    if let Some((dx, dy)) = coalescer.flush() {
                         if sender
                             .send(RawInputEvent {
-                                kind: RawInputKind::Move {
-                                    dx: pending_dx,
-                                    dy: pending_dy,
-                                },
+                                kind: RawInputKind::Move { dx, dy },
                                 timestamp: Instant::now(),
                             })
                             .is_err()
@@ -520,5 +563,80 @@ impl InputBridge {
              GUI tests will use framework input (reduced accuracy)."
         );
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn ts(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn test_single_x_then_flush() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), 10, 0), None);
+        assert_eq!(c.flush(), Some((10, 0)));
+        assert_eq!(c.flush(), None);
+    }
+
+    #[test]
+    fn test_merge_x_and_y_same_timestamp() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), 5, 0), None);
+        assert_eq!(c.accumulate(ts(1), 0, -3), None);
+        assert_eq!(c.flush(), Some((5, -3)));
+    }
+
+    #[test]
+    fn test_flush_on_timestamp_change() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), 5, 0), None);
+        assert_eq!(c.accumulate(ts(1), 0, -3), None);
+        // New timestamp flushes the previous batch
+        assert_eq!(c.accumulate(ts(2), 10, 0), Some((5, -3)));
+        assert_eq!(c.flush(), Some((10, 0)));
+    }
+
+    #[test]
+    fn test_multiple_sequential_batches() {
+        let mut c = EventCoalescer::new();
+        // Batch 1 at ts(1)
+        assert_eq!(c.accumulate(ts(1), 3, 0), None);
+        assert_eq!(c.accumulate(ts(1), 0, 4), None);
+        // Batch 2 at ts(2) — flushes batch 1
+        assert_eq!(c.accumulate(ts(2), -1, 0), Some((3, 4)));
+        assert_eq!(c.accumulate(ts(2), 0, 2), None);
+        // Batch 3 at ts(3) — flushes batch 2
+        assert_eq!(c.accumulate(ts(3), 7, 0), Some((-1, 2)));
+        assert_eq!(c.accumulate(ts(3), 0, -5), None);
+        // Final flush for batch 3
+        assert_eq!(c.flush(), Some((7, -5)));
+    }
+
+    #[test]
+    fn test_no_flush_when_all_zero() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), 0, 0), None);
+        assert_eq!(c.flush(), None);
+    }
+
+    #[test]
+    fn test_accumulates_multiple_same_axis_same_ts() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), 3, 0), None);
+        assert_eq!(c.accumulate(ts(1), 4, 0), None);
+        assert_eq!(c.flush(), Some((7, 0)));
+    }
+
+    #[test]
+    fn test_negative_deltas() {
+        let mut c = EventCoalescer::new();
+        assert_eq!(c.accumulate(ts(1), -5, 0), None);
+        assert_eq!(c.accumulate(ts(1), 0, 3), None);
+        assert_eq!(c.flush(), Some((-5, 3)));
     }
 }

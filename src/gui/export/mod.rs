@@ -329,3 +329,56 @@ impl TestResultsExport {
 pub fn save_to_file(content: &str, path: &std::path::Path) -> std::io::Result<()> {
     std::fs::write(path, content)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_csv_escape_plain_string() {
+        assert_eq!(csv_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn test_csv_escape_empty_string() {
+        assert_eq!(csv_escape(""), "");
+    }
+
+    #[test]
+    fn test_csv_escape_contains_comma() {
+        assert_eq!(csv_escape("one,two"), "\"one,two\"");
+    }
+
+    #[test]
+    fn test_csv_escape_contains_double_quote() {
+        // Input: say "hi"  →  Output: "say ""hi"""
+        assert_eq!(csv_escape("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn test_csv_escape_contains_newline() {
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn test_csv_escape_comma_and_quote_combined() {
+        // Input: a,b"c  →  Output: "a,b""c"
+        assert_eq!(csv_escape("a,b\"c"), "\"a,b\"\"c\"");
+    }
+
+    #[test]
+    fn test_csv_escape_carriage_return_not_handled() {
+        // Documents that bare \r does NOT trigger quoting (current behavior)
+        assert_eq!(csv_escape("a\rb"), "a\rb");
+    }
+
+    #[test]
+    fn test_csv_escape_formula_injection_not_handled() {
+        // Documents that formula-injection prefixes are NOT quoted (current behavior).
+        // A future hardening pass may choose to address this.
+        assert_eq!(csv_escape("=cmd"), "=cmd");
+        assert_eq!(csv_escape("+cmd"), "+cmd");
+        assert_eq!(csv_escape("-cmd"), "-cmd");
+        assert_eq!(csv_escape("@cmd"), "@cmd");
+    }
+}

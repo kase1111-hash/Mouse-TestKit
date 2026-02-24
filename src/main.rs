@@ -1,4 +1,4 @@
-//! Mouse-TestKit CLI Application
+//! Mouse TRAP CLI Application
 //!
 //! A terminal-based mouse testing utility that provides comprehensive diagnostics
 //! for mouse hardware and performance. This CLI version requires Linux or Windows
@@ -34,8 +34,8 @@ use std::io::{self, Write};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn main() {
     println!("╔════════════════════════════════════╗");
-    println!("║        Mouse-TestKit v0.1.0        ║");
-    println!("║     Mouse Testing Utility          ║");
+    println!("║        Mouse TRAP v0.1.0           ║");
+    println!("║  Test Response And Positioning     ║");
     println!("╚════════════════════════════════════╝");
     println!();
 
@@ -58,7 +58,7 @@ fn main() {
             "11" => tests::jitter::run(),
             "12" => tests::standard::run_all(),
             "0" => {
-                println!("Exiting Mouse-TestKit. Goodbye!");
+                println!("Exiting Mouse TRAP. Goodbye!");
                 break;
             }
             _ => println!("Invalid option. Please try again."),
@@ -70,8 +70,8 @@ fn main() {
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn main() {
     println!("╔════════════════════════════════════╗");
-    println!("║        Mouse-TestKit v0.1.0        ║");
-    println!("║     Mouse Testing Utility          ║");
+    println!("║        Mouse TRAP v0.1.0           ║");
+    println!("║  Test Response And Positioning     ║");
     println!("╚════════════════════════════════════╝");
     println!();
     println!("The CLI version requires Linux or Windows for raw input access.");

@@ -2,8 +2,8 @@
 name = "mouse-testkit"
 version = "0.1.0"
 edition = "2021"
-description = "A standalone mouse testing utility"
-authors = ["Mouse-TestKit Contributors"]
+description = "Mouse TRAP - Test Response And Positioning"
+authors = ["Mouse TRAP Contributors"]
 license = "MIT"
 readme = "readme.md"
 

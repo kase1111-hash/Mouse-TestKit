@@ -279,3 +279,119 @@ impl DoubleClickPanel {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── calculate_consistency tests ──────────────────────────────────────
+
+    #[test]
+    fn test_consistency_empty_intervals() {
+        let panel = DoubleClickPanel::new();
+        assert_eq!(panel.calculate_consistency(), 0.0);
+    }
+
+    #[test]
+    fn test_consistency_single_interval() {
+        let mut panel = DoubleClickPanel::new();
+        panel.intervals = vec![200.0];
+        panel.avg_interval = 200.0;
+        // len() < 2 guard triggers
+        assert_eq!(panel.calculate_consistency(), 0.0);
+    }
+
+    #[test]
+    fn test_consistency_identical_intervals() {
+        let mut panel = DoubleClickPanel::new();
+        panel.intervals = vec![200.0, 200.0, 200.0, 200.0];
+        panel.avg_interval = 200.0;
+        // Std dev is 0, CoV is 0, consistency is 100%
+        let result = panel.calculate_consistency();
+        assert!((result - 100.0).abs() < 0.01, "expected ~100.0, got {}", result);
+    }
+
+    #[test]
+    fn test_consistency_high_variation() {
+        let mut panel = DoubleClickPanel::new();
+        panel.intervals = vec![50.0, 500.0, 50.0, 500.0];
+        panel.avg_interval = 275.0;
+        // Std dev = 225, CoV = 225/275 ≈ 0.818, consistency ≈ 18.2%
+        let result = panel.calculate_consistency();
+        assert!(result > 15.0 && result < 25.0, "expected 15-25, got {}", result);
+    }
+
+    #[test]
+    fn test_consistency_moderate_variation() {
+        let mut panel = DoubleClickPanel::new();
+        panel.intervals = vec![200.0, 210.0, 190.0, 205.0, 195.0];
+        panel.avg_interval = 200.0;
+        // Std dev ≈ 7.07, CoV ≈ 0.035, consistency ≈ 96.5%
+        let result = panel.calculate_consistency();
+        assert!(result > 90.0, "expected >90, got {}", result);
+    }
+
+    #[test]
+    fn test_consistency_mean_near_zero() {
+        let mut panel = DoubleClickPanel::new();
+        panel.intervals = vec![0.5, 0.5];
+        panel.avg_interval = 0.5;
+        // mean.max(1.0) clamps denominator to 1.0, std dev is 0
+        // so consistency is (1.0 - 0.0) * 100 = 100%
+        let result = panel.calculate_consistency();
+        assert!((result - 100.0).abs() < 0.01, "expected ~100.0, got {}", result);
+    }
+
+    // ── register_click tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_register_click_first_click() {
+        let mut panel = DoubleClickPanel::new();
+        panel.register_click();
+        assert_eq!(panel.clicks.len(), 1);
+        assert!(panel.intervals.is_empty());
+    }
+
+    #[test]
+    fn test_register_click_second_click_produces_interval() {
+        let mut panel = DoubleClickPanel::new();
+        panel.register_click();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        panel.register_click();
+        assert_eq!(panel.clicks.len(), 2);
+        assert_eq!(panel.intervals.len(), 1);
+        assert!(panel.intervals[0] > 0.0);
+    }
+
+    // ── settings_changed tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_settings_changed_detection() {
+        let mut panel = DoubleClickPanel::new();
+        // Fresh panel — no change
+        assert!(!panel.settings_changed());
+        // Mutate threshold
+        panel.threshold_ms = 80.0;
+        assert!(panel.settings_changed());
+        // Called again — last_saved_threshold was updated, so no change
+        assert!(!panel.settings_changed());
+    }
+
+    // ── clear tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_resets_all_state() {
+        let mut panel = DoubleClickPanel::new();
+        panel.register_click();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        panel.register_click();
+        panel.clear();
+        assert!(panel.clicks.is_empty());
+        assert!(panel.intervals.is_empty());
+        assert_eq!(panel.avg_interval, 0.0);
+        assert_eq!(panel.min_interval, f64::MAX);
+        assert_eq!(panel.max_interval, 0.0);
+        assert_eq!(panel.double_click_count, 0);
+        assert_eq!(panel.accidental_double_clicks, 0);
+    }
+}

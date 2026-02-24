@@ -23,8 +23,6 @@ pub struct ScrollPanel {
     speed_samples: VecDeque<f64>,
     /// Last scroll time for speed calculation
     last_scroll_time: Option<Instant>,
-    /// Missed scroll events (gaps in expected smooth scroll)
-    missed_events: usize,
     /// Current scroll speed (steps per second)
     current_speed: f64,
 }
@@ -46,7 +44,6 @@ impl ScrollPanel {
             last_direction: None,
             speed_samples: VecDeque::with_capacity(100),
             last_scroll_time: None,
-            missed_events: 0,
             current_speed: 0.0,
         }
     }
@@ -418,7 +415,6 @@ impl ScrollPanel {
         self.last_direction = None;
         self.speed_samples.clear();
         self.last_scroll_time = None;
-        self.missed_events = 0;
         self.current_speed = 0.0;
     }
 

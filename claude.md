@@ -1,8 +1,8 @@
-# Claude.md - Mouse-TestKit
+# Claude.md - Mouse TRAP
 
 ## Project Overview
 
-Mouse-TestKit is a cross-platform mouse diagnostics and testing utility written in Rust. It provides both GUI and CLI interfaces for testing mouse hardware performance, including polling rate, click response, jitter, DPI accuracy, and more.
+Mouse TRAP (Test Response And Positioning) is a cross-platform mouse diagnostics and testing utility written in Rust. It provides both GUI and CLI interfaces for testing mouse hardware performance, including polling rate, click response, jitter, DPI accuracy, and more.
 
 ## Tech Stack
 
