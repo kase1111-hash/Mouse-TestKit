@@ -20,7 +20,6 @@ pub struct StutterPanel {
     is_running: bool,
     deltas: VecDeque<f64>,
     total_stutter_count: usize,
-    window_stutter_count: usize,
     total_samples: usize,
     avg_delta: f64,
     min_delta: f64,
@@ -36,7 +35,6 @@ impl StutterPanel {
             is_running: false,
             deltas: VecDeque::with_capacity(200),
             total_stutter_count: 0,
-            window_stutter_count: 0,
             total_samples: 0,
             avg_delta: 0.0,
             min_delta: f64::MAX,
@@ -352,10 +350,6 @@ impl StutterPanel {
             self.total_stutter_count += 1;
         }
 
-        // Count stutters in current window
-        self.window_stutter_count = self.deltas.iter()
-            .filter(|d| **d > threshold)
-            .count();
     }
 
     fn start(&mut self) {
@@ -363,7 +357,6 @@ impl StutterPanel {
         self.last_move_time = None;
         self.deltas.clear();
         self.total_stutter_count = 0;
-        self.window_stutter_count = 0;
         self.total_samples = 0;
         self.avg_delta = 0.0;
         self.min_delta = f64::MAX;
@@ -375,7 +368,6 @@ impl StutterPanel {
         self.last_move_time = None;
         self.deltas.clear();
         self.total_stutter_count = 0;
-        self.window_stutter_count = 0;
         self.total_samples = 0;
         self.avg_delta = 0.0;
         self.min_delta = f64::MAX;
