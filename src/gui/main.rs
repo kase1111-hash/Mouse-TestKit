@@ -27,8 +27,8 @@ pub mod input_bridge;
 mod panels;
 mod theme;
 
-use eframe::egui;
 use app::MouseTestKitApp;
+use eframe::egui;
 
 /// Generate mouse head icon as RGBA pixels (32x32)
 fn create_mouse_icon() -> egui::IconData {
@@ -67,7 +67,8 @@ fn create_mouse_icon() -> egui::IconData {
             let ear_right_y = center_y - ear_offset_y;
             let dx_right = px - ear_right_x;
             let dy_right = py - ear_right_y;
-            let in_right_ear = (dx_right * dx_right + dy_right * dy_right) <= ear_radius * ear_radius;
+            let in_right_ear =
+                (dx_right * dx_right + dy_right * dy_right) <= ear_radius * ear_radius;
 
             if in_head || in_left_ear || in_right_ear {
                 let idx = (y * size + x) * 4;

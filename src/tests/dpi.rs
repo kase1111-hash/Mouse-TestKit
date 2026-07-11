@@ -1,10 +1,10 @@
 //! DPI Accuracy Test
 //! Verifies mouse DPI matches advertised/configured value
 
-use std::time::{Duration, Instant};
-use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -82,8 +82,13 @@ pub fn run() {
                                 accuracy,
                             });
 
-                            println!("\r\x1B[KSample {}: {} counts = {:.0} DPI ({:.1}% of expected)",
-                                samples.len(), total_counts_x.abs(), measured_dpi, accuracy);
+                            println!(
+                                "\r\x1B[KSample {}: {} counts = {:.0} DPI ({:.1}% of expected)",
+                                samples.len(),
+                                total_counts_x.abs(),
+                                measured_dpi,
+                                accuracy
+                            );
 
                             total_counts_x = 0;
                             total_counts_y = 0;
@@ -113,7 +118,10 @@ pub fn run() {
 
         if last_print.elapsed() >= Duration::from_millis(100) {
             print!("\r\x1B[K");
-            print!("X: {:+6} counts | Y: {:+6} counts | ", total_counts_x, total_counts_y);
+            print!(
+                "X: {:+6} counts | Y: {:+6} counts | ",
+                total_counts_x, total_counts_y
+            );
             print!("Samples: {} | Press SPACE to record", samples.len());
             io::stdout().flush().ok();
             last_print = Instant::now();
@@ -125,8 +133,10 @@ pub fn run() {
     println!("\n\n=== DPI Accuracy Test Complete ===\n");
 
     if !samples.is_empty() {
-        let avg_dpi: f64 = samples.iter().map(|s| s.measured_dpi).sum::<f64>() / samples.len() as f64;
-        let avg_accuracy: f64 = samples.iter().map(|s| s.accuracy).sum::<f64>() / samples.len() as f64;
+        let avg_dpi: f64 =
+            samples.iter().map(|s| s.measured_dpi).sum::<f64>() / samples.len() as f64;
+        let avg_accuracy: f64 =
+            samples.iter().map(|s| s.accuracy).sum::<f64>() / samples.len() as f64;
 
         let mut dpis: Vec<f64> = samples.iter().map(|s| s.measured_dpi).collect();
         dpis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -136,7 +146,11 @@ pub fn run() {
 
         println!("Results:");
         println!("  Average measured DPI: {:.0}", avg_dpi);
-        println!("  DPI range: {:.0} - {:.0}", dpis.first().unwrap(), dpis.last().unwrap());
+        println!(
+            "  DPI range: {:.0} - {:.0}",
+            dpis.first().unwrap(),
+            dpis.last().unwrap()
+        );
         println!("  Average accuracy: {:.1}%", avg_accuracy);
 
         let deviation = ((avg_dpi - expected_dpi) / expected_dpi * 100.0).abs();
@@ -144,8 +158,13 @@ pub fn run() {
 
         println!("\nSamples:");
         for (i, sample) in samples.iter().enumerate() {
-            println!("  #{}: {} counts = {:.0} DPI ({:.1}%)",
-                i + 1, sample.counts, sample.measured_dpi, sample.accuracy);
+            println!(
+                "  #{}: {} counts = {:.0} DPI ({:.1}%)",
+                i + 1,
+                sample.counts,
+                sample.measured_dpi,
+                sample.accuracy
+            );
         }
 
         if deviation < 5.0 {

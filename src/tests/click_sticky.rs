@@ -1,14 +1,14 @@
 //! Click Stickiness Test
 //! Tests for stuck or delayed click release
 
-use std::time::{Duration, Instant};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use crate::input::{self, MouseEvent, MouseButton};
+use crate::input::{self, MouseButton, MouseEvent};
 #[cfg(target_os = "windows")]
-use crate::input_windows::{self as input, MouseEvent, MouseButton};
+use crate::input_windows::{self as input, MouseButton, MouseEvent};
 
 pub const STICKY_THRESHOLD_MS: f64 = 100.0;
 
@@ -40,7 +40,11 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            })) = event::read()
+            {
                 break;
             }
         }
@@ -63,7 +67,10 @@ pub fn run() {
                             let is_sticky = duration > STICKY_THRESHOLD_MS;
 
                             if is_sticky {
-                                println!("\r\x1B[K⚠ STICKY: {:?} held for {:.1}ms", button, duration);
+                                println!(
+                                    "\r\x1B[K⚠ STICKY: {:?} held for {:.1}ms",
+                                    button, duration
+                                );
                             }
 
                             click_holds.push(ClickHold {
@@ -85,8 +92,14 @@ pub fn run() {
 
             if total > 0 {
                 let avg = click_holds.iter().map(|h| h.duration_ms).sum::<f64>() / total as f64;
-                let max = click_holds.iter().map(|h| h.duration_ms).fold(f64::MIN, f64::max);
-                print!("Clicks: {} | Sticky: {} | Avg hold: {:.1}ms | Max: {:.1}ms", total, sticky_count, avg, max);
+                let max = click_holds
+                    .iter()
+                    .map(|h| h.duration_ms)
+                    .fold(f64::MIN, f64::max);
+                print!(
+                    "Clicks: {} | Sticky: {} | Avg hold: {:.1}ms | Max: {:.1}ms",
+                    total, sticky_count, avg, max
+                );
             } else {
                 print!("Waiting for clicks... (Press 'q' to quit)");
             }
@@ -112,12 +125,17 @@ pub fn run() {
         durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("Total clicks analyzed: {}", total);
-        println!("Sticky clicks (>{}ms): {}", STICKY_THRESHOLD_MS, sticky_count);
+        println!(
+            "Sticky clicks (>{}ms): {}",
+            STICKY_THRESHOLD_MS, sticky_count
+        );
         println!("\nHold duration statistics:");
         println!("  Average:  {:.1} ms", avg);
         println!("  Minimum:  {:.1} ms", durations.first().unwrap_or(&0.0));
         println!("  Maximum:  {:.1} ms", durations.last().unwrap_or(&0.0));
-        if durations.len() >= 2 { println!("  Median:   {:.1} ms", durations[durations.len() / 2]); }
+        if durations.len() >= 2 {
+            println!("  Median:   {:.1} ms", durations[durations.len() / 2]);
+        }
 
         if sticky_count > 0 {
             println!("\n⚠ Warning: {} sticky clicks detected!", sticky_count);

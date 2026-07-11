@@ -1,10 +1,10 @@
 //! Acceleration Detection
 //! Tests for unwanted mouse acceleration curves
 
-use std::time::{Duration, Instant};
-use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -87,14 +87,22 @@ pub fn run() {
 
                             if recording_slow {
                                 slow_samples.push(sample);
-                                println!("\r\x1B[KSlow #{}: {} counts in {:.2}s ({:.0} counts/s)",
-                                    slow_samples.len(), total_counts.abs(),
-                                    time.as_secs_f64(), speed);
+                                println!(
+                                    "\r\x1B[KSlow #{}: {} counts in {:.2}s ({:.0} counts/s)",
+                                    slow_samples.len(),
+                                    total_counts.abs(),
+                                    time.as_secs_f64(),
+                                    speed
+                                );
                             } else {
                                 fast_samples.push(sample);
-                                println!("\r\x1B[KFast #{}: {} counts in {:.2}s ({:.0} counts/s)",
-                                    fast_samples.len(), total_counts.abs(),
-                                    time.as_secs_f64(), speed);
+                                println!(
+                                    "\r\x1B[KFast #{}: {} counts in {:.2}s ({:.0} counts/s)",
+                                    fast_samples.len(),
+                                    total_counts.abs(),
+                                    time.as_secs_f64(),
+                                    speed
+                                );
                             }
 
                             total_counts = 0;
@@ -128,7 +136,8 @@ pub fn run() {
 
         if last_print.elapsed() >= Duration::from_millis(100) {
             print!("\r\x1B[K");
-            print!("[{}] Counts: {} | Slow: {} | Fast: {} | ",
+            print!(
+                "[{}] Counts: {} | Slow: {} | Fast: {} | ",
                 if recording_slow { "SLOW" } else { "FAST" },
                 total_counts,
                 slow_samples.len(),
@@ -144,15 +153,15 @@ pub fn run() {
     println!("\n\n=== Acceleration Detection Complete ===\n");
 
     if !slow_samples.is_empty() && !fast_samples.is_empty() {
-        let avg_slow_counts: f64 = slow_samples.iter().map(|s| s.counts as f64).sum::<f64>()
-            / slow_samples.len() as f64;
-        let avg_fast_counts: f64 = fast_samples.iter().map(|s| s.counts as f64).sum::<f64>()
-            / fast_samples.len() as f64;
+        let avg_slow_counts: f64 =
+            slow_samples.iter().map(|s| s.counts as f64).sum::<f64>() / slow_samples.len() as f64;
+        let avg_fast_counts: f64 =
+            fast_samples.iter().map(|s| s.counts as f64).sum::<f64>() / fast_samples.len() as f64;
 
-        let avg_slow_speed: f64 = slow_samples.iter().map(|s| s.speed).sum::<f64>()
-            / slow_samples.len() as f64;
-        let avg_fast_speed: f64 = fast_samples.iter().map(|s| s.speed).sum::<f64>()
-            / fast_samples.len() as f64;
+        let avg_slow_speed: f64 =
+            slow_samples.iter().map(|s| s.speed).sum::<f64>() / slow_samples.len() as f64;
+        let avg_fast_speed: f64 =
+            fast_samples.iter().map(|s| s.speed).sum::<f64>() / fast_samples.len() as f64;
 
         // Calculate acceleration ratio
         // If acceleration exists, fast counts will be higher than slow counts
@@ -178,22 +187,35 @@ pub fn run() {
 
         if count_ratio > 1.2 {
             println!("\n⚠ ACCELERATION DETECTED");
-            println!("  Fast movements register {:.0}% more counts.", (count_ratio - 1.0) * 100.0);
+            println!(
+                "  Fast movements register {:.0}% more counts.",
+                (count_ratio - 1.0) * 100.0
+            );
             println!("  Acceleration coefficient: {:.2}", accel_coefficient);
             println!("  Check OS settings or mouse software to disable.");
         } else if count_ratio > 1.1 {
             println!("\n⚠ Mild acceleration detected");
-            println!("  Fast movements register {:.0}% more counts.", (count_ratio - 1.0) * 100.0);
+            println!(
+                "  Fast movements register {:.0}% more counts.",
+                (count_ratio - 1.0) * 100.0
+            );
         } else if count_ratio < 0.9 {
             println!("\n⚠ Negative acceleration (deceleration) detected");
-            println!("  Fast movements register {:.0}% fewer counts.", (1.0 - count_ratio) * 100.0);
+            println!(
+                "  Fast movements register {:.0}% fewer counts.",
+                (1.0 - count_ratio) * 100.0
+            );
         } else {
             println!("\n✓ No significant acceleration detected");
             println!("  Your mouse appears to have 1:1 input.");
         }
     } else {
         println!("Need both slow and fast samples for comparison.");
-        println!("Slow samples: {}, Fast samples: {}", slow_samples.len(), fast_samples.len());
+        println!(
+            "Slow samples: {}, Fast samples: {}",
+            slow_samples.len(),
+            fast_samples.len()
+        );
     }
 
     terminal::wait_for_enter();

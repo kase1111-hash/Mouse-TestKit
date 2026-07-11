@@ -1,10 +1,10 @@
 //! Angle Snapping Detection
 //! Detects if mouse has angle snapping/prediction enabled
 
-use std::time::{Duration, Instant};
-use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -88,7 +88,11 @@ pub fn run() {
 
         if last_print.elapsed() >= Duration::from_millis(100) {
             print!("\r\x1B[K");
-            print!("Samples: {} | Lines analyzed: {} | ", movements.len(), analysis_results.len());
+            print!(
+                "Samples: {} | Lines analyzed: {} | ",
+                movements.len(),
+                analysis_results.len()
+            );
             print!("Press SPACE to analyze line");
             io::stdout().flush().ok();
             last_print = Instant::now();
@@ -100,8 +104,8 @@ pub fn run() {
     println!("\n\n=== Angle Snapping Detection Complete ===\n");
 
     if !analysis_results.is_empty() {
-        let avg_straightness: f64 = analysis_results.iter()
-            .map(|a| a.straightness).sum::<f64>() / analysis_results.len() as f64;
+        let avg_straightness: f64 = analysis_results.iter().map(|a| a.straightness).sum::<f64>()
+            / analysis_results.len() as f64;
         let snapping_count = analysis_results.iter().filter(|a| a.has_snapping).count();
 
         println!("Lines analyzed: {}", analysis_results.len());
@@ -110,11 +114,16 @@ pub fn run() {
 
         println!("Line details:");
         for (i, result) in analysis_results.iter().enumerate() {
-            println!("  #{}: {:.1}% straight, {:.1}° avg angle {}",
+            println!(
+                "  #{}: {:.1}% straight, {:.1}° avg angle {}",
                 i + 1,
                 result.straightness * 100.0,
                 result.average_angle,
-                if result.has_snapping { "[SNAPPING]" } else { "" }
+                if result.has_snapping {
+                    "[SNAPPING]"
+                } else {
+                    ""
+                }
             );
         }
 
@@ -172,9 +181,8 @@ fn analyze_line(movements: &[(i32, i32)]) -> LineAnalysis {
     let avg_angle: f64 = angles.iter().sum::<f64>() / angles.len() as f64;
 
     // Calculate variance (how much angles deviate from average)
-    let variance: f64 = angles.iter()
-        .map(|a| (a - avg_angle).powi(2))
-        .sum::<f64>() / angles.len() as f64;
+    let variance: f64 =
+        angles.iter().map(|a| (a - avg_angle).powi(2)).sum::<f64>() / angles.len() as f64;
     let std_dev = variance.sqrt();
 
     // Straightness is inverse of variance (normalized)
@@ -234,9 +242,15 @@ mod tests {
         let result = analyze_line(&movements);
 
         // Average angle should be ~0 for horizontal
-        assert!(result.average_angle.abs() < 1.0, "Horizontal movement should have ~0 degree angle");
+        assert!(
+            result.average_angle.abs() < 1.0,
+            "Horizontal movement should have ~0 degree angle"
+        );
         // Very straight line
-        assert!(result.straightness > 0.9, "Horizontal line should be very straight");
+        assert!(
+            result.straightness > 0.9,
+            "Horizontal line should be very straight"
+        );
     }
 
     #[test]
@@ -246,7 +260,10 @@ mod tests {
         let result = analyze_line(&movements);
 
         // Average angle should be ~90 for vertical
-        assert!((result.average_angle - 90.0).abs() < 1.0, "Vertical movement should have ~90 degree angle");
+        assert!(
+            (result.average_angle - 90.0).abs() < 1.0,
+            "Vertical movement should have ~90 degree angle"
+        );
     }
 
     #[test]
@@ -256,7 +273,10 @@ mod tests {
         let result = analyze_line(&movements);
 
         // Average angle should be ~45 degrees
-        assert!((result.average_angle - 45.0).abs() < 1.0, "45 degree diagonal should have ~45 degree angle");
+        assert!(
+            (result.average_angle - 45.0).abs() < 1.0,
+            "45 degree diagonal should have ~45 degree angle"
+        );
     }
 
     #[test]
@@ -267,23 +287,49 @@ mod tests {
 
         // Perfectly consistent movements should trigger snapping detection
         // (std_dev < 3.0 and len > 20)
-        assert!(result.has_snapping, "Perfectly consistent diagonal should detect snapping");
+        assert!(
+            result.has_snapping,
+            "Perfectly consistent diagonal should detect snapping"
+        );
     }
 
     #[test]
     fn test_analyze_line_no_snapping_with_variation() {
         // Movements with natural hand variation
         let movements: Vec<(i32, i32)> = vec![
-            (10, 9), (9, 11), (11, 10), (10, 8), (8, 12),
-            (12, 10), (10, 11), (11, 9), (9, 10), (10, 10),
-            (10, 13), (13, 7), (7, 10), (10, 12), (12, 8),
-            (8, 11), (11, 9), (9, 14), (14, 6), (6, 10),
-            (10, 11), (11, 9), (9, 10), (10, 12), (12, 8),
+            (10, 9),
+            (9, 11),
+            (11, 10),
+            (10, 8),
+            (8, 12),
+            (12, 10),
+            (10, 11),
+            (11, 9),
+            (9, 10),
+            (10, 10),
+            (10, 13),
+            (13, 7),
+            (7, 10),
+            (10, 12),
+            (12, 8),
+            (8, 11),
+            (11, 9),
+            (9, 14),
+            (14, 6),
+            (6, 10),
+            (10, 11),
+            (11, 9),
+            (9, 10),
+            (10, 12),
+            (12, 8),
         ];
         let result = analyze_line(&movements);
 
         // Variable movements should NOT trigger snapping
-        assert!(!result.has_snapping, "Variable movements should not detect snapping");
+        assert!(
+            !result.has_snapping,
+            "Variable movements should not detect snapping"
+        );
     }
 
     #[test]
@@ -304,13 +350,23 @@ mod tests {
 
         // Variable line should have lower straightness
         let variable_line: Vec<(i32, i32)> = vec![
-            (10, 0), (0, 10), (10, 10), (-10, 10), (5, -5),
-            (10, 0), (0, 10), (10, 10), (-10, 10), (5, -5),
+            (10, 0),
+            (0, 10),
+            (10, 10),
+            (-10, 10),
+            (5, -5),
+            (10, 0),
+            (0, 10),
+            (10, 10),
+            (-10, 10),
+            (5, -5),
         ];
         let result_variable = analyze_line(&variable_line);
 
-        assert!(result_perfect.straightness > result_variable.straightness,
-            "Perfect line should be straighter than variable line");
+        assert!(
+            result_perfect.straightness > result_variable.straightness,
+            "Perfect line should be straighter than variable line"
+        );
     }
 
     #[test]

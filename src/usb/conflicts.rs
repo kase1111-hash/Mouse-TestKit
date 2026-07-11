@@ -20,17 +20,23 @@ pub fn scan() {
     }
 
     // Group devices by bus
-    let mut buses: std::collections::HashMap<u8, Vec<&UsbDevice>> = std::collections::HashMap::new();
+    let mut buses: std::collections::HashMap<u8, Vec<&UsbDevice>> =
+        std::collections::HashMap::new();
     for device in &devices {
         buses.entry(device.bus_id).or_default().push(device);
     }
 
     // Find HID devices (mice, keyboards)
-    let hid_devices: Vec<&UsbDevice> = devices.iter()
+    let hid_devices: Vec<&UsbDevice> = devices
+        .iter()
         .filter(|d| matches!(d.device_class, UsbClass::Hid))
         .collect();
 
-    println!("Found {} USB devices on {} buses\n", devices.len(), buses.len());
+    println!(
+        "Found {} USB devices on {} buses\n",
+        devices.len(),
+        buses.len()
+    );
 
     // Show HID devices and potential conflicts
     if !hid_devices.is_empty() {
@@ -39,8 +45,15 @@ pub fn scan() {
         println!("├─────────────────────────────────────────────────────────┤");
 
         for device in &hid_devices {
-            println!("│ Bus {:02}: {} ", device.bus_id, truncate_name(&device.name, 45));
-            println!("│        VID:{:04x} PID:{:04x}", device.vendor_id, device.product_id);
+            println!(
+                "│ Bus {:02}: {} ",
+                device.bus_id,
+                truncate_name(&device.name, 45)
+            );
+            println!(
+                "│        VID:{:04x} PID:{:04x}",
+                device.vendor_id, device.product_id
+            );
         }
         println!("└─────────────────────────────────────────────────────────┘\n");
     }
@@ -49,19 +62,28 @@ pub fn scan() {
     let mut has_conflicts = false;
 
     for (bus_id, bus_devices) in &buses {
-        let hid_count = bus_devices.iter()
+        let hid_count = bus_devices
+            .iter()
             .filter(|d| matches!(d.device_class, UsbClass::Hid))
             .count();
 
-        let high_bandwidth_count = bus_devices.iter()
-            .filter(|d| matches!(d.device_class, UsbClass::MassStorage | UsbClass::Audio | UsbClass::Video))
+        let high_bandwidth_count = bus_devices
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.device_class,
+                    UsbClass::MassStorage | UsbClass::Audio | UsbClass::Video
+                )
+            })
             .count();
 
         if hid_count > 0 && high_bandwidth_count > 0 {
             has_conflicts = true;
             println!("⚠ Potential conflict on Bus {}:", bus_id);
-            println!("  {} HID device(s) sharing bus with {} high-bandwidth device(s)",
-                hid_count, high_bandwidth_count);
+            println!(
+                "  {} HID device(s) sharing bus with {} high-bandwidth device(s)",
+                hid_count, high_bandwidth_count
+            );
 
             for device in bus_devices {
                 let class_str = match device.device_class {
@@ -102,8 +124,10 @@ pub fn scan() {
                 UsbClass::Hub => "Hub     ",
                 UsbClass::Other => "Other   ",
             };
-            println!("  [{}] {:04x}:{:04x} {}",
-                class_str, device.vendor_id, device.product_id, device.name);
+            println!(
+                "  [{}] {:04x}:{:04x} {}",
+                class_str, device.vendor_id, device.product_id, device.name
+            );
         }
     }
 
@@ -169,7 +193,8 @@ fn parse_usb_device(path: &Path) -> Option<UsbDevice> {
     };
 
     // Extract bus ID from path name (e.g., "1-2" -> bus 1)
-    let bus_id = path.file_name()
+    let bus_id = path
+        .file_name()
         .and_then(|n| n.to_str())
         .and_then(|n| n.split('-').next())
         .and_then(|n| n.parse().ok())
@@ -206,7 +231,7 @@ pub struct UsbDevice {
 }
 
 pub enum UsbClass {
-    Hid,          // Human Interface Device (mice, keyboards)
+    Hid, // Human Interface Device (mice, keyboards)
     MassStorage,
     Audio,
     Video,

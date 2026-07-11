@@ -17,9 +17,6 @@
 //! Run the binary and select tests from the interactive menu.
 //! Most tests require moving or clicking the mouse to gather data.
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-mod tests;
-mod usb;
 mod display;
 #[cfg(target_os = "linux")]
 mod input;
@@ -27,6 +24,9 @@ mod input;
 mod input_windows;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 mod terminal;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod tests;
+mod usb;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::io::{self, Write};

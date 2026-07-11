@@ -17,22 +17,21 @@ use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use winapi::um::winuser::{
-    GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices,
-    RAWINPUTDEVICE, RAWINPUTDEVICELIST, RIDEV_INPUTSINK, RIDI_DEVICENAME, RIM_TYPEMOUSE,
-};
 use winapi::shared::hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
 use winapi::shared::minwindef::UINT;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::winuser::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetRawInputData,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-    HRAWINPUT, MSG, RAWINPUT, RAWINPUTHEADER, RID_INPUT, WM_INPUT,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HRAWINPUT, MSG, RAWINPUT,
+    RAWINPUTHEADER, RID_INPUT, WM_INPUT, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+};
+use winapi::um::winuser::{
+    GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices, RAWINPUTDEVICE,
+    RAWINPUTDEVICELIST, RIDEV_INPUTSINK, RIDI_DEVICENAME, RIM_TYPEMOUSE,
 };
 
 // Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseEvent, MouseButton};
+pub use mouse_testkit::types::{MouseButton, MouseEvent};
 
 /// Represents a connected mouse device on Windows
 pub struct MouseDevice {
@@ -59,7 +58,10 @@ impl MouseDevice {
         while let Ok(data) = self.receiver.try_recv() {
             // Convert raw data to MouseEvents
             if data.dx != 0 || data.dy != 0 {
-                events.push(MouseEvent::Move { dx: data.dx, dy: data.dy });
+                events.push(MouseEvent::Move {
+                    dx: data.dx,
+                    dy: data.dy,
+                });
             }
 
             // Check button flags
@@ -295,7 +297,10 @@ fn run_input_loop(sender: Sender<RawMouseData>) {
             class_name.as_ptr(),
             ptr::null(),
             WS_OVERLAPPEDWINDOW,
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             ptr::null_mut(),
             ptr::null_mut(),
             hinstance,
@@ -390,7 +395,10 @@ unsafe fn process_raw_input(handle: HRAWINPUT, sender: &Sender<RawMouseData>) {
 /// Parse a raw event into a MouseEvent (compatibility with evdev API)
 pub fn parse_event(data: &RawMouseData) -> Option<MouseEvent> {
     if data.dx != 0 || data.dy != 0 {
-        Some(MouseEvent::Move { dx: data.dx, dy: data.dy })
+        Some(MouseEvent::Move {
+            dx: data.dx,
+            dy: data.dy,
+        })
     } else {
         None
     }
