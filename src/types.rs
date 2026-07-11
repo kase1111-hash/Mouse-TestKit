@@ -9,7 +9,10 @@
 /// These types are available on all platforms for use in shared code.
 #[derive(Debug, Clone)]
 pub enum MouseEvent {
-    Move { dx: i32, dy: i32 },
+    Move {
+        dx: i32,
+        dy: i32,
+    },
     ButtonPress(MouseButton),
     ButtonRelease(MouseButton),
     Scroll {
@@ -32,14 +35,14 @@ pub enum MouseButton {
 }
 
 #[cfg(target_os = "linux")]
-impl From<evdev::Key> for MouseButton {
-    fn from(key: evdev::Key) -> Self {
+impl From<evdev::KeyCode> for MouseButton {
+    fn from(key: evdev::KeyCode) -> Self {
         match key {
-            evdev::Key::BTN_LEFT => MouseButton::Left,
-            evdev::Key::BTN_RIGHT => MouseButton::Right,
-            evdev::Key::BTN_MIDDLE => MouseButton::Middle,
-            evdev::Key::BTN_SIDE => MouseButton::Side,
-            evdev::Key::BTN_EXTRA => MouseButton::Extra,
+            evdev::KeyCode::BTN_LEFT => MouseButton::Left,
+            evdev::KeyCode::BTN_RIGHT => MouseButton::Right,
+            evdev::KeyCode::BTN_MIDDLE => MouseButton::Middle,
+            evdev::KeyCode::BTN_SIDE => MouseButton::Side,
+            evdev::KeyCode::BTN_EXTRA => MouseButton::Extra,
             _ => MouseButton::Unknown,
         }
     }

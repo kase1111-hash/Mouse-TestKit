@@ -14,20 +14,20 @@
 //! - [`DoubleClickPanel`] - Switch health and double-click detection
 //! - [`ScrollPanel`] - Scroll wheel consistency testing
 
-mod polling;
-mod stutter;
-mod click;
-mod jitter;
-mod dpi;
 mod accel;
+mod click;
 mod double_click;
+mod dpi;
+mod jitter;
+mod polling;
 mod scroll;
+mod stutter;
 
-pub use polling::PollingPanel;
-pub use stutter::StutterPanel;
-pub use click::ClickPanel;
-pub use jitter::JitterPanel;
-pub use dpi::DpiPanel;
 pub use accel::AccelPanel;
+pub use click::ClickPanel;
 pub use double_click::DoubleClickPanel;
+pub use dpi::DpiPanel;
+pub use jitter::JitterPanel;
+pub use polling::PollingPanel;
 pub use scroll::ScrollPanel;
+pub use stutter::StutterPanel;

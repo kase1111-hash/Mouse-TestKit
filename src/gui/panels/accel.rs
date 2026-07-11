@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui_plot::{Plot, Line, PlotPoints, Points};
+use egui_plot::{Line, Plot, PlotPoints, Points};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -68,11 +68,23 @@ impl AccelPanel {
         self.is_running || self.angle_running
     }
 
-    pub fn ui_accel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui_accel(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         self.ui(ui, ctx, raw_events, has_bridge);
     }
 
-    pub fn ui_angle(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui_angle(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Angle Snapping Detection");
         ui.add_space(5.0);
         ui.label("Detects if your mouse firmware corrects diagonal movements to straight lines.");
@@ -102,12 +114,16 @@ impl AccelPanel {
 
         // Instructions
         if self.angle_running {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(egui::Color32::from_rgb(40, 60, 40))
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Test in Progress").strong().color(egui::Color32::GREEN));
+                    ui.label(
+                        egui::RichText::new("Test in Progress")
+                            .strong()
+                            .color(egui::Color32::GREEN),
+                    );
                     ui.add_space(5.0);
                     ui.label("Draw diagonal lines across the test area.");
                     ui.label("Try various angles: 15°, 30°, 45°, 60°, etc.");
@@ -115,10 +131,10 @@ impl AccelPanel {
                     ui.label(format!("Points recorded: {}", self.angle_points.len()));
                 });
         } else {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("What is Angle Snapping?").strong());
                     ui.add_space(5.0);
@@ -138,15 +154,11 @@ impl AccelPanel {
         // Drawing area
         ui.heading("Movement Path Visualization");
 
-        let points: PlotPoints = self.angle_points
-            .iter()
-            .map(|(x, y)| [*x, *y])
-            .collect();
+        let points: PlotPoints = self.angle_points.iter().map(|(x, y)| [*x, *y]).collect();
 
-        let scatter = Points::new(points)
+        let scatter = Points::new("Movement Path", points)
             .color(egui::Color32::from_rgb(100, 200, 255))
-            .radius(2.0)
-            .name("Movement Path");
+            .radius(2.0);
 
         Plot::new("angle_snap_plot")
             .height(300.0)
@@ -167,7 +179,7 @@ impl AccelPanel {
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(20.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     let (status, color) = if result.has_snapping {
                         ("Angle Snapping DETECTED", egui::Color32::RED)
@@ -206,7 +218,10 @@ impl AccelPanel {
                         // Negate Y because screen coordinates have Y increasing downward,
                         // but plot coordinates have Y increasing upward
                         self.angle_accumulated_pos.1 -= dy as f64;
-                        self.angle_points.push_back((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
+                        self.angle_points.push_back((
+                            self.angle_accumulated_pos.0,
+                            self.angle_accumulated_pos.1,
+                        ));
 
                         // Keep a reasonable number of points
                         if self.angle_points.len() > 2000 {
@@ -223,7 +238,8 @@ impl AccelPanel {
                     // but plot coordinates have Y increasing upward
                     self.angle_accumulated_pos.0 += delta.x as f64;
                     self.angle_accumulated_pos.1 -= delta.y as f64;
-                    self.angle_points.push_back((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
+                    self.angle_points
+                        .push_back((self.angle_accumulated_pos.0, self.angle_accumulated_pos.1));
 
                     // Keep a reasonable number of points
                     if self.angle_points.len() > 2000 {
@@ -279,7 +295,13 @@ impl AccelPanel {
         });
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
         ui.label("Detects mouse acceleration (pointer speed varies with movement speed).");
@@ -304,25 +326,35 @@ impl AccelPanel {
 
         // Instructions
         if self.is_running {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(egui::Color32::from_rgb(40, 60, 40))
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Test in Progress").strong().color(egui::Color32::GREEN));
+                    ui.label(
+                        egui::RichText::new("Test in Progress")
+                            .strong()
+                            .color(egui::Color32::GREEN),
+                    );
                     ui.add_space(5.0);
                     ui.label("Alternate between SLOW and FAST mouse movements");
                     ui.label("Move the same physical distance at different speeds");
                     ui.add_space(10.0);
-                    ui.label(format!("Current velocity: {:.1} px/s", self.current_velocity));
-                    ui.label(format!("Slow samples: {} | Fast samples: {}",
-                        self.slow_movements.len(), self.fast_movements.len()));
+                    ui.label(format!(
+                        "Current velocity: {:.1} px/s",
+                        self.current_velocity
+                    ));
+                    ui.label(format!(
+                        "Slow samples: {} | Fast samples: {}",
+                        self.slow_movements.len(),
+                        self.fast_movements.len()
+                    ));
                 });
         } else {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("How This Test Works").strong());
                     ui.add_space(5.0);
@@ -341,24 +373,22 @@ impl AccelPanel {
         // Velocity graph
         ui.heading("Velocity vs Distance Ratio");
 
-        let points: PlotPoints = self.samples
+        let points: PlotPoints = self
+            .samples
             .iter()
             .map(|s| [s.velocity, s.distance_ratio])
             .collect();
 
-        let scatter = egui_plot::Points::new(points)
+        let scatter = egui_plot::Points::new("Samples", points)
             .color(egui::Color32::from_rgb(100, 200, 255))
-            .radius(4.0)
-            .name("Samples");
+            .radius(4.0);
 
         // Ideal line (no acceleration = 1.0 ratio at all velocities)
-        let ideal_line = Line::new(PlotPoints::from_explicit_callback(
-            |_x| 1.0,
-            0.0..2000.0,
-            100
-        ))
+        let ideal_line = Line::new(
+            "No Acceleration (Ideal)",
+            PlotPoints::from_explicit_callback(|_x| 1.0, 0.0..2000.0, 100),
+        )
         .color(egui::Color32::GREEN)
-        .name("No Acceleration (Ideal)")
         .width(2.0);
 
         Plot::new("accel_plot")
@@ -382,7 +412,7 @@ impl AccelPanel {
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(20.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     let (status, color) = if result.has_acceleration {
                         ("Acceleration DETECTED", egui::Color32::RED)
@@ -396,19 +426,29 @@ impl AccelPanel {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label("Acceleration Factor");
-                            ui.label(egui::RichText::new(format!("{:.2}x", result.accel_factor)).size(20.0));
+                            ui.label(
+                                egui::RichText::new(format!("{:.2}x", result.accel_factor))
+                                    .size(20.0),
+                            );
                         });
                         ui.add_space(40.0);
                         ui.vertical(|ui| {
                             ui.label("Confidence");
-                            ui.label(egui::RichText::new(format!("{:.0}%", result.confidence)).size(20.0));
+                            ui.label(
+                                egui::RichText::new(format!("{:.0}%", result.confidence))
+                                    .size(20.0),
+                            );
                         });
                     });
 
                     if result.has_acceleration {
                         ui.add_space(15.0);
-                        ui.label(egui::RichText::new("Recommendation: Disable mouse acceleration in your OS settings")
-                            .color(egui::Color32::YELLOW));
+                        ui.label(
+                            egui::RichText::new(
+                                "Recommendation: Disable mouse acceleration in your OS settings",
+                            )
+                            .color(egui::Color32::YELLOW),
+                        );
                     }
                 });
         }
@@ -450,7 +490,8 @@ impl AccelPanel {
                                 let slow_avg = if self.slow_movements.is_empty() {
                                     1.0
                                 } else {
-                                    self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
+                                    self.slow_movements.iter().sum::<f64>()
+                                        / self.slow_movements.len() as f64
                                 };
 
                                 let ratio = distance / slow_avg.max(1.0);
@@ -507,7 +548,8 @@ impl AccelPanel {
                             let slow_avg = if self.slow_movements.is_empty() {
                                 1.0
                             } else {
-                                self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64
+                                self.slow_movements.iter().sum::<f64>()
+                                    / self.slow_movements.len() as f64
                             };
 
                             let ratio = distance / slow_avg.max(1.0);
@@ -557,8 +599,10 @@ impl AccelPanel {
             return;
         }
 
-        let slow_avg: f64 = self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64;
-        let fast_avg: f64 = self.fast_movements.iter().sum::<f64>() / self.fast_movements.len() as f64;
+        let slow_avg: f64 =
+            self.slow_movements.iter().sum::<f64>() / self.slow_movements.len() as f64;
+        let fast_avg: f64 =
+            self.fast_movements.iter().sum::<f64>() / self.fast_movements.len() as f64;
 
         let accel_factor = fast_avg / slow_avg.max(0.001);
         let has_acceleration = !(0.85..=1.15).contains(&accel_factor);
@@ -574,13 +618,15 @@ impl AccelPanel {
     }
 
     pub fn export_accel(&self) -> Option<AccelerationExport> {
-        self.detection_result.as_ref().map(|result| AccelerationExport {
-            has_acceleration: result.has_acceleration,
-            accel_factor: result.accel_factor,
-            confidence_percent: result.confidence,
-            slow_sample_count: self.slow_movements.len(),
-            fast_sample_count: self.fast_movements.len(),
-        })
+        self.detection_result
+            .as_ref()
+            .map(|result| AccelerationExport {
+                has_acceleration: result.has_acceleration,
+                accel_factor: result.accel_factor,
+                confidence_percent: result.confidence,
+                slow_sample_count: self.slow_movements.len(),
+                fast_sample_count: self.fast_movements.len(),
+            })
     }
 
     pub fn export_angle(&self) -> Option<AngleSnapExport> {

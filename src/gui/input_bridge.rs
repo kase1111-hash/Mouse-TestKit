@@ -145,7 +145,7 @@ impl InputBridge {
     /// Returns `None` if no mouse device is found or permissions are insufficient.
     /// Does NOT grab the device — the GUI still needs normal pointer input for its UI.
     pub fn start() -> Option<Self> {
-        use evdev::{Device, RelativeAxisType, Key};
+        use evdev::{Device, KeyCode, RelativeAxisCode};
         use std::fs;
 
         // Find the first mouse device by scanning /dev/input/event*
@@ -166,23 +166,16 @@ impl InputBridge {
                     Ok(device) => {
                         let has_rel_x = device
                             .supported_relative_axes()
-                            .map(|axes| axes.contains(RelativeAxisType::REL_X))
+                            .map(|axes| axes.contains(RelativeAxisCode::REL_X))
                             .unwrap_or(false);
                         let has_left_btn = device
                             .supported_keys()
-                            .map(|keys| keys.contains(Key::BTN_LEFT))
+                            .map(|keys| keys.contains(KeyCode::BTN_LEFT))
                             .unwrap_or(false);
 
                         if has_rel_x && has_left_btn {
-                            let name = device
-                                .name()
-                                .unwrap_or("Unknown")
-                                .to_string();
-                            eprintln!(
-                                "InputBridge: using device '{}' at {}",
-                                name,
-                                path.display()
-                            );
+                            let name = device.name().unwrap_or("Unknown").to_string();
+                            eprintln!("InputBridge: using device '{}' at {}", name, path.display());
                             mouse_device = Some(device);
                             break;
                         }
@@ -225,7 +218,7 @@ impl InputBridge {
     /// into a single `Move { dx, dy }` event. This prevents double-counting
     /// for polling rate measurement (one physical poll → one Move event).
     fn linux_event_loop(mut device: evdev::Device, sender: mpsc::Sender<RawInputEvent>) {
-        use evdev::{InputEventKind, RelativeAxisType, Key};
+        use evdev::{EventSummary, KeyCode, RelativeAxisCode};
 
         let mut coalescer = EventCoalescer::new();
 
@@ -235,18 +228,16 @@ impl InputBridge {
                     for ev in events {
                         let ts = ev.timestamp();
 
-                        match ev.kind() {
-                            InputEventKind::RelAxis(axis) => {
+                        match ev.destructure() {
+                            EventSummary::RelativeAxis(_, axis, value) => {
                                 let (dx, dy) = match axis {
-                                    RelativeAxisType::REL_X => (ev.value(), 0),
-                                    RelativeAxisType::REL_Y => (0, ev.value()),
-                                    RelativeAxisType::REL_WHEEL
-                                    | RelativeAxisType::REL_WHEEL_HI_RES => {
+                                    RelativeAxisCode::REL_X => (value, 0),
+                                    RelativeAxisCode::REL_Y => (0, value),
+                                    RelativeAxisCode::REL_WHEEL
+                                    | RelativeAxisCode::REL_WHEEL_HI_RES => {
                                         if sender
                                             .send(RawInputEvent {
-                                                kind: RawInputKind::Scroll {
-                                                    delta: ev.value(),
-                                                },
+                                                kind: RawInputKind::Scroll { delta: value },
                                                 timestamp: Instant::now(),
                                             })
                                             .is_err()
@@ -269,19 +260,19 @@ impl InputBridge {
                                     }
                                 }
                             }
-                            InputEventKind::Key(key) => {
+                            EventSummary::Key(_, key, value) => {
                                 let button = match key {
-                                    Key::BTN_LEFT => Some(RawButton::Left),
-                                    Key::BTN_RIGHT => Some(RawButton::Right),
-                                    Key::BTN_MIDDLE => Some(RawButton::Middle),
-                                    Key::BTN_SIDE => Some(RawButton::Side),
-                                    Key::BTN_EXTRA => Some(RawButton::Extra),
+                                    KeyCode::BTN_LEFT => Some(RawButton::Left),
+                                    KeyCode::BTN_RIGHT => Some(RawButton::Right),
+                                    KeyCode::BTN_MIDDLE => Some(RawButton::Middle),
+                                    KeyCode::BTN_SIDE => Some(RawButton::Side),
+                                    KeyCode::BTN_EXTRA => Some(RawButton::Extra),
                                     _ => None,
                                 };
                                 if let Some(btn) = button {
-                                    let kind = if ev.value() == 1 {
+                                    let kind = if value == 1 {
                                         RawInputKind::ButtonPress(btn)
-                                    } else if ev.value() == 0 {
+                                    } else if value == 0 {
                                         RawInputKind::ButtonRelease(btn)
                                     } else {
                                         continue; // ignore repeat (value == 2)
@@ -361,11 +352,10 @@ impl InputBridge {
             use winapi::shared::minwindef::UINT;
             use winapi::um::libloaderapi::GetModuleHandleW;
             use winapi::um::winuser::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-                GetRawInputData, RegisterClassW, RegisterRawInputDevices, TranslateMessage,
-                CS_HREDRAW, CS_VREDRAW, HRAWINPUT, MSG, RAWINPUT, RAWINPUTDEVICE,
-                RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE, WM_INPUT,
-                WNDCLASSW, WS_OVERLAPPEDWINDOW,
+                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetRawInputData,
+                RegisterClassW, RegisterRawInputDevices, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+                HRAWINPUT, MSG, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK,
+                RID_INPUT, RIM_TYPEMOUSE, WM_INPUT, WNDCLASSW, WS_OVERLAPPEDWINDOW,
             };
 
             // Register window class
@@ -415,12 +405,7 @@ impl InputBridge {
                 hwndTarget: hwnd,
             };
 
-            if RegisterRawInputDevices(
-                &rid,
-                1,
-                mem::size_of::<RAWINPUTDEVICE>() as UINT,
-            ) == 0
-            {
+            if RegisterRawInputDevices(&rid, 1, mem::size_of::<RAWINPUTDEVICE>() as UINT) == 0 {
                 eprintln!("InputBridge: failed to register for raw input");
                 return;
             }

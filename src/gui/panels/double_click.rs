@@ -69,10 +69,12 @@ impl DoubleClickPanel {
         // Threshold setting
         ui.horizontal(|ui| {
             ui.label("Accidental double-click threshold:");
-            ui.add(egui::DragValue::new(&mut self.threshold_ms)
-                .range(10.0..=100.0)
-                .speed(1.0)
-                .suffix(" ms"));
+            ui.add(
+                egui::DragValue::new(&mut self.threshold_ms)
+                    .range(10.0..=100.0)
+                    .speed(1.0)
+                    .suffix(" ms"),
+            );
             ui.label(egui::RichText::new("(clicks faster than this are flagged)").weak());
         });
 
@@ -84,11 +86,11 @@ impl DoubleClickPanel {
             let button = egui::Button::new(
                 egui::RichText::new("CLICK HERE")
                     .size(32.0)
-                    .color(egui::Color32::WHITE)
+                    .color(egui::Color32::WHITE),
             )
             .fill(egui::Color32::from_rgb(60, 100, 180))
             .min_size(button_size)
-            .rounding(12.0);
+            .corner_radius(12.0);
 
             if ui.add(button).clicked() {
                 self.register_click();
@@ -105,17 +107,40 @@ impl DoubleClickPanel {
         // Stats
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    self.stat_box(ui, "Total Clicks", &format!("{}", self.clicks.len()), egui::Color32::WHITE);
+                    self.stat_box(
+                        ui,
+                        "Total Clicks",
+                        &format!("{}", self.clicks.len()),
+                        egui::Color32::WHITE,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Double-Clicks", &format!("{}", self.double_click_count), egui::Color32::LIGHT_GREEN);
+                    self.stat_box(
+                        ui,
+                        "Double-Clicks",
+                        &format!("{}", self.double_click_count),
+                        egui::Color32::LIGHT_GREEN,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Accidental", &format!("{}", self.accidental_double_clicks),
-                        if self.accidental_double_clicks > 0 { egui::Color32::RED } else { egui::Color32::GREEN });
+                    self.stat_box(
+                        ui,
+                        "Accidental",
+                        &format!("{}", self.accidental_double_clicks),
+                        if self.accidental_double_clicks > 0 {
+                            egui::Color32::RED
+                        } else {
+                            egui::Color32::GREEN
+                        },
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Avg Interval", &format!("{:.1} ms", self.avg_interval), egui::Color32::YELLOW);
+                    self.stat_box(
+                        ui,
+                        "Avg Interval",
+                        &format!("{:.1} ms", self.avg_interval),
+                        egui::Color32::YELLOW,
+                    );
                 });
             });
 
@@ -125,17 +150,32 @@ impl DoubleClickPanel {
         if !self.intervals.is_empty() {
             ui.heading("Click Intervals");
 
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(format!("Min: {:.1} ms", if self.min_interval == f64::MAX { 0.0 } else { self.min_interval }));
+                        ui.label(format!(
+                            "Min: {:.1} ms",
+                            if self.min_interval == f64::MAX {
+                                0.0
+                            } else {
+                                self.min_interval
+                            }
+                        ));
                         ui.add_space(20.0);
                         ui.label(format!("Max: {:.1} ms", self.max_interval));
                         ui.add_space(20.0);
-                        ui.label(format!("Range: {:.1} ms", self.max_interval - if self.min_interval == f64::MAX { 0.0 } else { self.min_interval }));
+                        ui.label(format!(
+                            "Range: {:.1} ms",
+                            self.max_interval
+                                - if self.min_interval == f64::MAX {
+                                    0.0
+                                } else {
+                                    self.min_interval
+                                }
+                        ));
                     });
 
                     ui.add_space(15.0);
@@ -170,22 +210,46 @@ impl DoubleClickPanel {
             // Primary concern is detecting switch issues (accidental double-clicks)
             // Consistency is secondary - humans naturally vary in click timing
             let (rating, color, message) = if self.accidental_double_clicks > 2 {
-                ("Switch Issue", egui::Color32::RED,
-                 format!("{} accidental double-clicks detected! Your mouse switch may be failing.", self.accidental_double_clicks))
+                (
+                    "Switch Issue",
+                    egui::Color32::RED,
+                    format!(
+                        "{} accidental double-clicks detected! Your mouse switch may be failing.",
+                        self.accidental_double_clicks
+                    ),
+                )
             } else if self.accidental_double_clicks > 0 {
-                ("Minor Issue", egui::Color32::YELLOW,
-                 format!("{} accidental double-click(s) detected. Monitor for worsening.", self.accidental_double_clicks))
+                (
+                    "Minor Issue",
+                    egui::Color32::YELLOW,
+                    format!(
+                        "{} accidental double-click(s) detected. Monitor for worsening.",
+                        self.accidental_double_clicks
+                    ),
+                )
             } else if consistency > 50.0 {
-                ("Excellent", egui::Color32::GREEN, "No switch issues detected, good timing consistency".to_string())
+                (
+                    "Excellent",
+                    egui::Color32::GREEN,
+                    "No switch issues detected, good timing consistency".to_string(),
+                )
             } else if consistency > 30.0 {
-                ("Good", egui::Color32::LIGHT_GREEN, "No switch issues detected".to_string())
+                (
+                    "Good",
+                    egui::Color32::LIGHT_GREEN,
+                    "No switch issues detected".to_string(),
+                )
             } else {
-                ("OK", egui::Color32::LIGHT_BLUE, "No switch issues detected (click timing varies, which is normal)".to_string())
+                (
+                    "OK",
+                    egui::Color32::LIGHT_BLUE,
+                    "No switch issues detected (click timing varies, which is normal)".to_string(),
+                )
             };
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Rating:");
@@ -242,9 +306,12 @@ impl DoubleClickPanel {
         }
 
         let mean = self.avg_interval;
-        let variance: f64 = self.intervals.iter()
+        let variance: f64 = self
+            .intervals
+            .iter()
             .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / self.intervals.len() as f64;
+            .sum::<f64>()
+            / self.intervals.len() as f64;
         let std_dev = variance.sqrt();
 
         // Convert to consistency score (lower std_dev = higher consistency)
@@ -271,7 +338,11 @@ impl DoubleClickPanel {
             double_click_count: self.double_click_count,
             accidental_double_clicks: self.accidental_double_clicks,
             avg_interval_ms: self.avg_interval,
-            min_interval_ms: if self.min_interval == f64::MAX { 0.0 } else { self.min_interval },
+            min_interval_ms: if self.min_interval == f64::MAX {
+                0.0
+            } else {
+                self.min_interval
+            },
             max_interval_ms: self.max_interval,
             threshold_ms: self.threshold_ms,
             consistency_percent: self.calculate_consistency(),
@@ -308,7 +379,11 @@ mod tests {
         panel.avg_interval = 200.0;
         // Std dev is 0, CoV is 0, consistency is 100%
         let result = panel.calculate_consistency();
-        assert!((result - 100.0).abs() < 0.01, "expected ~100.0, got {}", result);
+        assert!(
+            (result - 100.0).abs() < 0.01,
+            "expected ~100.0, got {}",
+            result
+        );
     }
 
     #[test]
@@ -318,7 +393,11 @@ mod tests {
         panel.avg_interval = 275.0;
         // Std dev = 225, CoV = 225/275 ≈ 0.818, consistency ≈ 18.2%
         let result = panel.calculate_consistency();
-        assert!(result > 15.0 && result < 25.0, "expected 15-25, got {}", result);
+        assert!(
+            result > 15.0 && result < 25.0,
+            "expected 15-25, got {}",
+            result
+        );
     }
 
     #[test]
@@ -339,7 +418,11 @@ mod tests {
         // mean.max(1.0) clamps denominator to 1.0, std dev is 0
         // so consistency is (1.0 - 0.0) * 100 = 100%
         let result = panel.calculate_consistency();
-        assert!((result - 100.0).abs() < 0.01, "expected ~100.0, got {}", result);
+        assert!(
+            (result - 100.0).abs() < 0.01,
+            "expected ~100.0, got {}",
+            result
+        );
     }
 
     // ── register_click tests ────────────────────────────────────────────

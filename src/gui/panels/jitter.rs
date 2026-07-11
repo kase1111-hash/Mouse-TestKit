@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui_plot::{Plot, Points, PlotPoints};
+use egui_plot::{Plot, PlotPoints, Points};
 use std::time::Instant;
 
 use crate::export::{JitterExport, JitterSampleExport};
@@ -39,7 +39,13 @@ impl JitterPanel {
         self.is_sampling
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Jitter Test");
         ui.add_space(5.0);
         ui.label("Measures sensor noise when the mouse is stationary.");
@@ -61,21 +67,24 @@ impl JitterPanel {
         });
 
         ui.add_space(10.0);
-        ui.label(egui::RichText::new("DO NOT touch the mouse during sampling!").color(egui::Color32::YELLOW));
+        ui.label(
+            egui::RichText::new("DO NOT touch the mouse during sampling!")
+                .color(egui::Color32::YELLOW),
+        );
         ui.add_space(20.0);
 
         // Jitter visualization
         ui.heading("Jitter Visualization");
 
-        let points: PlotPoints = self.current_positions
+        let points: PlotPoints = self
+            .current_positions
             .iter()
             .map(|(x, y)| [*x, *y])
             .collect();
 
-        let scatter = Points::new(points)
+        let scatter = Points::new("Jitter Events", points)
             .color(egui::Color32::from_rgb(255, 100, 100))
-            .radius(3.0)
-            .name("Jitter Events");
+            .radius(3.0);
 
         Plot::new("jitter_plot")
             .height(250.0)
@@ -96,16 +105,27 @@ impl JitterPanel {
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
-                    let avg_events: f64 = self.samples.iter().map(|s| s.events as f64).sum::<f64>() / self.samples.len() as f64;
-                    let avg_distance: f64 = self.samples.iter().map(|s| s.total_distance).sum::<f64>() / self.samples.len() as f64;
-                    let max_jitter: f64 = self.samples.iter().map(|s| s.max_single).fold(0.0, f64::max);
+                    let avg_events: f64 = self.samples.iter().map(|s| s.events as f64).sum::<f64>()
+                        / self.samples.len() as f64;
+                    let avg_distance: f64 =
+                        self.samples.iter().map(|s| s.total_distance).sum::<f64>()
+                            / self.samples.len() as f64;
+                    let max_jitter: f64 = self
+                        .samples
+                        .iter()
+                        .map(|s| s.max_single)
+                        .fold(0.0, f64::max);
 
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
                             ui.label("Samples");
-                            ui.label(egui::RichText::new(format!("{}", self.samples.len())).size(20.0).strong());
+                            ui.label(
+                                egui::RichText::new(format!("{}", self.samples.len()))
+                                    .size(20.0)
+                                    .strong(),
+                            );
                         });
                         ui.add_space(30.0);
                         ui.vertical(|ui| {
@@ -115,12 +135,16 @@ impl JitterPanel {
                         ui.add_space(30.0);
                         ui.vertical(|ui| {
                             ui.label("Avg Distance");
-                            ui.label(egui::RichText::new(format!("{:.2} px", avg_distance)).size(20.0));
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} px", avg_distance)).size(20.0),
+                            );
                         });
                         ui.add_space(30.0);
                         ui.vertical(|ui| {
                             ui.label("Max Jitter");
-                            ui.label(egui::RichText::new(format!("{:.2} px", max_jitter)).size(20.0));
+                            ui.label(
+                                egui::RichText::new(format!("{:.2} px", max_jitter)).size(20.0),
+                            );
                         });
                         ui.add_space(30.0);
                         ui.vertical(|ui| {
@@ -159,7 +183,8 @@ impl JitterPanel {
                                 // but plot coordinates have Y increasing upward
                                 self.accumulated_pos.0 += dx_f;
                                 self.accumulated_pos.1 -= dy_f;
-                                self.current_positions.push((self.accumulated_pos.0, self.accumulated_pos.1));
+                                self.current_positions
+                                    .push((self.accumulated_pos.0, self.accumulated_pos.1));
                             }
                         }
                     }
@@ -174,7 +199,8 @@ impl JitterPanel {
                         // but plot coordinates have Y increasing upward
                         self.accumulated_pos.0 += delta.x as f64;
                         self.accumulated_pos.1 -= delta.y as f64;
-                        self.current_positions.push((self.accumulated_pos.0, self.accumulated_pos.1));
+                        self.current_positions
+                            .push((self.accumulated_pos.0, self.accumulated_pos.1));
                     }
                 }
             }
@@ -191,12 +217,14 @@ impl JitterPanel {
 
     fn finish_sample(&mut self) {
         // Calculate jitter metrics from raw deltas
-        let total_distance: f64 = self.current_deltas
+        let total_distance: f64 = self
+            .current_deltas
             .iter()
             .map(|(dx, dy)| (dx * dx + dy * dy).sqrt())
             .sum();
 
-        let max_single = self.current_deltas
+        let max_single = self
+            .current_deltas
             .iter()
             .map(|(dx, dy)| (dx * dx + dy * dy).sqrt())
             .fold(0.0, f64::max);
@@ -215,9 +243,15 @@ impl JitterPanel {
         if self.samples.is_empty() {
             return None;
         }
-        let avg_events = self.samples.iter().map(|s| s.events as f64).sum::<f64>() / self.samples.len() as f64;
-        let avg_distance = self.samples.iter().map(|s| s.total_distance).sum::<f64>() / self.samples.len() as f64;
-        let max_jitter = self.samples.iter().map(|s| s.max_single).fold(0.0, f64::max);
+        let avg_events =
+            self.samples.iter().map(|s| s.events as f64).sum::<f64>() / self.samples.len() as f64;
+        let avg_distance =
+            self.samples.iter().map(|s| s.total_distance).sum::<f64>() / self.samples.len() as f64;
+        let max_jitter = self
+            .samples
+            .iter()
+            .map(|s| s.max_single)
+            .fold(0.0, f64::max);
 
         let rating = if avg_distance < 1.0 {
             "Excellent"
@@ -235,11 +269,15 @@ impl JitterPanel {
             avg_distance_px: avg_distance,
             max_jitter_px: max_jitter,
             rating: rating.to_string(),
-            samples: self.samples.iter().map(|s| JitterSampleExport {
-                events: s.events,
-                total_distance: s.total_distance,
-                max_single: s.max_single,
-            }).collect(),
+            samples: self
+                .samples
+                .iter()
+                .map(|s| JitterSampleExport {
+                    events: s.events,
+                    total_distance: s.total_distance,
+                    max_single: s.max_single,
+                })
+                .collect(),
         })
     }
 }

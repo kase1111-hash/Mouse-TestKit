@@ -64,8 +64,8 @@ impl DpiPanel {
 
     /// Check if settings have changed since last save
     pub fn settings_changed(&mut self) -> bool {
-        let changed = self.target_dpi != self.last_saved_dpi ||
-                      (self.target_distance_inches - self.last_saved_distance).abs() > 0.01;
+        let changed = self.target_dpi != self.last_saved_dpi
+            || (self.target_distance_inches - self.last_saved_distance).abs() > 0.01;
         if changed {
             self.last_saved_dpi = self.target_dpi;
             self.last_saved_distance = self.target_distance_inches;
@@ -77,7 +77,13 @@ impl DpiPanel {
         self.is_running
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("DPI Accuracy Test");
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
@@ -86,17 +92,21 @@ impl DpiPanel {
         // Configuration
         ui.horizontal(|ui| {
             ui.label("Target DPI:");
-            ui.add(egui::DragValue::new(&mut self.target_dpi)
-                .range(100..=16000)
-                .speed(50));
+            ui.add(
+                egui::DragValue::new(&mut self.target_dpi)
+                    .range(100..=16000)
+                    .speed(50),
+            );
 
             ui.add_space(20.0);
 
             ui.label("Distance (inches):");
-            ui.add(egui::DragValue::new(&mut self.target_distance_inches)
-                .range(0.5..=12.0)
-                .speed(0.1)
-                .fixed_decimals(1));
+            ui.add(
+                egui::DragValue::new(&mut self.target_distance_inches)
+                    .range(0.5..=12.0)
+                    .speed(0.1)
+                    .fixed_decimals(1),
+            );
         });
 
         ui.add_space(15.0);
@@ -120,7 +130,11 @@ impl DpiPanel {
         // Controls display
         ui.horizontal(|ui| {
             if self.is_running {
-                ui.label(egui::RichText::new("Press SPACE to finish | ESC to cancel").strong().color(egui::Color32::GREEN));
+                ui.label(
+                    egui::RichText::new("Press SPACE to finish | ESC to cancel")
+                        .strong()
+                        .color(egui::Color32::GREEN),
+                );
             } else {
                 ui.label(egui::RichText::new("Press SPACE to start measurement").strong());
             }
@@ -136,26 +150,42 @@ impl DpiPanel {
 
         // Instructions
         if self.is_running {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(egui::Color32::from_rgb(40, 60, 40))
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Measurement in Progress").strong().color(egui::Color32::GREEN));
+                    ui.label(
+                        egui::RichText::new("Measurement in Progress")
+                            .strong()
+                            .color(egui::Color32::GREEN),
+                    );
                     ui.add_space(5.0);
-                    ui.label(format!("Move mouse exactly {} inches in a straight line.", self.target_distance_inches));
+                    ui.label(format!(
+                        "Move mouse exactly {} inches in a straight line.",
+                        self.target_distance_inches
+                    ));
                     ui.label("Use a ruler or mousepad markings for accuracy.");
                     ui.add_space(10.0);
-                    ui.label(format!("Accumulated counts: {:.1}", self.accumulated_counts));
-                    ui.label(format!("Expected counts: {:.0}", self.target_dpi as f32 * self.target_distance_inches));
+                    ui.label(format!(
+                        "Accumulated counts: {:.1}",
+                        self.accumulated_counts
+                    ));
+                    ui.label(format!(
+                        "Expected counts: {:.0}",
+                        self.target_dpi as f32 * self.target_distance_inches
+                    ));
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Press SPACE when done moving").color(egui::Color32::YELLOW));
+                    ui.label(
+                        egui::RichText::new("Press SPACE when done moving")
+                            .color(egui::Color32::YELLOW),
+                    );
                 });
         } else {
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("Instructions").strong());
                     ui.label("1. Set your mouse's DPI in its software/hardware");
@@ -175,7 +205,7 @@ impl DpiPanel {
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     egui::Grid::new("dpi_results")
                         .num_columns(4)
@@ -200,7 +230,10 @@ impl DpiPanel {
                                 } else {
                                     egui::Color32::RED
                                 };
-                                ui.label(egui::RichText::new(format!("{:.1}%", sample.accuracy)).color(accuracy_color));
+                                ui.label(
+                                    egui::RichText::new(format!("{:.1}%", sample.accuracy))
+                                        .color(accuracy_color),
+                                );
 
                                 let rating = if sample.accuracy >= 98.0 {
                                     "Excellent"
@@ -219,7 +252,8 @@ impl DpiPanel {
 
             // Average
             if self.samples.len() > 1 {
-                let avg_accuracy: f32 = self.samples.iter().map(|s| s.accuracy).sum::<f32>() / self.samples.len() as f32;
+                let avg_accuracy: f32 = self.samples.iter().map(|s| s.accuracy).sum::<f32>()
+                    / self.samples.len() as f32;
                 ui.add_space(10.0);
                 ui.label(format!("Average Accuracy: {:.1}%", avg_accuracy));
             }
@@ -233,7 +267,8 @@ impl DpiPanel {
                 // most accurate measurement.
                 for ev in raw_events {
                     if let RawInputKind::Move { dx, dy } = ev.kind {
-                        let distance = (((dx as f64) * (dx as f64)) + ((dy as f64) * (dy as f64))).sqrt();
+                        let distance =
+                            (((dx as f64) * (dx as f64)) + ((dy as f64) * (dy as f64))).sqrt();
                         self.accumulated_counts += distance as f32;
 
                         self.current_pos.0 += dx;
@@ -275,10 +310,11 @@ impl DpiPanel {
 
         // Convert to accuracy score: 100% means perfect, lower means deviation in either direction
         self.accuracy_percent = if raw_accuracy > 100.0 {
-            200.0 - raw_accuracy  // e.g., 110% raw -> 90% accuracy
+            200.0 - raw_accuracy // e.g., 110% raw -> 90% accuracy
         } else {
             raw_accuracy
-        }.max(0.0);
+        }
+        .max(0.0);
 
         self.samples.push(DpiSample {
             target_dpi: self.target_dpi,
@@ -294,14 +330,19 @@ impl DpiPanel {
         if self.samples.is_empty() {
             return None;
         }
-        let avg_accuracy = self.samples.iter().map(|s| s.accuracy).sum::<f32>() / self.samples.len() as f32;
+        let avg_accuracy =
+            self.samples.iter().map(|s| s.accuracy).sum::<f32>() / self.samples.len() as f32;
         Some(DpiExport {
             target_dpi: self.target_dpi,
-            samples: self.samples.iter().map(|s| DpiSampleExport {
-                target_dpi: s.target_dpi,
-                measured_dpi: s.measured_dpi,
-                accuracy_percent: s.accuracy,
-            }).collect(),
+            samples: self
+                .samples
+                .iter()
+                .map(|s| DpiSampleExport {
+                    target_dpi: s.target_dpi,
+                    measured_dpi: s.measured_dpi,
+                    accuracy_percent: s.accuracy,
+                })
+                .collect(),
             avg_accuracy_percent: avg_accuracy,
         })
     }

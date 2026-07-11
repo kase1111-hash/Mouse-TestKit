@@ -7,7 +7,7 @@
 //! measurement. Falls back to egui pointer delta on unsupported platforms.
 
 use eframe::egui;
-use egui_plot::{Plot, Line, PlotPoints};
+use egui_plot::{Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -63,9 +63,11 @@ impl PollingPanel {
         ui.label("Measures your mouse's polling rate in real-time.");
         if !has_bridge {
             ui.label(
-                egui::RichText::new("Note: Raw input unavailable — using framework input (reduced accuracy)")
-                    .color(egui::Color32::YELLOW)
-                    .size(11.0),
+                egui::RichText::new(
+                    "Note: Raw input unavailable — using framework input (reduced accuracy)",
+                )
+                .color(egui::Color32::YELLOW)
+                .size(11.0),
             );
         }
         ui.add_space(15.0);
@@ -90,18 +92,50 @@ impl PollingPanel {
         // Stats display
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    self.stat_box(ui, "Current", &format!("{} Hz", self.current_hz), egui::Color32::WHITE);
+                    self.stat_box(
+                        ui,
+                        "Current",
+                        &format!("{} Hz", self.current_hz),
+                        egui::Color32::WHITE,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Min", &format!("{} Hz", if self.min_hz == u32::MAX { 0 } else { self.min_hz }), egui::Color32::LIGHT_BLUE);
+                    self.stat_box(
+                        ui,
+                        "Min",
+                        &format!(
+                            "{} Hz",
+                            if self.min_hz == u32::MAX {
+                                0
+                            } else {
+                                self.min_hz
+                            }
+                        ),
+                        egui::Color32::LIGHT_BLUE,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Max", &format!("{} Hz", self.max_hz), egui::Color32::LIGHT_GREEN);
+                    self.stat_box(
+                        ui,
+                        "Max",
+                        &format!("{} Hz", self.max_hz),
+                        egui::Color32::LIGHT_GREEN,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Avg", &format!("{:.1} Hz", self.avg_hz), egui::Color32::YELLOW);
+                    self.stat_box(
+                        ui,
+                        "Avg",
+                        &format!("{:.1} Hz", self.avg_hz),
+                        egui::Color32::YELLOW,
+                    );
                     ui.add_space(30.0);
-                    self.stat_box(ui, "Samples", &format!("{}", self.samples), egui::Color32::GRAY);
+                    self.stat_box(
+                        ui,
+                        "Samples",
+                        &format!("{}", self.samples),
+                        egui::Color32::GRAY,
+                    );
                 });
             });
 
@@ -109,15 +143,14 @@ impl PollingPanel {
 
         // Graph
         ui.heading("Polling Rate History");
-        let points: PlotPoints = self.history
+        let points: PlotPoints = self
+            .history
             .iter()
             .enumerate()
             .map(|(i, &hz)| [i as f64, hz])
             .collect();
 
-        let line = Line::new(points)
-            .color(egui::Color32::from_rgb(100, 200, 255))
-            .name("Polling Rate");
+        let line = Line::new("Polling Rate", points).color(egui::Color32::from_rgb(100, 200, 255));
 
         Plot::new("polling_plot")
             .height(250.0)
@@ -132,17 +165,22 @@ impl PollingPanel {
         ui.add_space(20.0);
 
         // Instructions
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(15.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Instructions").strong());
                 ui.label("1. Click 'Start' to begin monitoring");
                 ui.label("2. Move your mouse around to generate events");
                 ui.label("3. The graph shows real-time polling rate");
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("Common polling rates: 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz").weak());
+                ui.label(
+                    egui::RichText::new(
+                        "Common polling rates: 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz",
+                    )
+                    .weak(),
+                );
             });
 
         // Capture input and calculate polling rate
@@ -205,8 +243,8 @@ impl PollingPanel {
                 self.min_hz = self.min_hz.min(hz);
                 self.max_hz = self.max_hz.max(hz);
                 self.samples += 1;
-                self.avg_hz = (self.avg_hz * (self.samples - 1) as f64 + hz as f64)
-                    / self.samples as f64;
+                self.avg_hz =
+                    (self.avg_hz * (self.samples - 1) as f64 + hz as f64) / self.samples as f64;
                 self.history.push_back(hz as f64);
                 if self.history.len() > 200 {
                     self.history.pop_front();
@@ -247,7 +285,11 @@ impl PollingPanel {
         }
         Some(PollingRateExport {
             current_hz: self.current_hz,
-            min_hz: if self.min_hz == u32::MAX { 0 } else { self.min_hz },
+            min_hz: if self.min_hz == u32::MAX {
+                0
+            } else {
+                self.min_hz
+            },
             max_hz: self.max_hz,
             avg_hz: self.avg_hz,
             samples: self.samples,
