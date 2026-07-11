@@ -33,7 +33,11 @@ impl Graph {
 
         let max = self.data.iter().cloned().fold(f64::MIN, f64::max);
         let min = self.data.iter().cloned().fold(f64::MAX, f64::min);
-        let range = if (max - min).abs() < f64::EPSILON { 1.0 } else { max - min };
+        let range = if (max - min).abs() < f64::EPSILON {
+            1.0
+        } else {
+            max - min
+        };
 
         let mut output = format!("┌─ {} ─┐\n", self.title);
 

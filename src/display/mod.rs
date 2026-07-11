@@ -7,7 +7,8 @@ pub fn print_bar(label: &str, value: f64, max: f64, width: usize) {
     let filled = ((value / max) * width as f64) as usize;
     let empty = width.saturating_sub(filled);
 
-    println!("{}: [{}{}] {:.1}",
+    println!(
+        "{}: [{}{}] {:.1}",
         label,
         "█".repeat(filled),
         "░".repeat(empty),

@@ -6,13 +6,13 @@
 use eframe::egui;
 
 use crate::config::Config;
+use crate::export::{ExportInfo, TestResultsExport};
 use crate::input_bridge::InputBridge;
 use crate::panels::{
-    PollingPanel, StutterPanel, ClickPanel, JitterPanel,
-    DpiPanel, AccelPanel, DoubleClickPanel, ScrollPanel
+    AccelPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel, ScrollPanel,
+    StutterPanel,
 };
 use crate::theme::{self, ThemeColors};
-use crate::export::{TestResultsExport, ExportInfo};
 
 /// Represents the currently active test or view in the application.
 #[derive(PartialEq, Clone, Copy)]
@@ -156,7 +156,9 @@ impl MouseTestKitApp {
                     .save_file()
                 {
                     match std::fs::write(&path, json) {
-                        Ok(_) => self.export_status = Some(format!("Exported to {}", path.display())),
+                        Ok(_) => {
+                            self.export_status = Some(format!("Exported to {}", path.display()))
+                        }
                         Err(e) => self.export_status = Some(format!("Error: {}", e)),
                     }
                 }
@@ -181,21 +183,26 @@ impl MouseTestKitApp {
         }
     }
 
-    fn render_sidebar(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("sidebar")
+    fn render_sidebar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::left("sidebar")
             .resizable(false)
-            .default_width(200.0)
-            .frame(egui::Frame::none()
-                .fill(ThemeColors::sidebar_bg())
-                .stroke(egui::Stroke::new(1.0, ThemeColors::border())))
-            .show(ctx, |ui| {
+            .default_size(200.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(ThemeColors::sidebar_bg())
+                    .stroke(egui::Stroke::new(1.0, ThemeColors::border())),
+            )
+            .show(ui, |ui| {
                 ui.add_space(20.0);
 
                 // Logo/Title with mouse head icon
                 ui.vertical_centered(|ui| {
                     // Draw mouse head icon (1 big circle + 2 ear circles)
                     let icon_size = 40.0;
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(icon_size, icon_size),
+                        egui::Sense::hover(),
+                    );
                     let painter = ui.painter();
                     let center = rect.center();
 
@@ -210,14 +217,14 @@ impl MouseTestKitApp {
                     painter.circle_filled(
                         egui::pos2(center.x - ear_offset_x, center.y + ear_offset_y),
                         ear_radius,
-                        ThemeColors::accent()
+                        ThemeColors::accent(),
                     );
 
                     // Right ear
                     painter.circle_filled(
                         egui::pos2(center.x + ear_offset_x, center.y + ear_offset_y),
                         ear_radius,
-                        ThemeColors::accent()
+                        ThemeColors::accent(),
                     );
                 });
 
@@ -229,8 +236,11 @@ impl MouseTestKitApp {
                     let rect = ui.available_rect_before_wrap();
                     let painter = ui.painter();
                     painter.line_segment(
-                        [egui::pos2(rect.left(), rect.top()), egui::pos2(rect.right() - 20.0, rect.top())],
-                        egui::Stroke::new(1.0, ThemeColors::border())
+                        [
+                            egui::pos2(rect.left(), rect.top()),
+                            egui::pos2(rect.right() - 20.0, rect.top()),
+                        ],
+                        egui::Stroke::new(1.0, ThemeColors::border()),
                     );
                     ui.add_space(ui.available_width());
                 });
@@ -240,10 +250,12 @@ impl MouseTestKitApp {
                 // Navigation section
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(egui::RichText::new("NAVIGATION")
-                        .size(10.0)
-                        .strong()
-                        .color(ThemeColors::text_muted()));
+                    ui.label(
+                        egui::RichText::new("NAVIGATION")
+                            .size(10.0)
+                            .strong()
+                            .color(ThemeColors::text_muted()),
+                    );
                 });
                 ui.add_space(8.0);
 
@@ -252,10 +264,12 @@ impl MouseTestKitApp {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(egui::RichText::new("CORE TESTS")
-                        .size(10.0)
-                        .strong()
-                        .color(ThemeColors::text_muted()));
+                    ui.label(
+                        egui::RichText::new("CORE TESTS")
+                            .size(10.0)
+                            .strong()
+                            .color(ThemeColors::text_muted()),
+                    );
                 });
                 ui.add_space(8.0);
 
@@ -269,10 +283,12 @@ impl MouseTestKitApp {
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
-                    ui.label(egui::RichText::new("ADVANCED TESTS")
-                        .size(10.0)
-                        .strong()
-                        .color(ThemeColors::text_muted()));
+                    ui.label(
+                        egui::RichText::new("ADVANCED TESTS")
+                            .size(10.0)
+                            .strong()
+                            .color(ThemeColors::text_muted()),
+                    );
                 });
                 ui.add_space(8.0);
 
@@ -292,11 +308,11 @@ impl MouseTestKitApp {
                         let about_btn = egui::Button::new(
                             egui::RichText::new("About")
                                 .size(12.0)
-                                .color(ThemeColors::text_secondary())
+                                .color(ThemeColors::text_secondary()),
                         )
                         .fill(ThemeColors::bg_glass())
                         .stroke(egui::Stroke::new(1.0, ThemeColors::border()))
-                        .rounding(8.0)
+                        .corner_radius(8.0)
                         .min_size(egui::vec2(60.0, 32.0));
 
                         if ui.add(about_btn).clicked() {
@@ -313,28 +329,36 @@ impl MouseTestKitApp {
                         let json_btn = egui::Button::new(
                             egui::RichText::new("JSON")
                                 .size(11.0)
-                                .color(ThemeColors::accent())
+                                .color(ThemeColors::accent()),
                         )
                         .fill(ThemeColors::accent_dim())
                         .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
-                        .rounding(6.0)
+                        .corner_radius(6.0)
                         .min_size(egui::vec2(50.0, 28.0));
 
-                        if ui.add(json_btn).on_hover_text("Export all results to JSON").clicked() {
+                        if ui
+                            .add(json_btn)
+                            .on_hover_text("Export all results to JSON")
+                            .clicked()
+                        {
                             self.export_json();
                         }
 
                         let csv_btn = egui::Button::new(
                             egui::RichText::new("CSV")
                                 .size(11.0)
-                                .color(ThemeColors::accent())
+                                .color(ThemeColors::accent()),
                         )
                         .fill(ThemeColors::accent_dim())
                         .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
-                        .rounding(6.0)
+                        .corner_radius(6.0)
                         .min_size(egui::vec2(50.0, 28.0));
 
-                        if ui.add(csv_btn).on_hover_text("Export all results to CSV").clicked() {
+                        if ui
+                            .add(csv_btn)
+                            .on_hover_text("Export all results to CSV")
+                            .clicked()
+                        {
                             self.export_csv();
                         }
                     });
@@ -344,13 +368,13 @@ impl MouseTestKitApp {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.add_space(16.0);
-                            ui.label(egui::RichText::new(status)
-                                .size(10.0)
-                                .color(if status.starts_with("Error") {
+                            ui.label(egui::RichText::new(status).size(10.0).color(
+                                if status.starts_with("Error") {
                                     egui::Color32::RED
                                 } else {
                                     ThemeColors::success()
-                                }));
+                                },
+                            ));
                         });
                     }
 
@@ -362,8 +386,11 @@ impl MouseTestKitApp {
                         let rect = ui.available_rect_before_wrap();
                         let painter = ui.painter();
                         painter.line_segment(
-                            [egui::pos2(rect.left(), rect.top()), egui::pos2(rect.right() - 20.0, rect.top())],
-                            egui::Stroke::new(1.0, ThemeColors::border())
+                            [
+                                egui::pos2(rect.left(), rect.top()),
+                                egui::pos2(rect.right() - 20.0, rect.top()),
+                            ],
+                            egui::Stroke::new(1.0, ThemeColors::border()),
                         );
                         ui.add_space(ui.available_width());
                     });
@@ -373,10 +400,12 @@ impl MouseTestKitApp {
                     // Export section header
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
-                        ui.label(egui::RichText::new("EXPORT RESULTS")
-                            .size(10.0)
-                            .strong()
-                            .color(ThemeColors::text_muted()));
+                        ui.label(
+                            egui::RichText::new("EXPORT RESULTS")
+                                .size(10.0)
+                                .strong()
+                                .color(ThemeColors::text_muted()),
+                        );
                     });
 
                     ui.add_space(8.0);
@@ -394,25 +423,21 @@ impl MouseTestKitApp {
                 (
                     ThemeColors::sidebar_selected(),
                     egui::Stroke::new(1.0, ThemeColors::accent()),
-                    ThemeColors::accent()
+                    ThemeColors::accent(),
                 )
             } else {
                 (
                     egui::Color32::TRANSPARENT,
                     egui::Stroke::NONE,
-                    ThemeColors::text_secondary()
+                    ThemeColors::text_secondary(),
                 )
             };
 
-            let button = egui::Button::new(
-                egui::RichText::new(label)
-                    .size(13.0)
-                    .color(text_color)
-            )
-            .fill(bg_fill)
-            .stroke(stroke)
-            .rounding(8.0)
-            .min_size(egui::vec2(172.0, 32.0));
+            let button = egui::Button::new(egui::RichText::new(label).size(13.0).color(text_color))
+                .fill(bg_fill)
+                .stroke(stroke)
+                .corner_radius(8.0)
+                .min_size(egui::vec2(172.0, 32.0));
 
             let response = ui.add(button);
 
@@ -422,7 +447,7 @@ impl MouseTestKitApp {
                 ui.painter().rect_filled(
                     rect,
                     8.0,
-                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 5)
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 5),
                 );
             }
 
@@ -436,10 +461,10 @@ impl MouseTestKitApp {
                 ui.painter().rect_filled(
                     egui::Rect::from_min_size(
                         egui::pos2(rect.left(), rect.top() + 6.0),
-                        egui::vec2(3.0, rect.height() - 12.0)
+                        egui::vec2(3.0, rect.height() - 12.0),
                     ),
                     2.0,
-                    ThemeColors::accent()
+                    ThemeColors::accent(),
                 );
             }
         });
@@ -450,8 +475,12 @@ impl MouseTestKitApp {
     fn render_dashboard(&mut self, ui: &mut egui::Ui) {
         ui.label(theme::heading_style("Welcome to Mouse TRAP"));
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Test Response And Positioning — precision diagnostics for your mouse.")
-            .color(ThemeColors::text_secondary()));
+        ui.label(
+            egui::RichText::new(
+                "Test Response And Positioning — precision diagnostics for your mouse.",
+            )
+            .color(ThemeColors::text_secondary()),
+        );
 
         ui.add_space(28.0);
 
@@ -463,14 +492,50 @@ impl MouseTestKitApp {
             .num_columns(3)
             .spacing([16.0, 16.0])
             .show(ui, |ui| {
-                self.test_card(ui, "Polling Rate", "Measure your mouse's polling rate in Hz", "⚡", ActiveTest::PollingRate);
-                self.test_card(ui, "Stutter Test", "Detect movement irregularities", "📊", ActiveTest::Stutter);
-                self.test_card(ui, "Click Response", "Test reaction time and latency", "🖱", ActiveTest::ClickResponse);
+                self.test_card(
+                    ui,
+                    "Polling Rate",
+                    "Measure your mouse's polling rate in Hz",
+                    "⚡",
+                    ActiveTest::PollingRate,
+                );
+                self.test_card(
+                    ui,
+                    "Stutter Test",
+                    "Detect movement irregularities",
+                    "📊",
+                    ActiveTest::Stutter,
+                );
+                self.test_card(
+                    ui,
+                    "Click Response",
+                    "Test reaction time and latency",
+                    "🖱",
+                    ActiveTest::ClickResponse,
+                );
                 ui.end_row();
 
-                self.test_card(ui, "Jitter Test", "Measure sensor noise at rest", "〰", ActiveTest::Jitter);
-                self.test_card(ui, "DPI Accuracy", "Verify your DPI settings", "🎯", ActiveTest::Dpi);
-                self.test_card(ui, "Double-Click", "Detect switch issues", "👆", ActiveTest::DoubleClick);
+                self.test_card(
+                    ui,
+                    "Jitter Test",
+                    "Measure sensor noise at rest",
+                    "〰",
+                    ActiveTest::Jitter,
+                );
+                self.test_card(
+                    ui,
+                    "DPI Accuracy",
+                    "Verify your DPI settings",
+                    "🎯",
+                    ActiveTest::Dpi,
+                );
+                self.test_card(
+                    ui,
+                    "Double-Click",
+                    "Detect switch issues",
+                    "👆",
+                    ActiveTest::DoubleClick,
+                );
                 ui.end_row();
             });
 
@@ -484,57 +549,74 @@ impl MouseTestKitApp {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(theme::metric_label_style("PLATFORM"));
-                    ui.label(egui::RichText::new(std::env::consts::OS.to_uppercase())
-                        .size(16.0)
-                        .strong()
-                        .color(ThemeColors::text_primary()));
+                    ui.label(
+                        egui::RichText::new(std::env::consts::OS.to_uppercase())
+                            .size(16.0)
+                            .strong()
+                            .color(ThemeColors::text_primary()),
+                    );
                 });
                 ui.add_space(40.0);
                 ui.vertical(|ui| {
                     ui.label(theme::metric_label_style("ARCHITECTURE"));
-                    ui.label(egui::RichText::new(std::env::consts::ARCH.to_uppercase())
-                        .size(16.0)
-                        .strong()
-                        .color(ThemeColors::text_primary()));
+                    ui.label(
+                        egui::RichText::new(std::env::consts::ARCH.to_uppercase())
+                            .size(16.0)
+                            .strong()
+                            .color(ThemeColors::text_primary()),
+                    );
                 });
                 ui.add_space(40.0);
                 ui.vertical(|ui| {
                     ui.label(theme::metric_label_style("STATUS"));
-                    ui.label(egui::RichText::new("READY")
-                        .size(16.0)
-                        .strong()
-                        .color(ThemeColors::success()));
+                    ui.label(
+                        egui::RichText::new("READY")
+                            .size(16.0)
+                            .strong()
+                            .color(ThemeColors::success()),
+                    );
                 });
             });
         });
     }
 
-    fn test_card(&mut self, ui: &mut egui::Ui, title: &str, description: &str, icon: &str, test: ActiveTest) {
+    fn test_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        title: &str,
+        description: &str,
+        icon: &str,
+        test: ActiveTest,
+    ) {
         theme::card_frame(ui).show(ui, |ui| {
             ui.set_min_size(egui::vec2(200.0, 110.0));
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(icon).size(20.0));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new(title)
-                        .strong()
-                        .size(15.0)
-                        .color(ThemeColors::text_primary()));
+                    ui.label(
+                        egui::RichText::new(title)
+                            .strong()
+                            .size(15.0)
+                            .color(ThemeColors::text_primary()),
+                    );
                 });
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new(description)
-                    .size(12.0)
-                    .color(ThemeColors::text_muted()));
+                ui.label(
+                    egui::RichText::new(description)
+                        .size(12.0)
+                        .color(ThemeColors::text_muted()),
+                );
                 ui.add_space(12.0);
 
                 let btn = egui::Button::new(
                     egui::RichText::new("Start Test")
                         .size(12.0)
-                        .color(ThemeColors::accent())
+                        .color(ThemeColors::accent()),
                 )
                 .fill(ThemeColors::accent_dim())
                 .stroke(egui::Stroke::new(1.0, ThemeColors::accent()))
-                .rounding(6.0)
+                .corner_radius(6.0)
                 .min_size(egui::vec2(90.0, 28.0));
 
                 if ui.add(btn).clicked() {
@@ -549,22 +631,27 @@ impl MouseTestKitApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .frame(egui::Frame::none()
-                .fill(ThemeColors::bg_panel())
-                .stroke(egui::Stroke::new(1.0, ThemeColors::border()))
-                .rounding(12.0)
-                .inner_margin(24.0)
-                .shadow(egui::epaint::Shadow {
-                    offset: egui::vec2(0.0, 8.0),
-                    blur: 24.0,
-                    spread: 0.0,
-                    color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100),
-                }))
+            .frame(
+                egui::Frame::new()
+                    .fill(ThemeColors::bg_panel())
+                    .stroke(egui::Stroke::new(1.0, ThemeColors::border()))
+                    .corner_radius(12)
+                    .inner_margin(24)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 8],
+                        blur: 24,
+                        spread: 0,
+                        color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 100),
+                    }),
+            )
             .show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     // Draw mouse head icon in About dialog
                     let icon_size = 50.0;
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, icon_size), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(icon_size, icon_size),
+                        egui::Sense::hover(),
+                    );
                     let painter = ui.painter();
                     let center = rect.center();
 
@@ -579,42 +666,52 @@ impl MouseTestKitApp {
                     painter.circle_filled(
                         egui::pos2(center.x - ear_offset_x, center.y + ear_offset_y),
                         ear_radius,
-                        ThemeColors::accent()
+                        ThemeColors::accent(),
                     );
 
                     // Right ear
                     painter.circle_filled(
                         egui::pos2(center.x + ear_offset_x, center.y + ear_offset_y),
                         ear_radius,
-                        ThemeColors::accent()
+                        ThemeColors::accent(),
                     );
 
                     ui.add_space(8.0);
 
-                    ui.label(egui::RichText::new("Mouse TRAP")
-                        .size(24.0)
-                        .strong()
-                        .color(ThemeColors::accent()));
+                    ui.label(
+                        egui::RichText::new("Mouse TRAP")
+                            .size(24.0)
+                            .strong()
+                            .color(ThemeColors::accent()),
+                    );
                     ui.add_space(2.0);
-                    ui.label(egui::RichText::new("Test Response And Positioning")
-                        .size(12.0)
-                        .color(ThemeColors::text_secondary()));
+                    ui.label(
+                        egui::RichText::new("Test Response And Positioning")
+                            .size(12.0)
+                            .color(ThemeColors::text_secondary()),
+                    );
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Version 0.1.0")
-                        .size(12.0)
-                        .color(ThemeColors::text_muted()));
+                    ui.label(
+                        egui::RichText::new("Version 0.1.0")
+                            .size(12.0)
+                            .color(ThemeColors::text_muted()),
+                    );
                     ui.add_space(16.0);
 
-                    ui.label(egui::RichText::new("Test Response And Positioning")
-                        .color(ThemeColors::text_secondary()));
+                    ui.label(
+                        egui::RichText::new("Test Response And Positioning")
+                            .color(ThemeColors::text_secondary()),
+                    );
 
                     ui.add_space(16.0);
 
                     theme::glass_frame(ui).show(ui, |ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new("Features")
-                                .strong()
-                                .color(ThemeColors::text_primary()));
+                            ui.label(
+                                egui::RichText::new("Features")
+                                    .strong()
+                                    .color(ThemeColors::text_primary()),
+                            );
                             ui.add_space(8.0);
                             for feature in [
                                 "Polling rate monitoring",
@@ -624,10 +721,11 @@ impl MouseTestKitApp {
                                 "Sensor jitter analysis",
                             ] {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("•")
-                                        .color(ThemeColors::accent()));
-                                    ui.label(egui::RichText::new(feature)
-                                        .color(ThemeColors::text_secondary()));
+                                    ui.label(egui::RichText::new("•").color(ThemeColors::accent()));
+                                    ui.label(
+                                        egui::RichText::new(feature)
+                                            .color(ThemeColors::text_secondary()),
+                                    );
                                 });
                             }
                         });
@@ -636,11 +734,10 @@ impl MouseTestKitApp {
                     ui.add_space(20.0);
 
                     let close_btn = egui::Button::new(
-                        egui::RichText::new("Close")
-                            .color(ThemeColors::text_primary())
+                        egui::RichText::new("Close").color(ThemeColors::text_primary()),
                     )
                     .fill(ThemeColors::accent())
-                    .rounding(8.0)
+                    .corner_radius(8)
                     .min_size(egui::vec2(100.0, 32.0));
 
                     if ui.add(close_btn).clicked() {
@@ -649,16 +746,20 @@ impl MouseTestKitApp {
 
                     // Hidden message
                     ui.add_space(12.0);
-                    ui.label(egui::RichText::new("MERRY CHRISTMAS // TO: XANDER FROM: DAD")
-                        .size(8.0)
-                        .color(egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60)));
+                    ui.label(
+                        egui::RichText::new("MERRY CHRISTMAS // TO: XANDER FROM: DAD")
+                            .size(8.0)
+                            .color(egui::Color32::from_rgba_unmultiplied(80, 80, 80, 60)),
+                    );
                 });
             });
     }
 }
 
 impl eframe::App for MouseTestKitApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
         // Poll raw input events from the background thread (once per frame).
         // Use a local variable so the borrow checker doesn't conflict with &mut self in the closure.
         let frame_events = match &self.input_bridge {
@@ -668,9 +769,10 @@ impl eframe::App for MouseTestKitApp {
         let has_bridge = self.input_bridge.is_some();
 
         // Check if any panel settings changed and mark config dirty
-        if self.stutter_panel.settings_changed() ||
-           self.dpi_panel.settings_changed() ||
-           self.double_click_panel.settings_changed() {
+        if self.stutter_panel.settings_changed()
+            || self.dpi_panel.settings_changed()
+            || self.double_click_panel.settings_changed()
+        {
             self.config_dirty = true;
         }
 
@@ -682,31 +784,45 @@ impl eframe::App for MouseTestKitApp {
         theme::setup_custom_style(ctx);
 
         // Render sidebar
-        self.render_sidebar(ctx);
+        self.render_sidebar(ui);
 
         let raw_events = &frame_events;
 
         // Render main content with styled central panel
         egui::CentralPanel::default()
-            .frame(egui::Frame::none()
-                .fill(ThemeColors::bg_dark())
-                .inner_margin(24.0))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    match self.active_test {
-                        ActiveTest::Dashboard => self.render_dashboard(ui),
-                        ActiveTest::PollingRate => self.polling_panel.ui(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::Stutter => self.stutter_panel.ui(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::ClickResponse => self.click_panel.ui_response(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::ClickSticky => self.click_panel.ui_sticky(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::LiftOff => self.click_panel.ui_liftoff(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::ScrollWheel => self.scroll_panel.ui(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::AngleSnap => self.accel_panel.ui_angle(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::Acceleration => self.accel_panel.ui_accel(ui, ctx, raw_events, has_bridge),
-                        ActiveTest::DoubleClick => self.double_click_panel.ui(ui, ctx),
-                        ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
+            .frame(
+                egui::Frame::new()
+                    .fill(ThemeColors::bg_dark())
+                    .inner_margin(24),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| match self.active_test {
+                    ActiveTest::Dashboard => self.render_dashboard(ui),
+                    ActiveTest::PollingRate => {
+                        self.polling_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
+                    ActiveTest::Stutter => self.stutter_panel.ui(ui, ctx, raw_events, has_bridge),
+                    ActiveTest::ClickResponse => self
+                        .click_panel
+                        .ui_response(ui, ctx, raw_events, has_bridge),
+                    ActiveTest::ClickSticky => {
+                        self.click_panel.ui_sticky(ui, ctx, raw_events, has_bridge)
+                    }
+                    ActiveTest::LiftOff => {
+                        self.click_panel.ui_liftoff(ui, ctx, raw_events, has_bridge)
+                    }
+                    ActiveTest::ScrollWheel => {
+                        self.scroll_panel.ui(ui, ctx, raw_events, has_bridge)
+                    }
+                    ActiveTest::Dpi => self.dpi_panel.ui(ui, ctx, raw_events, has_bridge),
+                    ActiveTest::AngleSnap => {
+                        self.accel_panel.ui_angle(ui, ctx, raw_events, has_bridge)
+                    }
+                    ActiveTest::Acceleration => {
+                        self.accel_panel.ui_accel(ui, ctx, raw_events, has_bridge)
+                    }
+                    ActiveTest::DoubleClick => self.double_click_panel.ui(ui, ctx),
+                    ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
                 });
             });
 

@@ -1,15 +1,15 @@
 //! Double-Click Test
 //! Detects faulty switches causing unintended double-clicks
 
-use std::time::{Duration, Instant};
-use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use crate::input::{self, MouseEvent, MouseButton};
+use crate::input::{self, MouseButton, MouseEvent};
 #[cfg(target_os = "windows")]
-use crate::input_windows::{self as input, MouseEvent, MouseButton};
+use crate::input_windows::{self as input, MouseButton, MouseEvent};
 
 const DOUBLE_CLICK_THRESHOLD_MS: f64 = 50.0; // Clicks faster than this are suspicious
 
@@ -20,7 +20,10 @@ pub fn run() {
     println!("  1. Click normally at your regular pace");
     println!("  2. The test will detect any unintended rapid clicks");
     println!("  3. Faulty switches often register multiple clicks from one press\n");
-    println!("Threshold: Clicks within {}ms are flagged as suspicious\n", DOUBLE_CLICK_THRESHOLD_MS);
+    println!(
+        "Threshold: Clicks within {}ms are flagged as suspicious\n",
+        DOUBLE_CLICK_THRESHOLD_MS
+    );
 
     let mut device = match input::select_mouse() {
         Some(d) => d,
@@ -46,7 +49,11 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            })) = event::read()
+            {
                 break;
             }
         }
@@ -71,8 +78,10 @@ pub fn run() {
                                     button,
                                     interval_ms: interval,
                                 });
-                                println!("\r\x1B[K⚠ DOUBLE-CLICK: {:?} - {:.1}ms interval!",
-                                    button, interval);
+                                println!(
+                                    "\r\x1B[K⚠ DOUBLE-CLICK: {:?} - {:.1}ms interval!",
+                                    button, interval
+                                );
                             }
                         }
                     }
@@ -90,8 +99,11 @@ pub fn run() {
 
         if last_print.elapsed() >= Duration::from_millis(500) {
             print!("\r\x1B[K");
-            print!("Clicks: {} | Double-clicks detected: {} | ",
-                clicks.len(), double_clicks.len());
+            print!(
+                "Clicks: {} | Double-clicks detected: {} | ",
+                clicks.len(),
+                double_clicks.len()
+            );
             print!("Press 'q' to finish");
             io::stdout().flush().ok();
             last_print = Instant::now();
@@ -109,31 +121,46 @@ pub fn run() {
 
     if !double_clicks.is_empty() {
         // Group by button
-        let left_doubles: Vec<_> = double_clicks.iter()
+        let left_doubles: Vec<_> = double_clicks
+            .iter()
             .filter(|d| d.button == MouseButton::Left)
             .collect();
-        let right_doubles: Vec<_> = double_clicks.iter()
+        let right_doubles: Vec<_> = double_clicks
+            .iter()
             .filter(|d| d.button == MouseButton::Right)
             .collect();
-        let middle_doubles: Vec<_> = double_clicks.iter()
+        let middle_doubles: Vec<_> = double_clicks
+            .iter()
             .filter(|d| d.button == MouseButton::Middle)
             .collect();
 
         println!("By button:");
         if !left_doubles.is_empty() {
-            let avg: f64 = left_doubles.iter().map(|d| d.interval_ms).sum::<f64>()
-                / left_doubles.len() as f64;
-            println!("  Left:   {} occurrences (avg {:.1}ms interval)", left_doubles.len(), avg);
+            let avg: f64 =
+                left_doubles.iter().map(|d| d.interval_ms).sum::<f64>() / left_doubles.len() as f64;
+            println!(
+                "  Left:   {} occurrences (avg {:.1}ms interval)",
+                left_doubles.len(),
+                avg
+            );
         }
         if !right_doubles.is_empty() {
             let avg: f64 = right_doubles.iter().map(|d| d.interval_ms).sum::<f64>()
                 / right_doubles.len() as f64;
-            println!("  Right:  {} occurrences (avg {:.1}ms interval)", right_doubles.len(), avg);
+            println!(
+                "  Right:  {} occurrences (avg {:.1}ms interval)",
+                right_doubles.len(),
+                avg
+            );
         }
         if !middle_doubles.is_empty() {
             let avg: f64 = middle_doubles.iter().map(|d| d.interval_ms).sum::<f64>()
                 / middle_doubles.len() as f64;
-            println!("  Middle: {} occurrences (avg {:.1}ms interval)", middle_doubles.len(), avg);
+            println!(
+                "  Middle: {} occurrences (avg {:.1}ms interval)",
+                middle_doubles.len(),
+                avg
+            );
         }
 
         // Calculate double-click rate
@@ -151,7 +178,12 @@ pub fn run() {
 
         println!("\nRecent double-click events:");
         for (i, dc) in double_clicks.iter().rev().take(10).enumerate() {
-            println!("  #{}: {:?} - {:.1}ms interval", i + 1, dc.button, dc.interval_ms);
+            println!(
+                "  #{}: {:?} - {:.1}ms interval",
+                i + 1,
+                dc.button,
+                dc.interval_ms
+            );
         }
     } else {
         println!("✓ No double-click issues detected");
@@ -163,15 +195,23 @@ pub fn run() {
         println!("\nClick interval distribution:");
         let mut intervals: Vec<f64> = Vec::new();
         for i in 1..clicks.len() {
-            let interval = clicks[i].timestamp
-                .duration_since(clicks[i-1].timestamp)
-                .as_secs_f64() * 1000.0;
+            let interval = clicks[i]
+                .timestamp
+                .duration_since(clicks[i - 1].timestamp)
+                .as_secs_f64()
+                * 1000.0;
             intervals.push(interval);
         }
 
         let under_50: usize = intervals.iter().filter(|i| **i < 50.0).count();
-        let _50_to_100: usize = intervals.iter().filter(|i| **i >= 50.0 && **i < 100.0).count();
-        let _100_to_200: usize = intervals.iter().filter(|i| **i >= 100.0 && **i < 200.0).count();
+        let _50_to_100: usize = intervals
+            .iter()
+            .filter(|i| **i >= 50.0 && **i < 100.0)
+            .count();
+        let _100_to_200: usize = intervals
+            .iter()
+            .filter(|i| **i >= 100.0 && **i < 200.0)
+            .count();
         let over_200: usize = intervals.iter().filter(|i| **i >= 200.0).count();
 
         println!("  <50ms:     {} (suspicious)", under_50);

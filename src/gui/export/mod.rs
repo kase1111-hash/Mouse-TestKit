@@ -4,8 +4,8 @@
 //! to JSON and CSV formats. Each test type has a corresponding export struct
 //! containing all relevant metrics and raw data.
 
-use serde::Serialize;
 use chrono::{DateTime, Local};
+use serde::Serialize;
 
 /// Complete export of all test results.
 ///
@@ -219,10 +219,22 @@ impl TestResultsExport {
         csv.push_str("Test,Metric,Value\n");
 
         // Export info — string values are escaped
-        csv.push_str(&format!("Info,App Name,{}\n", csv_escape(&self.export_info.app_name)));
-        csv.push_str(&format!("Info,Version,{}\n", csv_escape(&self.export_info.app_version)));
-        csv.push_str(&format!("Info,Export Time,{}\n", csv_escape(&self.export_info.export_time)));
-        csv.push_str(&format!("Info,Platform,{}\n", csv_escape(&self.export_info.platform)));
+        csv.push_str(&format!(
+            "Info,App Name,{}\n",
+            csv_escape(&self.export_info.app_name)
+        ));
+        csv.push_str(&format!(
+            "Info,Version,{}\n",
+            csv_escape(&self.export_info.app_version)
+        ));
+        csv.push_str(&format!(
+            "Info,Export Time,{}\n",
+            csv_escape(&self.export_info.export_time)
+        ));
+        csv.push_str(&format!(
+            "Info,Platform,{}\n",
+            csv_escape(&self.export_info.platform)
+        ));
 
         // Polling rate
         if let Some(ref p) = self.polling_rate {
@@ -235,45 +247,87 @@ impl TestResultsExport {
 
         // Stutter
         if let Some(ref s) = self.stutter {
-            csv.push_str(&format!("Stutter,Total Stutters,{}\n", s.total_stutter_count));
+            csv.push_str(&format!(
+                "Stutter,Total Stutters,{}\n",
+                s.total_stutter_count
+            ));
             csv.push_str(&format!("Stutter,Total Samples,{}\n", s.total_samples));
             csv.push_str(&format!("Stutter,Avg Delta (ms),{:.2}\n", s.avg_delta_ms));
             csv.push_str(&format!("Stutter,Min Delta (ms),{:.2}\n", s.min_delta_ms));
             csv.push_str(&format!("Stutter,Max Delta (ms),{:.2}\n", s.max_delta_ms));
-            csv.push_str(&format!("Stutter,Polling Rate (Hz),{:.0}\n", s.polling_rate_hz));
-            csv.push_str(&format!("Stutter,Stutter Rate (%),{:.1}\n", s.stutter_rate_percent));
+            csv.push_str(&format!(
+                "Stutter,Polling Rate (Hz),{:.0}\n",
+                s.polling_rate_hz
+            ));
+            csv.push_str(&format!(
+                "Stutter,Stutter Rate (%),{:.1}\n",
+                s.stutter_rate_percent
+            ));
         }
 
         // Click Response
         if let Some(ref c) = self.click_response {
-            csv.push_str(&format!("Click Response (Left),Click Count,{}\n", c.left.click_count));
+            csv.push_str(&format!(
+                "Click Response (Left),Click Count,{}\n",
+                c.left.click_count
+            ));
             csv.push_str(&format!("Click Response (Left),CPS,{:.1}\n", c.left.cps));
-            csv.push_str(&format!("Click Response (Left),Avg Hold (ms),{:.1}\n", c.left.avg_hold_ms));
-            csv.push_str(&format!("Click Response (Right),Click Count,{}\n", c.right.click_count));
+            csv.push_str(&format!(
+                "Click Response (Left),Avg Hold (ms),{:.1}\n",
+                c.left.avg_hold_ms
+            ));
+            csv.push_str(&format!(
+                "Click Response (Right),Click Count,{}\n",
+                c.right.click_count
+            ));
             csv.push_str(&format!("Click Response (Right),CPS,{:.1}\n", c.right.cps));
-            csv.push_str(&format!("Click Response (Right),Avg Hold (ms),{:.1}\n", c.right.avg_hold_ms));
+            csv.push_str(&format!(
+                "Click Response (Right),Avg Hold (ms),{:.1}\n",
+                c.right.avg_hold_ms
+            ));
         }
 
         // Click Sticky
         if let Some(ref c) = self.click_sticky {
-            csv.push_str(&format!("Click Sticky (Left),Click Count,{}\n", c.left.click_count));
-            csv.push_str(&format!("Click Sticky (Left),Sticky Count,{}\n", c.left.sticky_count));
-            csv.push_str(&format!("Click Sticky (Right),Click Count,{}\n", c.right.click_count));
-            csv.push_str(&format!("Click Sticky (Right),Sticky Count,{}\n", c.right.sticky_count));
+            csv.push_str(&format!(
+                "Click Sticky (Left),Click Count,{}\n",
+                c.left.click_count
+            ));
+            csv.push_str(&format!(
+                "Click Sticky (Left),Sticky Count,{}\n",
+                c.left.sticky_count
+            ));
+            csv.push_str(&format!(
+                "Click Sticky (Right),Click Count,{}\n",
+                c.right.click_count
+            ));
+            csv.push_str(&format!(
+                "Click Sticky (Right),Sticky Count,{}\n",
+                c.right.sticky_count
+            ));
         }
 
         // Lift-off
         if let Some(ref l) = self.liftoff {
             csv.push_str(&format!("Lift-Off,Jump Count,{}\n", l.jump_count));
-            csv.push_str(&format!("Lift-Off,Avg Distance (px),{:.1}\n", l.avg_distance_px));
-            csv.push_str(&format!("Lift-Off,Max Distance (px),{:.1}\n", l.max_distance_px));
+            csv.push_str(&format!(
+                "Lift-Off,Avg Distance (px),{:.1}\n",
+                l.avg_distance_px
+            ));
+            csv.push_str(&format!(
+                "Lift-Off,Max Distance (px),{:.1}\n",
+                l.max_distance_px
+            ));
         }
 
         // Jitter
         if let Some(ref j) = self.jitter {
             csv.push_str(&format!("Jitter,Sample Count,{}\n", j.sample_count));
             csv.push_str(&format!("Jitter,Avg Events,{:.1}\n", j.avg_events));
-            csv.push_str(&format!("Jitter,Avg Distance (px),{:.2}\n", j.avg_distance_px));
+            csv.push_str(&format!(
+                "Jitter,Avg Distance (px),{:.2}\n",
+                j.avg_distance_px
+            ));
             csv.push_str(&format!("Jitter,Max Jitter (px),{:.2}\n", j.max_jitter_px));
             csv.push_str(&format!("Jitter,Rating,{}\n", csv_escape(&j.rating)));
         }
@@ -281,19 +335,42 @@ impl TestResultsExport {
         // Double-click
         if let Some(ref d) = self.double_click {
             csv.push_str(&format!("Double-Click,Total Clicks,{}\n", d.total_clicks));
-            csv.push_str(&format!("Double-Click,Double-Clicks,{}\n", d.double_click_count));
-            csv.push_str(&format!("Double-Click,Accidental,{}\n", d.accidental_double_clicks));
-            csv.push_str(&format!("Double-Click,Avg Interval (ms),{:.1}\n", d.avg_interval_ms));
-            csv.push_str(&format!("Double-Click,Consistency (%),{:.0}\n", d.consistency_percent));
+            csv.push_str(&format!(
+                "Double-Click,Double-Clicks,{}\n",
+                d.double_click_count
+            ));
+            csv.push_str(&format!(
+                "Double-Click,Accidental,{}\n",
+                d.accidental_double_clicks
+            ));
+            csv.push_str(&format!(
+                "Double-Click,Avg Interval (ms),{:.1}\n",
+                d.avg_interval_ms
+            ));
+            csv.push_str(&format!(
+                "Double-Click,Consistency (%),{:.0}\n",
+                d.consistency_percent
+            ));
         }
 
         // DPI
         if let Some(ref d) = self.dpi {
             csv.push_str(&format!("DPI,Target DPI,{}\n", d.target_dpi));
-            csv.push_str(&format!("DPI,Avg Accuracy (%),{:.1}\n", d.avg_accuracy_percent));
+            csv.push_str(&format!(
+                "DPI,Avg Accuracy (%),{:.1}\n",
+                d.avg_accuracy_percent
+            ));
             for (i, sample) in d.samples.iter().enumerate() {
-                csv.push_str(&format!("DPI,Sample {} Measured,{:.0}\n", i + 1, sample.measured_dpi));
-                csv.push_str(&format!("DPI,Sample {} Accuracy (%),{:.1}\n", i + 1, sample.accuracy_percent));
+                csv.push_str(&format!(
+                    "DPI,Sample {} Measured,{:.0}\n",
+                    i + 1,
+                    sample.measured_dpi
+                ));
+                csv.push_str(&format!(
+                    "DPI,Sample {} Accuracy (%),{:.1}\n",
+                    i + 1,
+                    sample.accuracy_percent
+                ));
             }
         }
 
@@ -301,13 +378,19 @@ impl TestResultsExport {
         if let Some(ref a) = self.acceleration {
             csv.push_str(&format!("Acceleration,Detected,{}\n", a.has_acceleration));
             csv.push_str(&format!("Acceleration,Factor,{:.2}\n", a.accel_factor));
-            csv.push_str(&format!("Acceleration,Confidence (%),{:.0}\n", a.confidence_percent));
+            csv.push_str(&format!(
+                "Acceleration,Confidence (%),{:.0}\n",
+                a.confidence_percent
+            ));
         }
 
         // Angle Snap
         if let Some(ref a) = self.angle_snap {
             csv.push_str(&format!("Angle Snap,Detected,{}\n", a.has_snapping));
-            csv.push_str(&format!("Angle Snap,Strength (%),{:.1}\n", a.snap_strength_percent));
+            csv.push_str(&format!(
+                "Angle Snap,Strength (%),{:.1}\n",
+                a.snap_strength_percent
+            ));
         }
 
         // Scroll
@@ -315,9 +398,15 @@ impl TestResultsExport {
             csv.push_str(&format!("Scroll,Total Steps,{}\n", s.total_steps));
             csv.push_str(&format!("Scroll,Up,{:.0}\n", s.scroll_up));
             csv.push_str(&format!("Scroll,Down,{:.0}\n", s.scroll_down));
-            csv.push_str(&format!("Scroll,Direction Changes,{}\n", s.direction_changes));
+            csv.push_str(&format!(
+                "Scroll,Direction Changes,{}\n",
+                s.direction_changes
+            ));
             csv.push_str(&format!("Scroll,Avg Speed (sps),{:.1}\n", s.avg_speed_sps));
-            csv.push_str(&format!("Scroll,Consistency (%),{}\n", s.consistency_percent));
+            csv.push_str(&format!(
+                "Scroll,Consistency (%),{}\n",
+                s.consistency_percent
+            ));
         }
 
         csv

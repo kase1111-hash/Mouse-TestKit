@@ -1,10 +1,10 @@
 //! Polling Rate Monitor
 //! Displays real-time mouse polling rate in Hz
 
-use std::time::{Duration, Instant, SystemTime};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::polling::PollingStats;
+use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -40,7 +40,11 @@ pub fn run() {
     loop {
         // Check for quit key
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            })) = event::read()
+            {
                 break;
             }
         }
@@ -84,7 +88,7 @@ pub fn run() {
                 // Calculate interval-based Hz
                 let mut intervals: Vec<u128> = Vec::new();
                 for i in 1..timestamps.len() {
-                    let delta = timestamps[i].duration_since(timestamps[i-1]).as_micros();
+                    let delta = timestamps[i].duration_since(timestamps[i - 1]).as_micros();
                     if delta > 0 {
                         intervals.push(delta);
                     }
@@ -92,7 +96,11 @@ pub fn run() {
 
                 let avg_interval_hz = if !intervals.is_empty() {
                     let avg_interval = intervals.iter().sum::<u128>() / intervals.len() as u128;
-                    if avg_interval > 0 { 1_000_000 / avg_interval } else { 0 }
+                    if avg_interval > 0 {
+                        1_000_000 / avg_interval
+                    } else {
+                        0
+                    }
                 } else {
                     0
                 };
@@ -116,8 +124,10 @@ pub fn run() {
 
     println!("\n\nPolling rate test complete.");
     if stats.min_hz < u32::MAX {
-        println!("Final stats - Min: {} Hz, Max: {} Hz, Avg: {:.1} Hz",
-            stats.min_hz, stats.max_hz, stats.avg_hz);
+        println!(
+            "Final stats - Min: {} Hz, Max: {} Hz, Avg: {:.1} Hz",
+            stats.min_hz, stats.max_hz, stats.avg_hz
+        );
     }
 
     terminal::wait_for_enter();

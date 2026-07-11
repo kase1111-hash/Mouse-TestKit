@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Comprehensive project documentation
 
+### Changed
+- Updated `eframe`/`egui` from 0.29 to 0.35 and `egui_plot` from 0.29 to 0.36,
+  migrating to the new `eframe::App::ui` entry point, `egui::Panel` API,
+  `CornerRadius` styling, and named plot-item constructors
+- Updated `evdev` from 0.12 to 0.13, migrating to the `KeyCode`,
+  `RelativeAxisCode`, and `EventSummary` event API
+- Updated `crossterm` from 0.27 to 0.29 and `rfd` from 0.15 to 0.17
+- Formatted the entire codebase with `rustfmt` so the CI formatting check passes
+
 ## [0.1.0] - 2025-01-01
 
 ### Added

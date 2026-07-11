@@ -1,11 +1,11 @@
 //! Stutter Detection Test
 //! Detects mouse movement stutter and irregularities
 
+use crate::terminal;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use mouse_testkit::analysis::stutter::{analyze_stutter, StutterEvent, StutterSeverity};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use crate::terminal;
-use mouse_testkit::analysis::stutter::{analyze_stutter, StutterEvent, StutterSeverity};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -43,7 +43,11 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            })) = event::read()
+            {
                 break;
             }
         }
@@ -56,10 +60,14 @@ pub fn run() {
                     if let Some(last) = timestamps.back() {
                         let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
                         deltas.push_back(delta);
-                        if deltas.len() > 100 { deltas.pop_front(); }
+                        if deltas.len() > 100 {
+                            deltas.pop_front();
+                        }
                     }
                     timestamps.push_back(now);
-                    if timestamps.len() > 1000 { timestamps.pop_front(); }
+                    if timestamps.len() > 1000 {
+                        timestamps.pop_front();
+                    }
                 }
             }
         }
@@ -72,10 +80,14 @@ pub fn run() {
                     if let Some(last) = timestamps.back() {
                         let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
                         deltas.push_back(delta);
-                        if deltas.len() > 100 { deltas.pop_front(); }
+                        if deltas.len() > 100 {
+                            deltas.pop_front();
+                        }
                     }
                     timestamps.push_back(now);
-                    if timestamps.len() > 1000 { timestamps.pop_front(); }
+                    if timestamps.len() > 1000 {
+                        timestamps.pop_front();
+                    }
                 }
             }
         }
@@ -89,18 +101,26 @@ pub fn run() {
             let max_delta = deltas_slice.iter().cloned().fold(f64::MIN, f64::max);
             let min_delta = deltas_slice.iter().cloned().fold(f64::MAX, f64::min);
 
-            let stutter_count = deltas_slice.iter()
+            let stutter_count = deltas_slice
+                .iter()
                 .filter(|d| (**d - avg_delta).abs() > STUTTER_THRESHOLD_MS)
                 .count();
 
             print!("\x1B[2J\x1B[1;1H");
             println!("=== Stutter Detection ===\n");
-            println!("Avg interval: {:.2} ms | Min: {:.2} ms | Max: {:.2} ms",
-                avg_delta, min_delta, max_delta);
-            println!("Stutters detected: {} (threshold: {:.1}ms deviation)\n",
-                stutter_count, STUTTER_THRESHOLD_MS);
+            println!(
+                "Avg interval: {:.2} ms | Min: {:.2} ms | Max: {:.2} ms",
+                avg_delta, min_delta, max_delta
+            );
+            println!(
+                "Stutters detected: {} (threshold: {:.1}ms deviation)\n",
+                stutter_count, STUTTER_THRESHOLD_MS
+            );
             println!("{}", render_stutter_graph(deltas_slice, avg_delta));
-            println!("\nTotal stutter events this session: {}", stutter_events.len());
+            println!(
+                "\nTotal stutter events this session: {}",
+                stutter_events.len()
+            );
             println!("\nPress 'q' to quit");
 
             use std::io::Write;
@@ -115,9 +135,18 @@ pub fn run() {
     println!("Total stutter events: {}", stutter_events.len());
 
     if !stutter_events.is_empty() {
-        let severe = stutter_events.iter().filter(|s| matches!(s.severity, StutterSeverity::Severe)).count();
-        let moderate = stutter_events.iter().filter(|s| matches!(s.severity, StutterSeverity::Moderate)).count();
-        let minor = stutter_events.iter().filter(|s| matches!(s.severity, StutterSeverity::Minor)).count();
+        let severe = stutter_events
+            .iter()
+            .filter(|s| matches!(s.severity, StutterSeverity::Severe))
+            .count();
+        let moderate = stutter_events
+            .iter()
+            .filter(|s| matches!(s.severity, StutterSeverity::Moderate))
+            .count();
+        let minor = stutter_events
+            .iter()
+            .filter(|s| matches!(s.severity, StutterSeverity::Minor))
+            .count();
         println!("  Severe (8ms+):    {}", severe);
         println!("  Moderate (4-8ms): {}", moderate);
         println!("  Minor (2-4ms):    {}", minor);
@@ -135,14 +164,23 @@ fn render_stutter_graph(deltas: &[f64], avg: f64) -> String {
         deltas.to_vec()
     };
 
-    if display_deltas.is_empty() { return String::from("No data yet..."); }
+    if display_deltas.is_empty() {
+        return String::from("No data yet...");
+    }
 
     let max = display_deltas.iter().cloned().fold(f64::MIN, f64::max);
     let min = display_deltas.iter().cloned().fold(f64::MAX, f64::min);
-    let range = if (max - min).abs() < 0.001 { 1.0 } else { max - min };
+    let range = if (max - min).abs() < 0.001 {
+        1.0
+    } else {
+        max - min
+    };
 
     let mut output = String::new();
-    output.push_str(&format!("Delta Time Graph (last {} samples)\n", display_deltas.len()));
+    output.push_str(&format!(
+        "Delta Time Graph (last {} samples)\n",
+        display_deltas.len()
+    ));
     output.push_str(&format!("{:.1}ms ┌", max));
     output.push_str(&"─".repeat(width));
     output.push_str("┐\n");
@@ -158,15 +196,22 @@ fn render_stutter_graph(deltas: &[f64], avg: f64) -> String {
         for val in &display_deltas {
             if *val >= threshold {
                 let deviation = (*val - avg).abs();
-                if deviation > 8.0 { output.push('█'); }
-                else if deviation > 4.0 { output.push('▓'); }
-                else if deviation > 2.0 { output.push('▒'); }
-                else { output.push('░'); }
+                if deviation > 8.0 {
+                    output.push('█');
+                } else if deviation > 4.0 {
+                    output.push('▓');
+                } else if deviation > 2.0 {
+                    output.push('▒');
+                } else {
+                    output.push('░');
+                }
             } else {
                 output.push(' ');
             }
         }
-        for _ in 0..(width.saturating_sub(display_deltas.len())) { output.push(' '); }
+        for _ in 0..(width.saturating_sub(display_deltas.len())) {
+            output.push(' ');
+        }
         output.push_str("│\n");
     }
 

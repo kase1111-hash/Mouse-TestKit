@@ -125,7 +125,11 @@ pub fn run_all() {
 }
 
 fn status(completed: bool) -> &'static str {
-    if completed { "✓ Complete" } else { "✗ Skipped" }
+    if completed {
+        "✓ Complete"
+    } else {
+        "✗ Skipped"
+    }
 }
 
 pub struct TestSuite {
@@ -159,20 +163,42 @@ impl TestSuite {
 
     pub fn count_completed(&self) -> usize {
         let mut count = 0;
-        if self.polling { count += 1; }
-        if self.stutter { count += 1; }
-        if self.click_response { count += 1; }
-        if self.click_sticky { count += 1; }
-        if self.liftoff { count += 1; }
-        if self.dpi { count += 1; }
-        if self.angle_snap { count += 1; }
-        if self.acceleration { count += 1; }
-        if self.double_click { count += 1; }
-        if self.jitter { count += 1; }
+        if self.polling {
+            count += 1;
+        }
+        if self.stutter {
+            count += 1;
+        }
+        if self.click_response {
+            count += 1;
+        }
+        if self.click_sticky {
+            count += 1;
+        }
+        if self.liftoff {
+            count += 1;
+        }
+        if self.dpi {
+            count += 1;
+        }
+        if self.angle_snap {
+            count += 1;
+        }
+        if self.acceleration {
+            count += 1;
+        }
+        if self.double_click {
+            count += 1;
+        }
+        if self.jitter {
+            count += 1;
+        }
         count
     }
 }
 
 impl Default for TestSuite {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

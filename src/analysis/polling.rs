@@ -23,7 +23,9 @@ impl PollingStats {
     }
 
     pub fn update(&mut self, hz: u32) {
-        if hz == 0 { return; }
+        if hz == 0 {
+            return;
+        }
         self.current_hz = hz;
         self.min_hz = self.min_hz.min(hz);
         self.max_hz = self.max_hz.max(hz);
@@ -33,7 +35,9 @@ impl PollingStats {
 }
 
 impl Default for PollingStats {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]

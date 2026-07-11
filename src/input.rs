@@ -12,7 +12,7 @@
 //! added to the 'input' group: `sudo usermod -aG input $USER`
 
 #[cfg(target_os = "linux")]
-use evdev::{Device, InputEventKind, RelativeAxisType, Key};
+use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
@@ -48,21 +48,19 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
                 match Device::open(&path) {
                     Ok(device) => {
                         // Check if device has mouse-like capabilities
-                        let has_rel_x = device.supported_relative_axes()
-                            .map(|axes| axes.contains(RelativeAxisType::REL_X))
+                        let has_rel_x = device
+                            .supported_relative_axes()
+                            .map(|axes| axes.contains(RelativeAxisCode::REL_X))
                             .unwrap_or(false);
 
-                        let has_left_btn = device.supported_keys()
-                            .map(|keys| keys.contains(Key::BTN_LEFT))
+                        let has_left_btn = device
+                            .supported_keys()
+                            .map(|keys| keys.contains(KeyCode::BTN_LEFT))
                             .unwrap_or(false);
 
                         if has_rel_x && has_left_btn {
                             let name = device.name().unwrap_or("Unknown Mouse").to_string();
-                            mice.push(MouseDevice {
-                                device,
-                                name,
-                                path,
-                            });
+                            mice.push(MouseDevice { device, name, path });
                         }
                     }
                     Err(e) => {
@@ -83,7 +81,10 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
     // Warn user if we encountered permission issues
     if permission_denied_count > 0 && mice.is_empty() {
         eprintln!();
-        eprintln!("Warning: {} device(s) could not be accessed due to permissions.", permission_denied_count);
+        eprintln!(
+            "Warning: {} device(s) could not be accessed due to permissions.",
+            permission_denied_count
+        );
         eprintln!("To fix this, either:");
         eprintln!("  1. Run with elevated privileges (not recommended for regular use)");
         eprintln!("  2. Add your user to the 'input' group: sudo usermod -aG input $USER");
@@ -153,7 +154,11 @@ pub fn select_mouse() -> Option<Device> {
     }
 
     if choice > mice.len() {
-        println!("Invalid selection: {} is not a valid option (1-{}).", choice, mice.len());
+        println!(
+            "Invalid selection: {} is not a valid option (1-{}).",
+            choice,
+            mice.len()
+        );
         return None;
     }
 
@@ -161,30 +166,27 @@ pub fn select_mouse() -> Option<Device> {
 }
 
 // Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseEvent, MouseButton};
+pub use mouse_testkit::types::{MouseButton, MouseEvent};
 
 /// Parse an evdev event into a MouseEvent
 #[cfg(target_os = "linux")]
 pub fn parse_event(event: &evdev::InputEvent) -> Option<MouseEvent> {
-    match event.kind() {
-        InputEventKind::RelAxis(axis) => {
-            let value = event.value();
-            match axis {
-                RelativeAxisType::REL_X => Some(MouseEvent::Move { dx: value, dy: 0 }),
-                RelativeAxisType::REL_Y => Some(MouseEvent::Move { dx: 0, dy: value }),
-                RelativeAxisType::REL_WHEEL => Some(MouseEvent::Scroll { delta: value }),
-                _ => None,
-            }
-        }
-        InputEventKind::Key(key) => {
+    match event.destructure() {
+        EventSummary::RelativeAxis(_, axis, value) => match axis {
+            RelativeAxisCode::REL_X => Some(MouseEvent::Move { dx: value, dy: 0 }),
+            RelativeAxisCode::REL_Y => Some(MouseEvent::Move { dx: 0, dy: value }),
+            RelativeAxisCode::REL_WHEEL => Some(MouseEvent::Scroll { delta: value }),
+            _ => None,
+        },
+        EventSummary::Key(_, key, value) => {
             let button = MouseButton::from(key);
             if button == MouseButton::Unknown {
                 return None;
             }
 
-            if event.value() == 1 {
+            if value == 1 {
                 Some(MouseEvent::ButtonPress(button))
-            } else if event.value() == 0 {
+            } else if value == 0 {
                 Some(MouseEvent::ButtonRelease(button))
             } else {
                 None

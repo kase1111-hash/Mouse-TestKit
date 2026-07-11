@@ -1,14 +1,14 @@
 //! Click Response Test
 //! Measures click latency and response time
 
-use std::time::{Duration, Instant};
-use crossterm::event::{self, Event, KeyCode};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use crate::input::{self, MouseEvent, MouseButton};
+use crate::input::{self, MouseButton, MouseEvent};
 #[cfg(target_os = "windows")]
-use crate::input_windows::{self as input, MouseEvent, MouseButton};
+use crate::input_windows::{self as input, MouseButton, MouseEvent};
 
 const NUM_TRIALS: usize = 10;
 
@@ -71,18 +71,25 @@ pub fn run() {
 
                     if let Some(MouseEvent::ButtonPress(button)) = parsed {
                         let latency = prompt_time.elapsed().as_secs_f64() * 1000.0;
-                        results.push(ClickResult { latency_ms: latency, button });
+                        results.push(ClickResult {
+                            latency_ms: latency,
+                            button,
+                        });
                         println!("Response time: {:.1} ms ({:?})", latency, button);
                         clicked = true;
                         break;
                     }
                 }
             }
-            if clicked { break; }
+            if clicked {
+                break;
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        if !clicked { println!("Timeout - no click detected"); }
+        if !clicked {
+            println!("Timeout - no click detected");
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
 
@@ -97,7 +104,9 @@ pub fn run() {
         println!("  Average: {:.1} ms", avg);
         println!("  Minimum: {:.1} ms", sorted.first().unwrap_or(&0.0));
         println!("  Maximum: {:.1} ms", sorted.last().unwrap_or(&0.0));
-        if sorted.len() >= 2 { println!("  Median:  {:.1} ms", sorted[sorted.len() / 2]); }
+        if sorted.len() >= 2 {
+            println!("  Median:  {:.1} ms", sorted[sorted.len() / 2]);
+        }
 
         println!("\nAll responses:");
         for (i, result) in results.iter().enumerate() {

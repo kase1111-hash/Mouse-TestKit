@@ -81,116 +81,119 @@ impl ThemeColors {
     pub fn success() -> egui::Color32 {
         egui::Color32::from_rgb(80, 200, 120)
     }
-
 }
 
 pub fn setup_custom_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    ctx.all_styles_mut(|style| {
+        // Modern spacing
+        style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+        style.spacing.button_padding = egui::vec2(16.0, 8.0);
+        style.spacing.window_margin = egui::Margin::same(16);
+        style.spacing.menu_margin = egui::Margin::same(8);
 
-    // Modern spacing
-    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
-    style.spacing.button_padding = egui::vec2(16.0, 8.0);
-    style.spacing.window_margin = egui::Margin::same(16.0);
-    style.spacing.menu_margin = egui::Margin::same(8.0);
+        // Smooth rounded corners for glassy feel
+        let smooth_rounding = egui::CornerRadius::same(10);
+        let button_rounding = egui::CornerRadius::same(8);
 
-    // Smooth rounded corners for glassy feel
-    let smooth_rounding = egui::Rounding::same(10.0);
-    let button_rounding = egui::Rounding::same(8.0);
+        style.visuals.window_corner_radius = smooth_rounding;
+        style.visuals.menu_corner_radius = button_rounding;
+        style.visuals.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 80),
+        };
 
-    style.visuals.window_rounding = smooth_rounding;
-    style.visuals.menu_rounding = button_rounding;
-    style.visuals.popup_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 4.0),
-        blur: 16.0,
-        spread: 0.0,
-        color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 80),
-    };
+        // Widget styling
+        style.visuals.widgets.noninteractive.corner_radius = button_rounding;
+        style.visuals.widgets.inactive.corner_radius = button_rounding;
+        style.visuals.widgets.hovered.corner_radius = button_rounding;
+        style.visuals.widgets.active.corner_radius = button_rounding;
+        style.visuals.widgets.open.corner_radius = button_rounding;
 
-    // Widget styling
-    style.visuals.widgets.noninteractive.rounding = button_rounding;
-    style.visuals.widgets.inactive.rounding = button_rounding;
-    style.visuals.widgets.hovered.rounding = button_rounding;
-    style.visuals.widgets.active.rounding = button_rounding;
-    style.visuals.widgets.open.rounding = button_rounding;
+        // Glassy inactive widgets
+        style.visuals.widgets.inactive.bg_fill = ThemeColors::bg_glass();
+        style.visuals.widgets.inactive.weak_bg_fill = ThemeColors::bg_elevated();
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, ThemeColors::border());
+        style.visuals.widgets.inactive.fg_stroke =
+            egui::Stroke::new(1.0, ThemeColors::text_secondary());
 
-    // Glassy inactive widgets
-    style.visuals.widgets.inactive.bg_fill = ThemeColors::bg_glass();
-    style.visuals.widgets.inactive.weak_bg_fill = ThemeColors::bg_elevated();
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, ThemeColors::border());
-    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, ThemeColors::text_secondary());
+        // Hovered state with glow effect
+        style.visuals.widgets.hovered.bg_fill = ThemeColors::bg_glass_hover();
+        style.visuals.widgets.hovered.weak_bg_fill = ThemeColors::bg_glass_hover();
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ThemeColors::accent());
+        style.visuals.widgets.hovered.fg_stroke =
+            egui::Stroke::new(1.0, ThemeColors::text_primary());
 
-    // Hovered state with glow effect
-    style.visuals.widgets.hovered.bg_fill = ThemeColors::bg_glass_hover();
-    style.visuals.widgets.hovered.weak_bg_fill = ThemeColors::bg_glass_hover();
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ThemeColors::accent());
-    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, ThemeColors::text_primary());
+        // Active/pressed state
+        style.visuals.widgets.active.bg_fill = ThemeColors::accent();
+        style.visuals.widgets.active.weak_bg_fill = ThemeColors::accent_dim();
+        style.visuals.widgets.active.bg_stroke =
+            egui::Stroke::new(1.5, ThemeColors::accent_hover());
+        style.visuals.widgets.active.fg_stroke =
+            egui::Stroke::new(1.0, ThemeColors::text_primary());
 
-    // Active/pressed state
-    style.visuals.widgets.active.bg_fill = ThemeColors::accent();
-    style.visuals.widgets.active.weak_bg_fill = ThemeColors::accent_dim();
-    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, ThemeColors::accent_hover());
-    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, ThemeColors::text_primary());
+        // Noninteractive (labels, etc.)
+        style.visuals.widgets.noninteractive.bg_fill = ThemeColors::bg_elevated();
+        style.visuals.widgets.noninteractive.weak_bg_fill = ThemeColors::bg_panel();
+        style.visuals.widgets.noninteractive.fg_stroke =
+            egui::Stroke::new(1.0, ThemeColors::text_primary());
 
-    // Noninteractive (labels, etc.)
-    style.visuals.widgets.noninteractive.bg_fill = ThemeColors::bg_elevated();
-    style.visuals.widgets.noninteractive.weak_bg_fill = ThemeColors::bg_panel();
-    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, ThemeColors::text_primary());
+        // Selection
+        style.visuals.selection.bg_fill = ThemeColors::accent_dim();
+        style.visuals.selection.stroke = egui::Stroke::new(1.0, ThemeColors::accent());
 
-    // Selection
-    style.visuals.selection.bg_fill = ThemeColors::accent_dim();
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, ThemeColors::accent());
+        // Hyperlinks
+        style.visuals.hyperlink_color = ThemeColors::accent();
 
-    // Hyperlinks
-    style.visuals.hyperlink_color = ThemeColors::accent();
+        // Striped backgrounds for tables
+        style.visuals.striped = true;
 
-    // Striped backgrounds for tables
-    style.visuals.striped = true;
+        // Extreme dark background
+        style.visuals.extreme_bg_color = ThemeColors::bg_dark();
+        style.visuals.faint_bg_color = ThemeColors::bg_elevated();
+        style.visuals.code_bg_color = ThemeColors::bg_elevated();
 
-    // Extreme dark background
-    style.visuals.extreme_bg_color = ThemeColors::bg_dark();
-    style.visuals.faint_bg_color = ThemeColors::bg_elevated();
-    style.visuals.code_bg_color = ThemeColors::bg_elevated();
+        // Window styling
+        style.visuals.window_fill = ThemeColors::bg_panel();
+        style.visuals.window_stroke = egui::Stroke::new(1.0, ThemeColors::border());
+        style.visuals.panel_fill = ThemeColors::bg_panel();
 
-    // Window styling
-    style.visuals.window_fill = ThemeColors::bg_panel();
-    style.visuals.window_stroke = egui::Stroke::new(1.0, ThemeColors::border());
-    style.visuals.panel_fill = ThemeColors::bg_panel();
+        // Text colors
+        style.visuals.override_text_color = Some(ThemeColors::text_primary());
 
-    // Text colors
-    style.visuals.override_text_color = Some(ThemeColors::text_primary());
-
-    // Separator color
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, ThemeColors::border());
-
-    ctx.set_style(style);
+        // Separator color
+        style.visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, ThemeColors::border());
+    });
 }
 
 /// Creates a glassy frame for panels
 pub fn glass_frame(_ui: &egui::Ui) -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(ThemeColors::bg_glass())
         .stroke(egui::Stroke::new(1.0, ThemeColors::border_light()))
-        .rounding(12.0)
-        .inner_margin(16.0)
+        .corner_radius(12)
+        .inner_margin(16)
         .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 2.0),
-            blur: 8.0,
-            spread: 0.0,
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
             color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 40),
         })
 }
 
 /// Creates an elevated card frame
 pub fn card_frame(_ui: &egui::Ui) -> egui::Frame {
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(ThemeColors::bg_elevated())
         .stroke(egui::Stroke::new(1.0, ThemeColors::border()))
-        .rounding(12.0)
-        .inner_margin(20.0)
+        .corner_radius(12)
+        .inner_margin(20)
         .shadow(egui::epaint::Shadow {
-            offset: egui::vec2(0.0, 4.0),
-            blur: 12.0,
-            spread: 0.0,
+            offset: [0, 4],
+            blur: 12,
+            spread: 0,
             color: egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50),
         })
 }

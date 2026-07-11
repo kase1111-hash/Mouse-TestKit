@@ -52,7 +52,13 @@ impl ScrollPanel {
         self.is_running
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, raw_events: &[RawInputEvent], has_bridge: bool) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Scroll Wheel Test");
         ui.add_space(5.0);
         ui.label("Tests scroll wheel functionality, consistency, and detects missed steps.");
@@ -89,9 +95,15 @@ impl ScrollPanel {
             if age < 0.3 {
                 let alpha = ((1.0 - age / 0.3) * 255.0) as u8;
                 if event.direction_up {
-                    Some((egui::Color32::from_rgba_unmultiplied(50, 200, 100, alpha), "UP"))
+                    Some((
+                        egui::Color32::from_rgba_unmultiplied(50, 200, 100, alpha),
+                        "UP",
+                    ))
                 } else {
-                    Some((egui::Color32::from_rgba_unmultiplied(200, 100, 50, alpha), "DOWN"))
+                    Some((
+                        egui::Color32::from_rgba_unmultiplied(200, 100, 50, alpha),
+                        "DOWN",
+                    ))
                 }
             } else {
                 None
@@ -151,27 +163,43 @@ impl ScrollPanel {
         // Stats display
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label("Total Steps");
-                        ui.label(egui::RichText::new(format!("{}", self.step_count)).size(24.0).strong());
+                        ui.label(
+                            egui::RichText::new(format!("{}", self.step_count))
+                                .size(24.0)
+                                .strong(),
+                        );
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
                         ui.label("Scroll Up");
-                        ui.label(egui::RichText::new(format!("{:.0}", self.total_up.abs())).size(24.0).color(egui::Color32::LIGHT_GREEN));
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}", self.total_up.abs()))
+                                .size(24.0)
+                                .color(egui::Color32::LIGHT_GREEN),
+                        );
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
                         ui.label("Scroll Down");
-                        ui.label(egui::RichText::new(format!("{:.0}", self.total_down.abs())).size(24.0).color(egui::Color32::from_rgb(255, 150, 100)));
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}", self.total_down.abs()))
+                                .size(24.0)
+                                .color(egui::Color32::from_rgb(255, 150, 100)),
+                        );
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
                         ui.label("Speed (sps)");
-                        ui.label(egui::RichText::new(format!("{:.1}", self.current_speed)).size(24.0).color(egui::Color32::YELLOW));
+                        ui.label(
+                            egui::RichText::new(format!("{:.1}", self.current_speed))
+                                .size(24.0)
+                                .color(egui::Color32::YELLOW),
+                        );
                     });
                 });
             });
@@ -181,7 +209,7 @@ impl ScrollPanel {
         // Secondary stats
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(15.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -191,7 +219,11 @@ impl ScrollPanel {
                         } else {
                             egui::Color32::WHITE
                         };
-                        ui.label(egui::RichText::new(format!("{}", self.direction_changes)).size(18.0).color(color));
+                        ui.label(
+                            egui::RichText::new(format!("{}", self.direction_changes))
+                                .size(18.0)
+                                .color(color),
+                        );
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
@@ -231,9 +263,11 @@ impl ScrollPanel {
 
             let speed_variance = if self.speed_samples.len() >= 2 {
                 let mean = avg_speed;
-                self.speed_samples.iter()
+                self.speed_samples
+                    .iter()
                     .map(|x| (x - mean).powi(2))
-                    .sum::<f64>() / self.speed_samples.len() as f64
+                    .sum::<f64>()
+                    / self.speed_samples.len() as f64
             } else {
                 0.0
             };
@@ -246,18 +280,30 @@ impl ScrollPanel {
             };
 
             let (rating, color, message) = if consistency >= 80 {
-                ("Excellent", egui::Color32::GREEN, "Scroll wheel is very consistent")
+                (
+                    "Excellent",
+                    egui::Color32::GREEN,
+                    "Scroll wheel is very consistent",
+                )
             } else if consistency >= 60 {
-                ("Good", egui::Color32::LIGHT_GREEN, "Scroll wheel is working well")
+                (
+                    "Good",
+                    egui::Color32::LIGHT_GREEN,
+                    "Scroll wheel is working well",
+                )
             } else if consistency >= 40 {
-                ("Fair", egui::Color32::YELLOW, "Some scroll inconsistency detected")
+                (
+                    "Fair",
+                    egui::Color32::YELLOW,
+                    "Some scroll inconsistency detected",
+                )
             } else {
                 ("Poor", egui::Color32::RED, "Scroll wheel may have issues")
             };
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
-                .rounding(8.0)
+                .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Rating:");
@@ -274,10 +320,10 @@ impl ScrollPanel {
         ui.add_space(20.0);
 
         // Instructions
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(15.0)
-            .rounding(8.0)
+            .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Instructions").strong());
                 ui.label("1. Click Start to begin testing");
@@ -342,13 +388,22 @@ impl ScrollPanel {
                         // Update current speed (rolling average of last 10 samples)
                         let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
                         if !recent.is_empty() {
-                            self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
+                            self.current_speed =
+                                recent.iter().copied().sum::<f64>() / recent.len() as f64;
                         }
                     }
                 }
             } else {
                 // Fallback: use egui scroll input (requires hover over test area)
-                let scroll_delta = ctx.input(|i| i.raw_scroll_delta);
+                let scroll_delta = ctx.input(|i| {
+                    i.raw
+                        .events
+                        .iter()
+                        .fold(egui::Vec2::ZERO, |acc, e| match e {
+                            egui::Event::MouseWheel { delta, .. } => acc + *delta,
+                            _ => acc,
+                        })
+                });
                 let in_test_area = response.hovered();
 
                 if in_test_area && scroll_delta.y != 0.0 {
@@ -399,7 +454,8 @@ impl ScrollPanel {
                     // Update current speed (rolling average of last 10 samples)
                     let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
                     if !recent.is_empty() {
-                        self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
+                        self.current_speed =
+                            recent.iter().copied().sum::<f64>() / recent.len() as f64;
                     }
                 }
             }
@@ -430,9 +486,11 @@ impl ScrollPanel {
 
         let speed_variance = if self.speed_samples.len() >= 2 {
             let mean = avg_speed;
-            self.speed_samples.iter()
+            self.speed_samples
+                .iter()
                 .map(|x| (x - mean).powi(2))
-                .sum::<f64>() / self.speed_samples.len() as f64
+                .sum::<f64>()
+                / self.speed_samples.len() as f64
         } else {
             0.0
         };

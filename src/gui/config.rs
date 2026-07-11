@@ -39,16 +39,14 @@ impl Config {
         let path = Self::config_path();
 
         match fs::read_to_string(&path) {
-            Ok(contents) => {
-                match serde_json::from_str(&contents) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        eprintln!("Warning: Failed to parse config file: {}", e);
-                        eprintln!("Using default settings.");
-                        Self::default()
-                    }
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse config file: {}", e);
+                    eprintln!("Using default settings.");
+                    Self::default()
                 }
-            }
+            },
             Err(_) => {
                 // Config file doesn't exist yet, use defaults
                 Self::default()
@@ -69,8 +67,7 @@ impl Config {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-        fs::write(&path, json)
-            .map_err(|e| format!("Failed to write config file: {}", e))?;
+        fs::write(&path, json).map_err(|e| format!("Failed to write config file: {}", e))?;
 
         Ok(())
     }

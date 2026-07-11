@@ -1,9 +1,9 @@
 //! Lift-Off Distance Jump Test
 //! Tests for cursor jump during mouse lift
 
-use std::time::{Duration, Instant};
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -45,7 +45,11 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(KeyEvent { code: KeyCode::Char('q'), .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            })) = event::read()
+            {
                 break;
             }
         }
@@ -70,8 +74,10 @@ pub fn run() {
 
                     if was_idle && distance > JUMP_THRESHOLD_PX {
                         let event = LiftEvent::new(accumulated_dx, accumulated_dy);
-                        println!("\r\x1B[K⚠ JUMP DETECTED! Distance: {:.1}px (dx: {}, dy: {})",
-                            event.distance, accumulated_dx, accumulated_dy);
+                        println!(
+                            "\r\x1B[K⚠ JUMP DETECTED! Distance: {:.1}px (dx: {}, dy: {})",
+                            event.distance, accumulated_dx, accumulated_dy
+                        );
                         jump_events.push(event);
                     }
 
@@ -92,7 +98,14 @@ pub fn run() {
             print!("\r\x1B[K");
             print!("Position: ({}, {}) | ", position.0, position.1);
             print!("Jumps detected: {} | ", jump_events.len());
-            print!("Status: {}", if was_idle { "IDLE (lift detected)" } else { "Moving" });
+            print!(
+                "Status: {}",
+                if was_idle {
+                    "IDLE (lift detected)"
+                } else {
+                    "Moving"
+                }
+            );
 
             use std::io::Write;
             std::io::stdout().flush().ok();
@@ -109,7 +122,10 @@ pub fn run() {
 
     if !jump_events.is_empty() {
         let avg = jump_events.iter().map(|j| j.distance).sum::<f64>() / jump_events.len() as f64;
-        let max = jump_events.iter().map(|j| j.distance).fold(f64::MIN, f64::max);
+        let max = jump_events
+            .iter()
+            .map(|j| j.distance)
+            .fold(f64::MIN, f64::max);
 
         println!("\nJump statistics:");
         println!("  Average distance: {:.1} px", avg);
@@ -117,7 +133,13 @@ pub fn run() {
 
         println!("\nJump events:");
         for (i, event) in jump_events.iter().enumerate() {
-            println!("  #{}: {:.1}px (dx: {}, dy: {})", i + 1, event.distance, event.jump_x, event.jump_y);
+            println!(
+                "  #{}: {:.1}px (dx: {}, dy: {})",
+                i + 1,
+                event.distance,
+                event.jump_x,
+                event.jump_y
+            );
         }
 
         println!("\n⚠ Jumps during lift may indicate:");
@@ -140,7 +162,11 @@ pub struct LiftEvent {
 impl LiftEvent {
     pub fn new(jump_x: i32, jump_y: i32) -> Self {
         let distance = ((jump_x.pow(2) + jump_y.pow(2)) as f64).sqrt();
-        Self { jump_x, jump_y, distance }
+        Self {
+            jump_x,
+            jump_y,
+            distance,
+        }
     }
 }
 

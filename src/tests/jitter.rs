@@ -1,10 +1,10 @@
 //! Jitter Test
 //! Measures micro-movements when mouse is stationary
 
-use std::time::{Duration, Instant};
-use std::io::{self, Write};
-use crossterm::event::{self, Event, KeyCode};
 use crate::terminal;
+use crossterm::event::{self, Event, KeyCode};
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -19,7 +19,10 @@ pub fn run() {
     println!("\nInstructions:");
     println!("  1. Place your mouse on a stable surface");
     println!("  2. DO NOT touch or move the mouse");
-    println!("  3. Press SPACE to start a {}s sample", SAMPLE_DURATION_SECS);
+    println!(
+        "  3. Press SPACE to start a {}s sample",
+        SAMPLE_DURATION_SECS
+    );
     println!("  4. The test will measure any phantom movements\n");
 
     let mut device = match input::select_mouse() {
@@ -100,8 +103,12 @@ pub fn run() {
             print!("\r\x1B[K");
             if sampling {
                 let elapsed = sample_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-                print!("Sampling: {}s / {}s | Events: {} | ",
-                    elapsed, SAMPLE_DURATION_SECS, current_movements.len());
+                print!(
+                    "Sampling: {}s / {}s | Events: {} | ",
+                    elapsed,
+                    SAMPLE_DURATION_SECS,
+                    current_movements.len()
+                );
             } else {
                 print!("Samples: {} | Press SPACE to sample | ", samples.len());
             }
@@ -117,13 +124,16 @@ pub fn run() {
     println!("\n\n=== Jitter Test Complete ===\n");
 
     if !samples.is_empty() {
-        let avg_events: f64 = samples.iter().map(|s| s.event_count as f64).sum::<f64>()
-            / samples.len() as f64;
-        let avg_distance: f64 = samples.iter().map(|s| s.total_distance).sum::<f64>()
-            / samples.len() as f64;
-        let avg_magnitude: f64 = samples.iter().map(|s| s.avg_magnitude).sum::<f64>()
-            / samples.len() as f64;
-        let max_single: f64 = samples.iter().map(|s| s.max_single_move).fold(0.0, f64::max);
+        let avg_events: f64 =
+            samples.iter().map(|s| s.event_count as f64).sum::<f64>() / samples.len() as f64;
+        let avg_distance: f64 =
+            samples.iter().map(|s| s.total_distance).sum::<f64>() / samples.len() as f64;
+        let avg_magnitude: f64 =
+            samples.iter().map(|s| s.avg_magnitude).sum::<f64>() / samples.len() as f64;
+        let max_single: f64 = samples
+            .iter()
+            .map(|s| s.max_single_move)
+            .fold(0.0, f64::max);
 
         println!("Samples taken: {}", samples.len());
         println!("Sample duration: {}s each\n", SAMPLE_DURATION_SECS);
@@ -136,8 +146,13 @@ pub fn run() {
 
         println!("\nSample details:");
         for (i, sample) in samples.iter().enumerate() {
-            println!("  #{}: {} events, {:.2} total, max {:.1}",
-                i + 1, sample.event_count, sample.total_distance, sample.max_single_move);
+            println!(
+                "  #{}: {} events, {:.2} total, max {:.1}",
+                i + 1,
+                sample.event_count,
+                sample.total_distance,
+                sample.max_single_move
+            );
         }
 
         // Jitter rating
