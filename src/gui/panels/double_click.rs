@@ -7,14 +7,28 @@ use eframe::egui;
 use std::time::Instant;
 
 use crate::export::DoubleClickExport;
+use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
+
+/// A press this soon after the previous release of the button is switch
+/// bounce (the contact re-closing as it opens), whatever the press-to-press
+/// threshold is set to. A finger cannot release and press again this fast.
+const RELEASE_BOUNCE_GAP_MS: f64 = 25.0;
 
 /// Panel for testing double-click behavior and switch health.
 ///
-/// Measures intervals between clicks to detect accidental double-clicks
-/// (clicks faster than humanly possible), which often indicate switch bounce
-/// or switch failure. Also tracks intentional double-click timing consistency.
+/// Measures intervals between button presses to detect accidental
+/// double-clicks (presses faster than humanly possible), which indicate
+/// switch bounce or switch failure. Also tracks click timing consistency.
+///
+/// With raw input available every hardware press is seen with its own
+/// timestamp, so two presses a few milliseconds apart are both counted.
+/// Without it, the panel reads egui's pointer events; several presses that
+/// land in one frame are still counted individually (with a zero interval).
 pub struct DoubleClickPanel {
+    is_running: bool,
     clicks: Vec<Instant>,
+    /// Time of the most recent button release, for release-edge bounce.
+    last_release: Option<Instant>,
     intervals: Vec<f64>,
     avg_interval: f64,
     min_interval: f64,
@@ -28,7 +42,9 @@ pub struct DoubleClickPanel {
 impl DoubleClickPanel {
     pub fn new() -> Self {
         Self {
+            is_running: false,
             clicks: Vec::new(),
+            last_release: None,
             intervals: Vec::new(),
             avg_interval: 0.0,
             min_interval: f64::MAX,
@@ -60,11 +76,46 @@ impl DoubleClickPanel {
         changed
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    pub fn is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
         ui.heading("Double-Click Test");
         ui.add_space(5.0);
         ui.label("Tests click timing consistency and detects accidental double-clicks.");
+        if !has_bridge {
+            ui.label(
+                egui::RichText::new(
+                    "Note: Raw input unavailable — using framework input (reduced accuracy)",
+                )
+                .color(egui::Color32::YELLOW)
+                .size(11.0),
+            );
+        }
         ui.add_space(15.0);
+
+        ui.horizontal(|ui| {
+            if self.is_running {
+                if ui.button("Stop").clicked() {
+                    self.is_running = false;
+                }
+            } else if ui.button("Start").clicked() {
+                self.clear();
+                self.is_running = true;
+            }
+            if ui.button("Clear Results").clicked() {
+                self.clear();
+            }
+        });
+
+        ui.add_space(10.0);
 
         // Threshold setting
         ui.horizontal(|ui| {
@@ -80,26 +131,37 @@ impl DoubleClickPanel {
 
         ui.add_space(20.0);
 
-        // Big click button
-        let button_size = egui::vec2(300.0, 150.0);
+        // Big click target. Presses are read from raw input (or egui's raw
+        // pointer events) rather than the widget's `clicked()`, which would
+        // collapse a bounce into a single click.
+        let target_size = egui::vec2(300.0, 150.0);
+        let mut target_rect = egui::Rect::NOTHING;
         ui.vertical_centered(|ui| {
-            let button = egui::Button::new(
-                egui::RichText::new("CLICK HERE")
-                    .size(32.0)
-                    .color(egui::Color32::WHITE),
-            )
-            .fill(egui::Color32::from_rgb(60, 100, 180))
-            .min_size(button_size)
-            .corner_radius(12.0);
-
-            if ui.add(button).clicked() {
-                self.register_click();
-            }
+            let (rect, _) = ui.allocate_exact_size(target_size, egui::Sense::hover());
+            target_rect = rect;
+            let fill = if self.is_running {
+                egui::Color32::from_rgb(60, 100, 180)
+            } else {
+                egui::Color32::from_rgb(50, 50, 60)
+            };
+            ui.painter().rect_filled(rect, 12.0, fill);
+            let text = if self.is_running {
+                "CLICK HERE"
+            } else {
+                "Press Start, then click here"
+            };
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                egui::FontId::proportional(28.0),
+                egui::Color32::WHITE,
+            );
         });
 
         ui.add_space(10.0);
         ui.vertical_centered(|ui| {
-            ui.label("Click the button repeatedly to test");
+            ui.label("Click the target repeatedly at a normal pace");
         });
 
         ui.add_space(20.0);
@@ -262,11 +324,45 @@ impl DoubleClickPanel {
                 });
         }
 
-        ui.add_space(20.0);
-
-        // Clear button
-        if ui.button("Clear Results").clicked() {
-            self.clear();
+        // Capture presses
+        if self.is_running {
+            if has_bridge {
+                for event in raw_events {
+                    match event.kind {
+                        RawInputKind::ButtonPress(RawButton::Left) => {
+                            self.register_click_at(event.timestamp)
+                        }
+                        RawInputKind::ButtonRelease(RawButton::Left) => {
+                            self.last_release = Some(event.timestamp)
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                let now = Instant::now();
+                let transitions: Vec<bool> = ctx.input(|i| {
+                    i.raw
+                        .events
+                        .iter()
+                        .filter_map(|e| match e {
+                            egui::Event::PointerButton {
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                pos,
+                                ..
+                            } if target_rect.contains(*pos) => Some(*pressed),
+                            _ => None,
+                        })
+                        .collect()
+                });
+                for pressed in transitions {
+                    if pressed {
+                        self.register_click_at(now);
+                    } else {
+                        self.last_release = Some(now);
+                    }
+                }
+            }
         }
     }
 
@@ -277,11 +373,14 @@ impl DoubleClickPanel {
         });
     }
 
+    #[cfg(test)]
     fn register_click(&mut self) {
-        let now = Instant::now();
+        self.register_click_at(Instant::now());
+    }
 
+    fn register_click_at(&mut self, now: Instant) {
         if let Some(last) = self.clicks.last() {
-            let interval = last.elapsed().as_secs_f64() * 1000.0;
+            let interval = now.duration_since(*last).as_secs_f64() * 1000.0;
             self.intervals.push(interval);
 
             // Update stats
@@ -289,15 +388,28 @@ impl DoubleClickPanel {
             self.max_interval = self.max_interval.max(interval);
             self.avg_interval = self.intervals.iter().sum::<f64>() / self.intervals.len() as f64;
 
-            // Check for double-click (between threshold and 500ms)
-            if interval >= self.threshold_ms && interval <= 500.0 {
-                self.double_click_count += 1;
-            } else if interval < self.threshold_ms {
+            // Bounce shows either as two presses closer than the threshold or
+            // as a press right after the previous release.
+            let release_gap_ms = self
+                .last_release
+                .map(|r| now.duration_since(r).as_secs_f64() * 1000.0);
+            let accidental = interval < self.threshold_ms
+                || release_gap_ms.is_some_and(|g| g < RELEASE_BOUNCE_GAP_MS);
+
+            if accidental {
                 self.accidental_double_clicks += 1;
+            } else if interval <= 500.0 {
+                self.double_click_count += 1;
             }
         }
 
         self.clicks.push(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test(&mut self) {
+        self.clear();
+        self.is_running = true;
     }
 
     fn calculate_consistency(&self) -> f64 {
@@ -321,6 +433,7 @@ impl DoubleClickPanel {
 
     fn clear(&mut self) {
         self.clicks.clear();
+        self.last_release = None;
         self.intervals.clear();
         self.avg_interval = 0.0;
         self.min_interval = f64::MAX;
@@ -444,6 +557,30 @@ mod tests {
         assert_eq!(panel.clicks.len(), 2);
         assert_eq!(panel.intervals.len(), 1);
         assert!(panel.intervals[0] > 0.0);
+    }
+
+    #[test]
+    fn test_press_right_after_release_is_accidental() {
+        let mut panel = DoubleClickPanel::new();
+        let t = Instant::now();
+        panel.register_click_at(t);
+        panel.last_release = Some(t + std::time::Duration::from_millis(60));
+        // 65 ms press-to-press (above the 50 ms threshold) but only 5 ms after release
+        panel.register_click_at(t + std::time::Duration::from_millis(65));
+        assert_eq!(panel.accidental_double_clicks, 1);
+        assert_eq!(panel.double_click_count, 0);
+    }
+
+    #[test]
+    fn test_two_presses_in_same_instant_are_accidental() {
+        let mut panel = DoubleClickPanel::new();
+        let t = Instant::now();
+        panel.register_click_at(t);
+        panel.register_click_at(t);
+        panel.register_click_at(t + std::time::Duration::from_millis(200));
+        assert_eq!(panel.clicks.len(), 3);
+        assert_eq!(panel.accidental_double_clicks, 1);
+        assert_eq!(panel.double_click_count, 1);
     }
 
     // ── settings_changed tests ──────────────────────────────────────────

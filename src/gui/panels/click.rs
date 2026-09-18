@@ -12,6 +12,16 @@ const JUMP_THRESHOLD_PX: f64 = 15.0;
 /// Time in milliseconds without movement to consider mouse "idle" (potential lift)
 const IDLE_THRESHOLD_MS: u64 = 80;
 
+/// Smallest value in the iterator, or 0.0 when it is empty (so an export
+/// never contains `f64::MAX`).
+fn min_or_zero(values: impl Iterator<Item = f64>) -> f64 {
+    values
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map_or(v, |a| a.min(v)))
+        })
+        .unwrap_or(0.0)
+}
+
 #[derive(PartialEq, Clone, Copy)]
 pub enum TestButton {
     Left,
@@ -955,11 +965,7 @@ impl ClickPanel {
                     self.response_hold_times.iter().sum::<f64>()
                         / self.response_hold_times.len() as f64
                 },
-                min_hold_ms: self
-                    .response_hold_times
-                    .iter()
-                    .cloned()
-                    .fold(f64::MAX, f64::min),
+                min_hold_ms: min_or_zero(self.response_hold_times.iter().cloned()),
                 max_hold_ms: self.response_hold_times.iter().cloned().fold(0.0, f64::max),
                 hold_times: self.response_hold_times.iter().cloned().collect(),
             },
@@ -972,11 +978,7 @@ impl ClickPanel {
                     self.response_right_hold_times.iter().sum::<f64>()
                         / self.response_right_hold_times.len() as f64
                 },
-                min_hold_ms: self
-                    .response_right_hold_times
-                    .iter()
-                    .cloned()
-                    .fold(f64::MAX, f64::min),
+                min_hold_ms: min_or_zero(self.response_right_hold_times.iter().cloned()),
                 max_hold_ms: self
                     .response_right_hold_times
                     .iter()

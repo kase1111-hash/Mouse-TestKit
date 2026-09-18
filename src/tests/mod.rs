@@ -1,5 +1,6 @@
 pub mod acceleration;
 pub mod angle_snap;
+pub mod auto_test;
 pub mod click_response;
 pub mod click_sticky;
 pub mod double_click;

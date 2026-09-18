@@ -6,7 +6,7 @@ Mouse TRAP (Test Response And Positioning) is a cross-platform mouse diagnostics
 
 ## Tech Stack
 
-- **Language**: Rust (Edition 2021, requires 1.70+)
+- **Language**: Rust (Edition 2021, requires 1.92+)
 - **GUI Framework**: eframe/egui with egui_plot for graphs
 - **Platform Input**: evdev (Linux), winapi Raw Input (Windows)
 - **Serialization**: serde/serde_json for config and export
@@ -37,6 +37,10 @@ cargo fmt                     # Apply formatting
 cargo clippy -- -D warnings   # Lint with strict warnings
 ```
 
+CI runs `cargo clippy --all-targets --all-features -- -D warnings`, so test
+code must be lint-clean too. `cargo test` includes headless egui smoke tests
+that render every GUI panel with synthetic input (no display needed).
+
 ## Project Structure
 
 ```
@@ -47,9 +51,14 @@ src/
 ├── input.rs                  # Linux input via evdev
 ├── input_windows.rs          # Windows input via Raw Input API
 ├── terminal.rs               # Terminal utilities
-├── analysis/                 # Shared analysis logic
+├── analysis/                 # Shared analysis logic (pure, unit-tested)
 │   ├── mod.rs
-│   ├── polling.rs            # Polling rate statistics (PollingStats)
+│   ├── acceleration.rs       # Slow-vs-fast stroke comparison
+│   ├── angle_snap.rs         # Stroke straightness / snapping detection
+│   ├── coalesce.rs           # Merges evdev REL_X/REL_Y into one report
+│   ├── diagnostics.rs        # Auto Diagnostics engine (phases, findings, report)
+│   ├── polling.rs            # Polling rate statistics and median-based Hz estimate
+│   ├── strokes.rs            # Splits motion into strokes separated by pauses
 │   └── stutter.rs            # Stutter detection algorithm
 ├── gui/
 │   ├── main.rs               # GUI entry point
@@ -58,7 +67,8 @@ src/
 │   ├── theme.rs              # Dark theme styling
 │   ├── input_bridge.rs       # Raw input bridge for GUI
 │   ├── panels/               # Individual test UI panels
-│   │   ├── mod.rs
+│   │   ├── mod.rs            # Panel exports + headless egui smoke tests
+│   │   ├── auto_test.rs      # Auto Diagnostics panel (drives analysis::diagnostics)
 │   │   ├── polling.rs        # Polling rate monitor
 │   │   ├── stutter.rs        # Movement irregularity detection
 │   │   ├── click.rs          # Click response, stickiness, and lift-off tests
@@ -78,6 +88,7 @@ src/
 │   ├── liftoff.rs            # Lift-off distance testing
 │   ├── dpi.rs                # DPI accuracy verification
 │   ├── angle_snap.rs         # Angle snapping detection
+│   ├── auto_test.rs          # Auto Diagnostics (CLI front-end for the shared engine)
 │   ├── acceleration.rs       # Acceleration detection
 │   ├── double_click.rs       # Switch failure detection
 │   ├── jitter.rs             # Sensor noise testing
@@ -116,6 +127,16 @@ CLI tests follow this pattern:
 - Separate module with `pub fn run()` entry point
 - Test-specific data structures for results
 - Clear user prompts and output
+
+### Analysis vs. UI
+
+Anything that decides whether a mouse has a problem belongs in `src/analysis/`
+as a pure function or state machine driven by plain numbers (timestamps in
+seconds, `types::MouseEvent`), with unit tests that feed synthetic streams.
+GUI panels and CLI tests only collect input, call into `analysis`, and display
+the result. The Auto Diagnostics engine (`analysis::diagnostics::AutoTest`) is
+the reference example: both `gui/panels/auto_test.rs` and `tests/auto_test.rs`
+are thin front-ends over it.
 
 ### Error Handling
 

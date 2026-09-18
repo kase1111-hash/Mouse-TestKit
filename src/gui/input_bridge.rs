@@ -8,9 +8,18 @@
 //! On platforms where raw input is unavailable (macOS), returns None
 //! and panels fall back to egui's pointer delta.
 
-use std::sync::mpsc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 use std::time::Instant;
+
+pub use mouse_testkit::analysis::coalesce::EventCoalescer;
+
+/// Maximum number of raw events buffered between GUI frames.
+///
+/// When no test is running the GUI may not repaint (and therefore not drain
+/// the channel) for a long time; a bounded channel caps memory use instead of
+/// growing without limit. At 8000 Hz this still buffers several seconds.
+const CHANNEL_CAPACITY: usize = 65_536;
 
 /// A raw input event from mouse hardware with high-resolution timestamp.
 #[derive(Debug, Clone)]
@@ -64,74 +73,22 @@ impl InputBridge {
         }
         events
     }
-
-    /// Returns true if the bridge has raw input available.
-    /// Useful for panels to know whether to fall back to egui input.
-    pub fn has_events_available(&self) -> bool {
-        // If we can successfully peek, the channel is alive
-        // This is a heuristic — the bridge is alive if the thread is running
-        true
-    }
 }
 
-/// Coalesces separate REL_X and REL_Y evdev events that share the
-/// same kernel timestamp into a single (dx, dy) pair.
+/// Queue an event for the GUI thread.
 ///
-/// Linux evdev emits REL_X and REL_Y as separate events for each
-/// hardware poll. Without coalescing, polling rate would read 2x actual.
-pub(crate) struct EventCoalescer {
-    pending_dx: i32,
-    pending_dy: i32,
-    last_ts: Option<std::time::SystemTime>,
-}
-
-impl EventCoalescer {
-    pub fn new() -> Self {
-        Self {
-            pending_dx: 0,
-            pending_dy: 0,
-            last_ts: None,
-        }
-    }
-
-    /// Feed a relative-axis event at the given kernel timestamp.
-    /// Returns `Some((dx, dy))` if a previous batch needs flushing
-    /// because the timestamp has changed.
-    pub fn accumulate(
-        &mut self,
-        ts: std::time::SystemTime,
-        dx: i32,
-        dy: i32,
-    ) -> Option<(i32, i32)> {
-        let flushed = if let Some(prev_ts) = self.last_ts {
-            if ts != prev_ts && (self.pending_dx != 0 || self.pending_dy != 0) {
-                let result = (self.pending_dx, self.pending_dy);
-                self.pending_dx = 0;
-                self.pending_dy = 0;
-                Some(result)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        self.last_ts = Some(ts);
-        self.pending_dx += dx;
-        self.pending_dy += dy;
-        flushed
-    }
-
-    /// Flush any remaining accumulated movement.
-    /// Call after processing a batch of events.
-    pub fn flush(&mut self) -> Option<(i32, i32)> {
-        if self.pending_dx != 0 || self.pending_dy != 0 {
-            let result = (self.pending_dx, self.pending_dy);
-            self.pending_dx = 0;
-            self.pending_dy = 0;
-            Some(result)
-        } else {
-            None
-        }
+/// Returns `false` when the GUI side has gone away and the input thread
+/// should exit. When the channel is full (the GUI has not drained it in a
+/// long time, which only happens while no test is running) the event is
+/// dropped rather than blocking the input thread.
+fn deliver(sender: &SyncSender<RawInputEvent>, kind: RawInputKind) -> bool {
+    match sender.try_send(RawInputEvent {
+        kind,
+        timestamp: Instant::now(),
+    }) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => true,
+        Err(TrySendError::Disconnected(_)) => false,
     }
 }
 
@@ -197,7 +154,7 @@ impl InputBridge {
         }
 
         let device = mouse_device?;
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
 
         let thread = thread::Builder::new()
             .name("input-bridge-evdev".into())
@@ -217,7 +174,7 @@ impl InputBridge {
     /// Merges consecutive REL_X/REL_Y events with the same kernel timestamp
     /// into a single `Move { dx, dy }` event. This prevents double-counting
     /// for polling rate measurement (one physical poll → one Move event).
-    fn linux_event_loop(mut device: evdev::Device, sender: mpsc::Sender<RawInputEvent>) {
+    fn linux_event_loop(mut device: evdev::Device, sender: SyncSender<RawInputEvent>) {
         use evdev::{EventSummary, KeyCode, RelativeAxisCode};
 
         let mut coalescer = EventCoalescer::new();
@@ -233,14 +190,11 @@ impl InputBridge {
                                 let (dx, dy) = match axis {
                                     RelativeAxisCode::REL_X => (value, 0),
                                     RelativeAxisCode::REL_Y => (0, value),
-                                    RelativeAxisCode::REL_WHEEL
-                                    | RelativeAxisCode::REL_WHEEL_HI_RES => {
-                                        if sender
-                                            .send(RawInputEvent {
-                                                kind: RawInputKind::Scroll { delta: value },
-                                                timestamp: Instant::now(),
-                                            })
-                                            .is_err()
+                                    // One notch is reported both as REL_WHEEL (+-1) and, on
+                                    // newer kernels, as REL_WHEEL_HI_RES (+-120). Only the
+                                    // notch-granular event is used so a notch counts once.
+                                    RelativeAxisCode::REL_WHEEL => {
+                                        if !deliver(&sender, RawInputKind::Scroll { delta: value })
                                         {
                                             return;
                                         }
@@ -249,13 +203,7 @@ impl InputBridge {
                                     _ => continue,
                                 };
                                 if let Some((fdx, fdy)) = coalescer.accumulate(ts, dx, dy) {
-                                    if sender
-                                        .send(RawInputEvent {
-                                            kind: RawInputKind::Move { dx: fdx, dy: fdy },
-                                            timestamp: Instant::now(),
-                                        })
-                                        .is_err()
-                                    {
+                                    if !deliver(&sender, RawInputKind::Move { dx: fdx, dy: fdy }) {
                                         return;
                                     }
                                 }
@@ -277,13 +225,7 @@ impl InputBridge {
                                     } else {
                                         continue; // ignore repeat (value == 2)
                                     };
-                                    if sender
-                                        .send(RawInputEvent {
-                                            kind,
-                                            timestamp: Instant::now(),
-                                        })
-                                        .is_err()
-                                    {
+                                    if !deliver(&sender, kind) {
                                         return;
                                     }
                                 }
@@ -294,19 +236,14 @@ impl InputBridge {
 
                     // Flush any remaining accumulated move after processing the batch
                     if let Some((dx, dy)) = coalescer.flush() {
-                        if sender
-                            .send(RawInputEvent {
-                                kind: RawInputKind::Move { dx, dy },
-                                timestamp: Instant::now(),
-                            })
-                            .is_err()
-                        {
+                        if !deliver(&sender, RawInputKind::Move { dx, dy }) {
                             return;
                         }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Non-blocking mode: no events ready yet
+                    // The device is opened in blocking mode, so this is not
+                    // expected; handle it anyway rather than spinning.
                     thread::sleep(std::time::Duration::from_micros(500));
                 }
                 Err(_) => {
@@ -329,7 +266,7 @@ impl InputBridge {
     /// Uses blocking `GetMessageW` — no heartbeat polling needed.
     /// Returns `None` if window creation or raw input registration fails.
     pub fn start() -> Option<Self> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
 
         let thread = thread::Builder::new()
             .name("input-bridge-rawinput".into())
@@ -344,7 +281,7 @@ impl InputBridge {
         })
     }
 
-    fn windows_event_loop(sender: mpsc::Sender<RawInputEvent>) {
+    fn windows_event_loop(sender: SyncSender<RawInputEvent>) {
         unsafe {
             use std::mem;
             use std::ptr;
@@ -432,7 +369,7 @@ impl InputBridge {
 
     unsafe fn process_wm_input(
         handle: winapi::um::winuser::HRAWINPUT,
-        sender: &mpsc::Sender<RawInputEvent>,
+        sender: &SyncSender<RawInputEvent>,
     ) {
         use std::mem;
         use winapi::shared::minwindef::UINT;
@@ -471,67 +408,49 @@ impl InputBridge {
         }
 
         let mouse = raw.data.mouse();
-        let now = Instant::now();
 
         // Movement (already combined dx+dy in a single WM_INPUT on Windows)
         if mouse.lLastX != 0 || mouse.lLastY != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::Move {
+            deliver(
+                sender,
+                RawInputKind::Move {
                     dx: mouse.lLastX,
                     dy: mouse.lLastY,
                 },
-                timestamp: now,
-            });
+            );
         }
 
+        // Button transition flags (RI_MOUSE_*_DOWN / _UP)
+        const BUTTON_FLAGS: [(u16, RawButton, bool); 10] = [
+            (0x0001, RawButton::Left, true),
+            (0x0002, RawButton::Left, false),
+            (0x0004, RawButton::Right, true),
+            (0x0008, RawButton::Right, false),
+            (0x0010, RawButton::Middle, true),
+            (0x0020, RawButton::Middle, false),
+            (0x0040, RawButton::Side, true),
+            (0x0080, RawButton::Side, false),
+            (0x0100, RawButton::Extra, true),
+            (0x0200, RawButton::Extra, false),
+        ];
         let flags = mouse.usButtonFlags;
+        for (flag, button, pressed) in BUTTON_FLAGS {
+            if flags & flag != 0 {
+                let kind = if pressed {
+                    RawInputKind::ButtonPress(button)
+                } else {
+                    RawInputKind::ButtonRelease(button)
+                };
+                deliver(sender, kind);
+            }
+        }
 
-        // RI_MOUSE_LEFT_BUTTON_DOWN / UP
-        if flags & 0x0001 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonPress(RawButton::Left),
-                timestamp: now,
-            });
-        }
-        if flags & 0x0002 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonRelease(RawButton::Left),
-                timestamp: now,
-            });
-        }
-        // RI_MOUSE_RIGHT_BUTTON_DOWN / UP
-        if flags & 0x0004 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonPress(RawButton::Right),
-                timestamp: now,
-            });
-        }
-        if flags & 0x0008 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonRelease(RawButton::Right),
-                timestamp: now,
-            });
-        }
-        // RI_MOUSE_MIDDLE_BUTTON_DOWN / UP
-        if flags & 0x0010 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonPress(RawButton::Middle),
-                timestamp: now,
-            });
-        }
-        if flags & 0x0020 != 0 {
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::ButtonRelease(RawButton::Middle),
-                timestamp: now,
-            });
-        }
-        // RI_MOUSE_WHEEL
+        // RI_MOUSE_WHEEL: usButtonData holds a signed multiple of WHEEL_DELTA (120)
         if flags & 0x0400 != 0 {
-            let delta = mouse.usButtonData as i16 as i32 / 120; // WHEEL_DELTA
-            let _ = sender.send(RawInputEvent {
-                kind: RawInputKind::Scroll { delta },
-                timestamp: now,
-            });
+            let delta = mouse.usButtonData as i16 as i32 / 120;
+            if delta != 0 {
+                deliver(sender, RawInputKind::Scroll { delta });
+            }
         }
     }
 }
@@ -548,80 +467,5 @@ impl InputBridge {
              GUI tests will use framework input (reduced accuracy)."
         );
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{Duration, SystemTime};
-
-    fn ts(secs: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
-    }
-
-    #[test]
-    fn test_single_x_then_flush() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), 10, 0), None);
-        assert_eq!(c.flush(), Some((10, 0)));
-        assert_eq!(c.flush(), None);
-    }
-
-    #[test]
-    fn test_merge_x_and_y_same_timestamp() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), 5, 0), None);
-        assert_eq!(c.accumulate(ts(1), 0, -3), None);
-        assert_eq!(c.flush(), Some((5, -3)));
-    }
-
-    #[test]
-    fn test_flush_on_timestamp_change() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), 5, 0), None);
-        assert_eq!(c.accumulate(ts(1), 0, -3), None);
-        // New timestamp flushes the previous batch
-        assert_eq!(c.accumulate(ts(2), 10, 0), Some((5, -3)));
-        assert_eq!(c.flush(), Some((10, 0)));
-    }
-
-    #[test]
-    fn test_multiple_sequential_batches() {
-        let mut c = EventCoalescer::new();
-        // Batch 1 at ts(1)
-        assert_eq!(c.accumulate(ts(1), 3, 0), None);
-        assert_eq!(c.accumulate(ts(1), 0, 4), None);
-        // Batch 2 at ts(2) — flushes batch 1
-        assert_eq!(c.accumulate(ts(2), -1, 0), Some((3, 4)));
-        assert_eq!(c.accumulate(ts(2), 0, 2), None);
-        // Batch 3 at ts(3) — flushes batch 2
-        assert_eq!(c.accumulate(ts(3), 7, 0), Some((-1, 2)));
-        assert_eq!(c.accumulate(ts(3), 0, -5), None);
-        // Final flush for batch 3
-        assert_eq!(c.flush(), Some((7, -5)));
-    }
-
-    #[test]
-    fn test_no_flush_when_all_zero() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), 0, 0), None);
-        assert_eq!(c.flush(), None);
-    }
-
-    #[test]
-    fn test_accumulates_multiple_same_axis_same_ts() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), 3, 0), None);
-        assert_eq!(c.accumulate(ts(1), 4, 0), None);
-        assert_eq!(c.flush(), Some((7, 0)));
-    }
-
-    #[test]
-    fn test_negative_deltas() {
-        let mut c = EventCoalescer::new();
-        assert_eq!(c.accumulate(ts(1), -5, 0), None);
-        assert_eq!(c.accumulate(ts(1), 0, 3), None);
-        assert_eq!(c.flush(), Some((-5, 3)));
     }
 }

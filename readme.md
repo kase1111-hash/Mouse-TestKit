@@ -4,7 +4,7 @@ A comprehensive mouse diagnostics and testing utility for precision performance 
 
 [![CI](https://github.com/kase1111-hash/Mouse-TestKit/actions/workflows/ci.yml/badge.svg)](https://github.com/kase1111-hash/Mouse-TestKit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org/)
 
 ## Overview
 
@@ -12,6 +12,7 @@ Mouse TRAP is a cross-platform mouse testing utility designed to analyze and dia
 
 ## Features
 
+- **Auto Diagnostics** - One-minute guided check-up that looks for faults by itself: phantom input at rest, stutters and unstable polling, switch bounce (accidental double clicks), sticky or stuck buttons, scroll-wheel skips and lift-off jumps. Produces a Healthy / Needs attention / Fault detected verdict with explanations
 - **Polling Rate Monitor** - Real-time Hz measurement (125Hz to 8000Hz+)
 - **Stutter Detection & Graphing** - Visual detection of movement irregularities
 - **USB Conflict Detection** - Identifies competing devices on the same controller
@@ -35,7 +36,7 @@ Download the latest release for your platform from the [Releases](https://github
 
 #### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.70 or later
+- [Rust](https://rustup.rs/) 1.92 or later
 
 #### Platform-specific Dependencies
 

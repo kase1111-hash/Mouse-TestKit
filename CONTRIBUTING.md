@@ -23,7 +23,7 @@ Thank you for your interest in contributing to Mouse TRAP! This document provide
 
 ### Prerequisites
 
-- Rust 1.70 or later (install via [rustup](https://rustup.rs/))
+- Rust 1.92 or later (install via [rustup](https://rustup.rs/))
 - Platform-specific dependencies (see [BUILD.md](docs/BUILD.md))
 
 ### Building

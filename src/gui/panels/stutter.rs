@@ -410,6 +410,11 @@ impl StutterPanel {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_for_test(&mut self) {
+        self.start();
+    }
+
     fn start(&mut self) {
         self.is_running = true;
         self.last_move_time = None;

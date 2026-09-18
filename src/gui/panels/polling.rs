@@ -13,11 +13,19 @@ use std::time::Instant;
 
 use crate::export::PollingRateExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::polling::{estimate_hz, nominal_rate};
+
+/// Minimum movement reports inside the measurement window before a Hz value
+/// is published. Prevents the first fraction of a second of movement from
+/// producing a tiny, misleading reading.
+const MIN_EVENTS_FOR_ESTIMATE: usize = 10;
 
 /// Panel for measuring mouse polling rate.
 ///
-/// Calculates polling rate by counting mouse movement events per second.
-/// Displays real-time statistics and a scrolling graph of polling rate history.
+/// Calculates the polling rate from the median interval between consecutive
+/// movement reports in the last second, which is robust against the mouse
+/// briefly stopping. Displays real-time statistics and a scrolling graph of
+/// polling rate history.
 pub struct PollingPanel {
     is_running: bool,
     current_hz: u32,
@@ -132,6 +140,17 @@ impl PollingPanel {
                     ui.add_space(30.0);
                     self.stat_box(
                         ui,
+                        "Nominal",
+                        &if self.samples > 0 {
+                            format!("{} Hz", nominal_rate(self.avg_hz))
+                        } else {
+                            "-".to_string()
+                        },
+                        egui::Color32::LIGHT_GRAY,
+                    );
+                    ui.add_space(30.0);
+                    self.stat_box(
+                        ui,
                         "Samples",
                         &format!("{}", self.samples),
                         egui::Color32::GRAY,
@@ -228,7 +247,10 @@ impl PollingPanel {
         }
     }
 
-    /// Calculate Hz from event count in the last second (runs every 100ms)
+    /// Calculate Hz from the intervals between reports in the last second
+    /// (runs every 100ms). Uses the median interval so that a partially
+    /// filled window (the mouse just started moving) or a single missed
+    /// report does not distort the reading.
     fn calculate_hz(&mut self) {
         let now = Instant::now();
         let should_calc = match self.last_hz_calc {
@@ -236,9 +258,14 @@ impl PollingPanel {
             Some(last) => now.duration_since(last).as_millis() >= 100,
         };
 
-        if should_calc && self.event_times.len() >= 2 {
-            let hz = self.event_times.len() as u32;
-            if hz > 0 {
+        if should_calc && self.event_times.len() >= MIN_EVENTS_FOR_ESTIMATE {
+            let intervals: Vec<f64> = self
+                .event_times
+                .iter()
+                .zip(self.event_times.iter().skip(1))
+                .map(|(a, b)| b.duration_since(*a).as_secs_f64() * 1000.0)
+                .collect();
+            if let Some(hz) = estimate_hz(&intervals, MIN_EVENTS_FOR_ESTIMATE - 1) {
                 self.current_hz = hz;
                 self.min_hz = self.min_hz.min(hz);
                 self.max_hz = self.max_hz.max(hz);
@@ -265,6 +292,11 @@ impl PollingPanel {
         self.is_running = true;
         self.event_times.clear();
         self.last_hz_calc = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_for_test(&mut self) {
+        self.start();
     }
 
     fn reset(&mut self) {

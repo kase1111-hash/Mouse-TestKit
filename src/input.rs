@@ -47,6 +47,16 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
 
                 match Device::open(&path) {
                     Ok(device) => {
+                        // Tests poll the keyboard and the mouse in one loop; a
+                        // blocking read would stall the loop (and the 'q' key,
+                        // timed samples, etc.) until the mouse produces an event.
+                        if let Err(e) = device.set_nonblocking(true) {
+                            eprintln!(
+                                "Warning: could not set {} non-blocking: {}",
+                                path.display(),
+                                e
+                            );
+                        }
                         // Check if device has mouse-like capabilities
                         let has_rel_x = device
                             .supported_relative_axes()

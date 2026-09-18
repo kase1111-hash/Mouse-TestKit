@@ -3,7 +3,7 @@
 ## Prerequisites
 
 ### All Platforms
-- [Rust](https://rustup.rs/) (1.70 or later)
+- [Rust](https://rustup.rs/) (1.92 or later)
 
 ### Linux
 ```bash

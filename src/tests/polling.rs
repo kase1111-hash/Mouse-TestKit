@@ -3,8 +3,11 @@
 
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use mouse_testkit::analysis::polling::PollingStats;
+use mouse_testkit::analysis::polling::{estimate_hz, nominal_rate, PollingStats};
 use std::time::{Duration, Instant, SystemTime};
+
+/// Minimum reports in the one-second window before a Hz value is published.
+const MIN_EVENTS_FOR_ESTIMATE: usize = 10;
 
 #[cfg(target_os = "linux")]
 use crate::input::{self, MouseEvent};
@@ -81,39 +84,27 @@ pub fn run() {
             // Keep only timestamps from last second
             timestamps.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
 
-            if timestamps.len() >= 2 {
-                let hz = timestamps.len() as u32;
-                stats.update(hz);
+            if timestamps.len() >= MIN_EVENTS_FOR_ESTIMATE {
+                // Median interval between reports: robust against the window
+                // being only partly filled or a single missed report.
+                let intervals: Vec<f64> = timestamps
+                    .windows(2)
+                    .map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0)
+                    .collect();
 
-                // Calculate interval-based Hz
-                let mut intervals: Vec<u128> = Vec::new();
-                for i in 1..timestamps.len() {
-                    let delta = timestamps[i].duration_since(timestamps[i - 1]).as_micros();
-                    if delta > 0 {
-                        intervals.push(delta);
-                    }
+                if let Some(hz) = estimate_hz(&intervals, MIN_EVENTS_FOR_ESTIMATE - 1) {
+                    stats.update(hz);
+
+                    print!("\r\x1B[K");
+                    print!("Current: {:4} Hz (~{} Hz) | ", hz, nominal_rate(hz as f64));
+                    print!("Min: {:4} Hz | ", stats.min_hz);
+                    print!("Max: {:4} Hz | ", stats.max_hz);
+                    print!("Avg: {:6.1} Hz | ", stats.avg_hz);
+                    print!("Samples: {}", stats.samples);
+
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
                 }
-
-                let avg_interval_hz = if !intervals.is_empty() {
-                    let avg_interval = intervals.iter().sum::<u128>() / intervals.len() as u128;
-                    if avg_interval > 0 {
-                        1_000_000 / avg_interval
-                    } else {
-                        0
-                    }
-                } else {
-                    0
-                };
-
-                print!("\r\x1B[K");
-                print!("Current: {:4} Hz | ", avg_interval_hz);
-                print!("Min: {:4} Hz | ", stats.min_hz);
-                print!("Max: {:4} Hz | ", stats.max_hz);
-                print!("Avg: {:6.1} Hz | ", stats.avg_hz);
-                print!("Samples: {}", stats.samples);
-
-                use std::io::Write;
-                std::io::stdout().flush().ok();
             }
 
             last_print = now;
