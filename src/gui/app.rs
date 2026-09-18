@@ -4,20 +4,28 @@
 //! Manages navigation between test panels, theming, and result export.
 
 use eframe::egui;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::export::{ExportInfo, TestResultsExport};
 use crate::input_bridge::InputBridge;
 use crate::panels::{
-    AccelPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel, ScrollPanel,
-    StutterPanel,
+    AccelPanel, AutoTestPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel,
+    ScrollPanel, StutterPanel,
 };
 use crate::theme::{self, ThemeColors};
+
+/// How long after the last settings change the config is written to disk.
+const CONFIG_SAVE_DEBOUNCE: Duration = Duration::from_millis(750);
+/// Repaint interval while idle, so the raw-input channel keeps being drained
+/// even when the pointer is outside the window.
+const IDLE_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Represents the currently active test or view in the application.
 #[derive(PartialEq, Clone, Copy)]
 pub enum ActiveTest {
     Dashboard,
+    AutoTest,
     PollingRate,
     Stutter,
     ClickResponse,
@@ -54,21 +62,24 @@ pub struct MouseTestKitApp {
     double_click_panel: DoubleClickPanel,
     /// Scroll wheel testing panel
     scroll_panel: ScrollPanel,
+    /// Automated diagnostics panel
+    auto_test_panel: AutoTestPanel,
     /// Whether to show the About dialog
     show_about: bool,
     /// Status message from last export operation
     export_status: Option<String>,
     /// User configuration
     config: Config,
-    /// Whether config needs to be saved to disk
-    config_dirty: bool,
+    /// When settings last changed and still need saving (debounced)
+    config_dirty_since: Option<Instant>,
     /// Background raw input thread (None on unsupported platforms)
     input_bridge: Option<InputBridge>,
 }
 
 impl MouseTestKitApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Set up custom fonts and style
+        // Always dark, styled once (the style persists across frames)
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
         theme::setup_custom_style(&cc.egui_ctx);
 
         // Load saved configuration
@@ -101,10 +112,11 @@ impl MouseTestKitApp {
             accel_panel: AccelPanel::new(),
             double_click_panel,
             scroll_panel: ScrollPanel::new(),
+            auto_test_panel: AutoTestPanel::new(),
             show_about: false,
             export_status: None,
             config,
-            config_dirty: false,
+            config_dirty_since: None,
             input_bridge,
         }
     }
@@ -117,14 +129,19 @@ impl MouseTestKitApp {
         self.config.double_click_threshold_ms = self.double_click_panel.get_threshold_ms();
     }
 
-    /// Save config to disk if dirty
-    fn save_config_if_needed(&mut self) {
-        if self.config_dirty {
+    /// Save config to disk once settings have stopped changing for
+    /// [`CONFIG_SAVE_DEBOUNCE`] (or immediately when `force` is set).
+    fn save_config_if_needed(&mut self, force: bool) {
+        let due = match self.config_dirty_since {
+            Some(since) => force || since.elapsed() >= CONFIG_SAVE_DEBOUNCE,
+            None => false,
+        };
+        if due {
             self.update_config();
             if let Err(e) = self.config.save() {
                 eprintln!("Warning: Failed to save config: {}", e);
             }
-            self.config_dirty = false;
+            self.config_dirty_since = None;
         }
     }
 
@@ -142,6 +159,7 @@ impl MouseTestKitApp {
             acceleration: self.accel_panel.export_accel(),
             angle_snap: self.accel_panel.export_angle(),
             scroll: self.scroll_panel.export(),
+            auto_diagnostics: self.auto_test_panel.report().cloned(),
         }
     }
 
@@ -260,6 +278,7 @@ impl MouseTestKitApp {
                 ui.add_space(8.0);
 
                 self.nav_button(ui, "Dashboard", ActiveTest::Dashboard, true);
+                self.nav_button(ui, "Auto Diagnostics", ActiveTest::AutoTest, false);
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
@@ -484,6 +503,46 @@ impl MouseTestKitApp {
 
         ui.add_space(28.0);
 
+        // Auto diagnostics call-to-action
+        ui.label(theme::subheading_style("CHECK-UP"));
+        ui.add_space(12.0);
+        theme::card_frame(ui).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("🔍").size(28.0));
+                ui.add_space(8.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Auto Diagnostics")
+                            .strong()
+                            .size(15.0)
+                            .color(ThemeColors::text_primary()),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "One-minute guided check-up that looks for faults by itself: phantom input, stutters, switch bounce, sticky buttons, scroll skips and lift-off jumps.",
+                        )
+                        .size(12.0)
+                        .color(ThemeColors::text_muted()),
+                    );
+                    ui.add_space(8.0);
+                    let btn = egui::Button::new(
+                        egui::RichText::new("Run Check-up")
+                            .size(12.0)
+                            .color(ThemeColors::text_primary()),
+                    )
+                    .fill(ThemeColors::accent())
+                    .corner_radius(6.0)
+                    .min_size(egui::vec2(110.0, 28.0));
+                    if ui.add(btn).clicked() {
+                        self.active_test = ActiveTest::AutoTest;
+                    }
+                });
+            });
+        });
+
+        ui.add_space(28.0);
+
         // Quick start section
         ui.label(theme::subheading_style("QUICK START"));
         ui.add_space(12.0);
@@ -568,15 +627,34 @@ impl MouseTestKitApp {
                 });
                 ui.add_space(40.0);
                 ui.vertical(|ui| {
-                    ui.label(theme::metric_label_style("STATUS"));
+                    ui.label(theme::metric_label_style("INPUT SOURCE"));
+                    let (text, color) = if self.input_bridge.is_some() {
+                        ("RAW INPUT", ThemeColors::success())
+                    } else {
+                        ("FRAMEWORK (REDUCED ACCURACY)", egui::Color32::YELLOW)
+                    };
                     ui.label(
-                        egui::RichText::new("READY")
+                        egui::RichText::new(text)
                             .size(16.0)
                             .strong()
-                            .color(ThemeColors::success()),
+                            .color(color),
                     );
                 });
             });
+            if self.input_bridge.is_none() {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(if cfg!(target_os = "linux") {
+                        "No readable mouse device was found. Add your user to the 'input' group (sudo usermod -aG input $USER) and log in again for precise timing."
+                    } else if cfg!(target_os = "windows") {
+                        "Raw Input registration failed; timing tests will use frame-rate-limited input."
+                    } else {
+                        "Raw input is not implemented on this platform; timing tests use frame-rate-limited input."
+                    })
+                    .size(11.0)
+                    .color(ThemeColors::text_muted()),
+                );
+            }
         });
     }
 
@@ -768,20 +846,21 @@ impl eframe::App for MouseTestKitApp {
         };
         let has_bridge = self.input_bridge.is_some();
 
+        // The auto diagnostics engine must see every frame's events even
+        // while another panel is displayed.
+        self.auto_test_panel
+            .process_input(ctx, &frame_events, has_bridge);
+
         // Check if any panel settings changed and mark config dirty
         if self.stutter_panel.settings_changed()
             || self.dpi_panel.settings_changed()
             || self.double_click_panel.settings_changed()
         {
-            self.config_dirty = true;
+            self.config_dirty_since = Some(Instant::now());
         }
 
-        // Save config if dirty (debounced - only saves once changes stop)
-        self.save_config_if_needed();
-
-        // Apply dark theme
-        ctx.set_visuals(egui::Visuals::dark());
-        theme::setup_custom_style(ctx);
+        // Save config once changes have settled
+        self.save_config_if_needed(false);
 
         // Render sidebar
         self.render_sidebar(ui);
@@ -798,6 +877,7 @@ impl eframe::App for MouseTestKitApp {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| match self.active_test {
                     ActiveTest::Dashboard => self.render_dashboard(ui),
+                    ActiveTest::AutoTest => self.auto_test_panel.ui(ui, ctx, has_bridge),
                     ActiveTest::PollingRate => {
                         self.polling_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
@@ -821,7 +901,9 @@ impl eframe::App for MouseTestKitApp {
                     ActiveTest::Acceleration => {
                         self.accel_panel.ui_accel(ui, ctx, raw_events, has_bridge)
                     }
-                    ActiveTest::DoubleClick => self.double_click_panel.ui(ui, ctx),
+                    ActiveTest::DoubleClick => {
+                        self.double_click_panel.ui(ui, ctx, raw_events, has_bridge)
+                    }
                     ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
                 });
             });
@@ -831,16 +913,26 @@ impl eframe::App for MouseTestKitApp {
             self.render_about_window(ctx);
         }
 
-        // Only request continuous repaints when a test is actively running
+        // Only request continuous repaints when a test is actively running.
+        // While idle, repaint occasionally so the raw-input channel is drained
+        // even when the pointer is outside the window.
         let any_test_running = self.polling_panel.is_running()
             || self.stutter_panel.is_running()
             || self.click_panel.is_running()
             || self.jitter_panel.is_running()
             || self.dpi_panel.is_running()
             || self.accel_panel.is_running()
-            || self.scroll_panel.is_running();
+            || self.double_click_panel.is_running()
+            || self.scroll_panel.is_running()
+            || self.auto_test_panel.is_running();
         if any_test_running {
             ctx.request_repaint();
+        } else if has_bridge {
+            ctx.request_repaint_after(IDLE_REPAINT_INTERVAL);
         }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_config_if_needed(true);
     }
 }

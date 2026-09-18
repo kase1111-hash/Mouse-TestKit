@@ -8,7 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto Diagnostics**: a guided one-minute check-up (GUI panel and CLI menu
+  option 13) that looks for faults by itself across five steps (rest, movement,
+  clicks, scroll, lift) and reports a verdict with explained findings: phantom
+  movement/clicks/scrolls at rest, stutters and unstable or very low polling
+  rate, switch bounce (accidental double clicks), micro-presses, sticky and
+  stuck buttons, scroll-wheel skips or a dead direction, and lift-off jumps.
+  The report is included in JSON/CSV exports. The engine lives in
+  `analysis::diagnostics` and is covered by synthetic-fault unit tests
+- Shared stroke segmentation (`analysis::strokes`) used by the acceleration,
+  angle-snapping and diagnostics tests
+- Headless egui smoke tests that render every GUI panel with synthetic input
+- Polling panels show the nearest nominal rate (125/250/500/1000/... Hz)
+- Windows raw input now reports side/extra buttons
 - Comprehensive project documentation
+
+### Fixed
+- **Acceleration test (GUI)** reported acceleration on every mouse: it compared
+  the size of individual reports, which grows with speed by definition. It now
+  compares the counts produced by whole passes over the same distance at slow
+  and fast speeds, and says so when the speeds were too similar to judge
+- **Angle-snapping test (GUI)** flagged normal mice because integer sensor
+  counts make most slow reports exactly axis-aligned. It now judges whole
+  strokes: a slightly tilted freehand stroke that comes out perfectly straight
+  and on-axis is the signature of snapping
+- **Double-click test** used the widget's `clicked()`, which merges several
+  presses in one frame into a single click and therefore could not see a
+  bouncing switch. It now counts raw button presses (and egui pointer events
+  as a fallback) and also flags a press within 25 ms of the previous release
+- **Polling rate** was the number of reports in the last second, so the first
+  fraction of a second of movement produced tiny readings that stuck in "Min".
+  It is now derived from the median report interval (GUI and CLI)
+- **Scroll wheel** counted every notch twice and totals were inflated 120x on
+  kernels that emit `REL_WHEEL_HI_RES`; only the notch event is used now
+- **CLI tests stalled** until the mouse moved because the evdev device was
+  opened in blocking mode: the quit key and timed samples (jitter, click
+  response) only worked while the mouse was producing events
+- The raw-input channel grew without bound while the pointer was outside the
+  window and no test was running (the GUI never repainted, so never drained
+  it). The channel is now bounded and the app repaints periodically when idle
+- Config was written to disk on every frame while a slider was dragged; it is
+  now debounced and flushed on exit
+- CSV/JSON export contained `f64::MAX` for the minimum hold time of a button
+  that was never clicked
+- CLI angle-snapping average angle was an arithmetic mean, which broke for
+  movements straddling +/-180 degrees; it is now a circular mean
+- Dashboard shows whether raw input is active and how to enable it on Linux
+- Documented Rust requirement corrected to 1.92 (required by eframe 0.35)
 
 ### Changed
 - Updated `eframe`/`egui` from 0.29 to 0.35 and `egui_plot` from 0.29 to 0.36,

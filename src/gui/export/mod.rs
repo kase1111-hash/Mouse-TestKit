@@ -5,6 +5,7 @@
 //! containing all relevant metrics and raw data.
 
 use chrono::{DateTime, Local};
+use mouse_testkit::analysis::diagnostics::Report as AutoDiagnosticsReport;
 use serde::Serialize;
 
 /// Complete export of all test results.
@@ -25,6 +26,8 @@ pub struct TestResultsExport {
     pub acceleration: Option<AccelerationExport>,
     pub angle_snap: Option<AngleSnapExport>,
     pub scroll: Option<ScrollExport>,
+    /// Report from the automated diagnostics run, if one was completed.
+    pub auto_diagnostics: Option<AutoDiagnosticsReport>,
 }
 
 /// Metadata about the export including app version and timestamp.
@@ -172,7 +175,12 @@ pub struct DpiSampleExport {
 #[derive(Serialize)]
 pub struct AccelerationExport {
     pub has_acceleration: bool,
+    /// False when the slow and fast passes were too similar in speed to judge.
+    pub conclusive: bool,
+    /// Mean counts of fast passes divided by mean counts of slow passes.
     pub accel_factor: f64,
+    /// Median speed of fast passes divided by median speed of slow passes.
+    pub speed_ratio: f64,
     pub confidence_percent: f32,
     pub slow_sample_count: usize,
     pub fast_sample_count: usize,
@@ -182,9 +190,13 @@ pub struct AccelerationExport {
 #[derive(Serialize)]
 pub struct AngleSnapExport {
     pub has_snapping: bool,
+    /// False when too few near-axis strokes were drawn to judge.
+    pub conclusive: bool,
     pub snap_strength_percent: f64,
     pub dominant_angles: Vec<f64>,
-    pub point_count: usize,
+    pub stroke_count: usize,
+    pub near_axis_stroke_count: usize,
+    pub snapped_stroke_count: usize,
 }
 
 /// Scroll wheel test results.
@@ -377,7 +389,9 @@ impl TestResultsExport {
         // Acceleration
         if let Some(ref a) = self.acceleration {
             csv.push_str(&format!("Acceleration,Detected,{}\n", a.has_acceleration));
+            csv.push_str(&format!("Acceleration,Conclusive,{}\n", a.conclusive));
             csv.push_str(&format!("Acceleration,Factor,{:.2}\n", a.accel_factor));
+            csv.push_str(&format!("Acceleration,Speed Ratio,{:.2}\n", a.speed_ratio));
             csv.push_str(&format!(
                 "Acceleration,Confidence (%),{:.0}\n",
                 a.confidence_percent
@@ -387,10 +401,12 @@ impl TestResultsExport {
         // Angle Snap
         if let Some(ref a) = self.angle_snap {
             csv.push_str(&format!("Angle Snap,Detected,{}\n", a.has_snapping));
+            csv.push_str(&format!("Angle Snap,Conclusive,{}\n", a.conclusive));
             csv.push_str(&format!(
                 "Angle Snap,Strength (%),{:.1}\n",
                 a.snap_strength_percent
             ));
+            csv.push_str(&format!("Angle Snap,Strokes,{}\n", a.stroke_count));
         }
 
         // Scroll
@@ -407,6 +423,49 @@ impl TestResultsExport {
                 "Scroll,Consistency (%),{}\n",
                 s.consistency_percent
             ));
+        }
+
+        // Auto diagnostics
+        if let Some(ref r) = self.auto_diagnostics {
+            csv.push_str(&format!(
+                "Auto Diagnostics,Verdict,{}\n",
+                csv_escape(r.verdict.label())
+            ));
+            csv.push_str(&format!("Auto Diagnostics,Aborted,{}\n", r.aborted));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Duration (s),{:.1}\n",
+                r.duration_secs
+            ));
+            if let Some(hz) = r.metrics.polling_hz {
+                csv.push_str(&format!("Auto Diagnostics,Polling Rate (Hz),{}\n", hz));
+            }
+            csv.push_str(&format!(
+                "Auto Diagnostics,Stutter Rate (%),{:.2}\n",
+                r.metrics.stutter_rate_percent
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Rest Movement (counts),{:.1}\n",
+                r.metrics.rest_distance_counts
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Switch Bounces,{}\n",
+                r.metrics.bounce_events
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Scroll Reversals,{}\n",
+                r.metrics.scroll_reversals
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Lift Jumps,{}\n",
+                r.metrics.lift_jumps
+            ));
+            for f in &r.findings {
+                csv.push_str(&format!(
+                    "Auto Diagnostics,{},{}\n",
+                    csv_escape(&format!("{}: {}", f.severity.label(), f.title)),
+                    csv_escape(&f.detail)
+                ));
+            }
         }
 
         csv
@@ -453,6 +512,50 @@ mod tests {
     fn test_csv_escape_comma_and_quote_combined() {
         // Input: a,b"c  →  Output: "a,b""c"
         assert_eq!(csv_escape("a,b\"c"), "\"a,b\"\"c\"");
+    }
+
+    #[test]
+    fn test_csv_includes_auto_diagnostics_findings_escaped() {
+        use mouse_testkit::analysis::diagnostics::{
+            Finding, Metrics, Phase, Report, Severity, Verdict,
+        };
+        let export = TestResultsExport {
+            export_info: ExportInfo::new(),
+            polling_rate: None,
+            stutter: None,
+            click_response: None,
+            click_sticky: None,
+            liftoff: None,
+            jitter: None,
+            double_click: None,
+            dpi: None,
+            acceleration: None,
+            angle_snap: None,
+            scroll: None,
+            auto_diagnostics: Some(Report {
+                verdict: Verdict::Attention,
+                findings: vec![Finding {
+                    severity: Severity::Warning,
+                    phase: Phase::Clicks,
+                    title: "Possible switch bounce".to_string(),
+                    detail: "1 press came within 25 ms, re-run".to_string(),
+                }],
+                metrics: Metrics::default(),
+                phases_completed: vec![Phase::Rest],
+                aborted: false,
+                timing_reliable: true,
+                duration_secs: 42.0,
+            }),
+        };
+        let csv = export.to_csv();
+        assert!(csv.contains("Auto Diagnostics,Verdict,Needs attention\n"));
+        assert!(csv.contains(
+            "Auto Diagnostics,WARNING: Possible switch bounce,\"1 press came within 25 ms, re-run\"\n"
+        ));
+        assert!(export
+            .to_json()
+            .unwrap()
+            .contains("\"verdict\": \"Attention\""));
     }
 
     #[test]

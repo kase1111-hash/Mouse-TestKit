@@ -462,6 +462,12 @@ impl ScrollPanel {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn start_for_test(&mut self) {
+        self.is_running = true;
+        self.reset();
+    }
+
     fn reset(&mut self) {
         self.scroll_events.clear();
         self.total_up = 0.0;

@@ -177,12 +177,28 @@ fn analyze_line(movements: &[(i32, i32)]) -> LineAnalysis {
         };
     }
 
-    // Calculate average angle
-    let avg_angle: f64 = angles.iter().sum::<f64>() / angles.len() as f64;
+    // Circular mean, so movements straddling the +-180 degree boundary
+    // (e.g. -179 and +179) average to 180 rather than 0.
+    let (sum_sin, sum_cos) = angles.iter().fold((0.0f64, 0.0f64), |(s, c), a| {
+        let r = a.to_radians();
+        (s + r.sin(), c + r.cos())
+    });
+    let avg_angle = sum_sin.atan2(sum_cos).to_degrees();
 
-    // Calculate variance (how much angles deviate from average)
-    let variance: f64 =
-        angles.iter().map(|a| (a - avg_angle).powi(2)).sum::<f64>() / angles.len() as f64;
+    // Variance of the wrapped deviation from the circular mean
+    let variance: f64 = angles
+        .iter()
+        .map(|a| {
+            let mut d = (a - avg_angle) % 360.0;
+            if d > 180.0 {
+                d -= 360.0;
+            } else if d < -180.0 {
+                d += 360.0;
+            }
+            d.powi(2)
+        })
+        .sum::<f64>()
+        / angles.len() as f64;
     let std_dev = variance.sqrt();
 
     // Straightness is inverse of variance (normalized)
@@ -367,6 +383,27 @@ mod tests {
             result_perfect.straightness > result_variable.straightness,
             "Perfect line should be straighter than variable line"
         );
+    }
+
+    #[test]
+    fn test_analyze_line_wraps_around_180_degrees() {
+        // Alternating just above and just below the +-180 boundary: a plain
+        // arithmetic mean would give ~0 degrees and a huge variance.
+        let movements: Vec<(i32, i32)> = (0..30)
+            .map(|i| if i % 2 == 0 { (-100, 1) } else { (-100, -1) })
+            .collect();
+        let result = analyze_line(&movements);
+        assert!(
+            (result.average_angle.abs() - 180.0).abs() < 1.0,
+            "expected ~180, got {}",
+            result.average_angle
+        );
+        assert!(
+            result.angle_variance < 2.0,
+            "variance {}",
+            result.angle_variance
+        );
+        assert!(result.straightness > 0.9);
     }
 
     #[test]

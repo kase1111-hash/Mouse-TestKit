@@ -8,6 +8,16 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 
 ## Features & Specifications
 
+### 0. Auto Diagnostics
+
+| Specification | Description |
+|---------------|-------------|
+| Function | Guided one-minute check-up that looks for faults automatically |
+| Steps | Rest (5 s), Movement (up to 12 s), Clicks (up to 20 s), Scroll (up to 12 s), Lift (10 s); each ends on its own once enough data is collected or its time is up |
+| Detects | Phantom movement/clicks/scroll at rest; stutters, unstable or very low polling rate, dropouts; switch bounce (press within 25 ms of the previous release or 50 ms of the previous press), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms, a dead scroll direction; cursor jumps over 50 counts after an 80 ms pause |
+| Output | Verdict (Healthy / Needs attention / Fault detected / Inconclusive), findings with severity and explanation, raw measurements; included in JSON/CSV export |
+| Availability | GUI panel and CLI menu option 13. Without raw input (macOS) the timing steps are skipped |
+
 ### 1. Stutter Detection & Graphing
 
 | Specification | Description |

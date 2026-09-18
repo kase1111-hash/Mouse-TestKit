@@ -11,6 +11,7 @@
 //! - **Click Testing**: Response time, stickiness, and double-click detection
 //! - **DPI Accuracy**: Verifies mouse DPI settings against actual movement
 //! - **Sensor Analysis**: Jitter, acceleration, and angle snapping detection
+//! - **Auto Diagnostics**: Guided one-minute check-up that looks for faults itself
 //!
 //! # Usage
 //!
@@ -42,7 +43,10 @@ fn main() {
     loop {
         print_menu();
 
-        let choice = get_input("Select option: ");
+        let Some(choice) = get_input("Select option: ") else {
+            println!("\nInput closed. Exiting Mouse TRAP.");
+            break;
+        };
 
         match choice.trim() {
             "1" => tests::stutter::run(),
@@ -57,6 +61,7 @@ fn main() {
             "10" => tests::double_click::run(),
             "11" => tests::jitter::run(),
             "12" => tests::standard::run_all(),
+            "13" => tests::auto_test::run(),
             "0" => {
                 println!("Exiting Mouse TRAP. Goodbye!");
                 break;
@@ -100,15 +105,17 @@ fn print_menu() {
     println!("│ 11. Jitter Test                     │");
     println!("├─────────────────────────────────────┤");
     println!("│ 12. Run All Standard Tests          │");
+    println!("│ 13. Auto Diagnostics (finds issues) │");
     println!("│  0. Exit                            │");
     println!("└─────────────────────────────────────┘");
 }
 
-/// Prompts the user for input and returns the entered string.
+/// Prompts the user for input and returns the entered line.
 ///
-/// Handles input errors gracefully by returning an empty string.
+/// Returns `None` when stdin is closed (end of input) or unreadable, so the
+/// menu loop can exit instead of re-prompting forever.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn get_input(prompt: &str) -> String {
+fn get_input(prompt: &str) -> Option<String> {
     print!("{}", prompt);
     if let Err(e) = io::stdout().flush() {
         eprintln!("Warning: Failed to flush output: {}", e);
@@ -116,11 +123,12 @@ fn get_input(prompt: &str) -> String {
 
     let mut input = String::new();
     match io::stdin().read_line(&mut input) {
-        Ok(_) => input,
+        Ok(0) => None,
+        Ok(_) => Some(input),
         Err(e) => {
             eprintln!("Error reading input: {}", e);
             eprintln!("Please check that stdin is available and try again.");
-            String::new()
+            None
         }
     }
 }
