@@ -18,8 +18,9 @@
 //! - Reports lost on the way (the kernel's small per-reader buffer
 //!   overflowed while a reader thread was not scheduled, or the GUI did not
 //!   drain the channel) are marked ([`InputBridge::gaps`]) so timing
-//!   analyses need not take the hole for a stutter; a button whose release
-//!   was lost is released again.
+//!   analyses need not take the hole for a stutter. A button whose release
+//!   the kernel dropped is released again; one dropped because the channel
+//!   was full is not.
 //! - Windows: reports are told apart by `RAWINPUTHEADER::hDevice` and stamped
 //!   when `WM_INPUT` is received (Raw Input carries no hardware timestamp).
 //! - [`PointerCrossCheck`] notices when the window-system pointer keeps moving
@@ -432,7 +433,8 @@ impl InputBridge {
     /// their number when the gap came after them). The time across a gap
     /// is no interval of the mouse's and whole clicks can be missing, so
     /// timing analyses should not judge across it. A button whose release
-    /// was lost is released at the gap.
+    /// the kernel dropped (Linux) is released at the gap; a release dropped
+    /// because the GUI did not drain the channel stays lost.
     pub fn gaps(&self) -> &[usize] {
         &self.gaps
     }
