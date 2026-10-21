@@ -216,10 +216,19 @@ pub fn select_mouse() -> Option<MouseDevice> {
 #[cfg(target_os = "linux")]
 fn open(info: MouseDeviceInfo) -> Option<MouseDevice> {
     match EvdevMouse::new(info.device) {
-        Ok(mouse) => Some(MouseDevice {
-            mouse,
-            queued: VecDeque::new(),
-        }),
+        Ok(mut mouse) => {
+            // The node has queued input since it was opened to be listed.
+            // None of it is part of a test, and moving the mouse for a few
+            // dozen milliseconds while the list waited overflows the queue,
+            // which the test would then report as reports it lost. (Windows
+            // starts reading only once a mouse is chosen.) A mouse already
+            // gone is reported by the test's first read.
+            let _ = mouse.read(None);
+            Some(MouseDevice {
+                mouse,
+                queued: VecDeque::new(),
+            })
+        }
         Err(e) => {
             eprintln!(
                 "Error: could not prepare {} for reading: {}",
