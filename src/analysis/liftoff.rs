@@ -252,11 +252,18 @@ pub struct Shape {
     pub turn_accel: f64,
     /// The reports came at steady intervals, so their times can be trusted
     /// to a fraction of an interval. Bunched delivery (Bluetooth, a stalled
-    /// host) puts several reports at nearly one time and is not steady.
+    /// host) puts several reports at nearly one time and is not steady. A
+    /// stray count at either end, a pause away from the rest, is left out.
     pub steady_timing: bool,
     /// Straight, and slow at both ends compared with its top speed, over
     /// at least [`HAND_MIN_REPORTS`] reports.
     pub smooth: bool,
+    /// For any stretch of it: from the speed the path covered before allows
+    /// (from rest), to the speed the path still to come allows (to rest). At
+    /// least `start_accel` and `stop_accel`; more for a sensor spike among a
+    /// resting hand's stray counts. Short stretches need steady times, so
+    /// without them it is no more than those two.
+    pub stretch_accel: f64,
 }
 
 impl Shape {
@@ -280,13 +287,14 @@ impl Shape {
 
     /// The hand moved the mouse: a smooth, straight movement, reported for
     /// at least [`HAND_MIN_MS`], that needed no more than [`HAND_ACCEL`] at
-    /// either end or to turn.
+    /// either end, anywhere along it or to turn.
     pub fn hand_like(&self, dpi: f64) -> bool {
         let gentle = |a: f64| Self::to_m_s2(a, dpi) <= HAND_ACCEL;
         self.smooth
             && self.span_ms >= HAND_MIN_MS
             && gentle(self.start_accel)
             && gentle(self.stop_accel)
+            && gentle(self.stretch_accel)
             && gentle(self.turn_accel)
     }
 }
@@ -338,6 +346,7 @@ fn analyse(reports: &[(f64, i32, i32)], peak: usize, stopped: bool) -> Shape {
     let mut shape = shape_of(&reports[a..=b]);
     if b + 1 == reports.len() && !stopped {
         shape.stop_accel = 0.0;
+        shape.stretch_accel = shape.start_accel;
         shape.smooth = false;
     }
     shape
@@ -367,14 +376,41 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     let intervals: Vec<f64> = t.windows(2).map(|w| w[1] - w[0]).collect();
     let shortest = intervals.iter().copied().fold(f64::INFINITY, f64::min);
     shape.span_ms = (t[n - 1] - t[0] + shortest) * 1000.0;
-    shape.steady_timing = n >= 3
-        && shortest >= MIN_REPORT_INTERVAL_S
-        && intervals.iter().all(|&i| {
-            let polls = (i / shortest).round();
-            polls <= STEADY_MAX_POLLS && (i - polls * shortest).abs() <= STEADY_SPREAD * i
-        });
-    let slack = STEADY_SPREAD * shortest;
     let lost = 2.0 * REMAINDER_COUNTS;
+    // Whole polls of `unit`, at most [`STEADY_MAX_POLLS`], at a steady time.
+    let on_grid = |i: f64, unit: f64| {
+        let polls = (i / unit).round();
+        polls <= STEADY_MAX_POLLS && (i - polls * unit).abs() <= STEADY_SPREAD * i
+    };
+    // A pause: more polls without a report than a moving mouse skips, so
+    // the mouse moved less than a count meanwhile. With bunched times the
+    // shortest interval is no poll, and the typical one stands in for it.
+    let poll = if shortest >= MIN_REPORT_INTERVAL_S {
+        shortest
+    } else {
+        let mut sorted = intervals.clone();
+        sorted.sort_by(f64::total_cmp);
+        sorted[sorted.len() / 2]
+    };
+    let paused = |i: f64| i > (STEADY_MAX_POLLS + 0.5) * poll;
+    // A count or two at either end, a pause away from a movement of larger
+    // reports, is a resting hand (or the sensor about to find or lose the
+    // pad), not part of the movement's timing.
+    let size = |i: usize| (seg[i].1 as f64).hypot(seg[i].2 as f64);
+    let largest = (0..n).map(size).fold(0.0, f64::max);
+    let lone = |i: usize| size(i) <= lost && largest > lost;
+    let (mut from, mut to) = (0, n - 1);
+    while to - from >= 3 && lone(from) && paused(intervals[from]) {
+        from += 1;
+    }
+    while to - from >= 3 && lone(to) && paused(intervals[to - 1]) {
+        to -= 1;
+    }
+    let timed = &intervals[from..to];
+    let unit = timed.iter().copied().fold(f64::INFINITY, f64::min);
+    shape.steady_timing =
+        to - from >= 2 && unit >= MIN_REPORT_INTERVAL_S && timed.iter().all(|&i| on_grid(i, unit));
+    let slack = STEADY_SPREAD * unit;
 
     // Start: from rest, the speed after a path s is at most sqrt(2 a s), so
     // the path before the first report bounds the speed it had then.
@@ -393,6 +429,70 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
             shape
                 .stop_accel
                 .max(least_accel(path, t[n - 1] - t[j - 1] + slack, lost));
+    }
+    // Without the stray counts at its ends, the movement starts from rest
+    // after the path they covered and comes to rest within the path they
+    // cover after it, at the steady times of the reports between them.
+    if shape.steady_timing && (from, to) != (0, n - 1) {
+        let before = (0..=from).map(size).sum::<f64>() + REMAINDER_COUNTS;
+        let after = (to + 1..n).map(size).sum::<f64>() + lost;
+        for k in from + 1..=to {
+            let path = dist(pos[from], pos[k]) - lost;
+            shape.start_accel =
+                shape
+                    .start_accel
+                    .max(least_accel(path, t[k] - t[from] + slack, before));
+            let path = dist(pos[k - 1], pos[to]) - lost;
+            shape.stop_accel =
+                shape
+                    .stop_accel
+                    .max(least_accel(path, t[to] - t[k - 1] + slack, after));
+        }
+    }
+    // The same holds for any stretch of the movement: the speed the mouse
+    // had at a report is bounded by the path it covered since the movement
+    // began, and by the path still to come. A sensor spike among a resting
+    // hand's stray counts needs far more than the hand gives, though over
+    // the whole movement it can pass for one that sped up and slowed down.
+    // Short stretches need steady times, apart from pauses next to a stray
+    // count: a pause between two larger reports is more likely a radio link
+    // delivering reports in bunches than a mouse that stopped.
+    shape.stretch_accel = shape.start_accel.max(shape.stop_accel);
+    let trusted = shortest >= MIN_REPORT_INTERVAL_S
+        && intervals
+            .iter()
+            .enumerate()
+            .all(|(b, &i)| on_grid(i, shortest) || (paused(i) && (lone(b) || lone(b + 1))));
+    if trusted {
+        // Path covered by the end of each report.
+        let walked: Vec<f64> = (0..n)
+            .scan(0.0, |path, i| {
+                *path += size(i);
+                Some(*path)
+            })
+            .collect();
+        for r in 0..n {
+            let before = walked[r] + REMAINDER_COUNTS;
+            let after = walked[n - 1] - walked[r] + lost;
+            let mut m = 1;
+            while m < n {
+                if r + m < n {
+                    let path = dist(pos[r], pos[r + m]) - lost;
+                    shape.stretch_accel =
+                        shape
+                            .stretch_accel
+                            .max(least_accel(path, t[r + m] - t[r] + slack, before));
+                }
+                if m <= r {
+                    let path = dist(pos[r - m], pos[r]) - lost;
+                    shape.stretch_accel =
+                        shape
+                            .stretch_accel
+                            .max(least_accel(path, t[r] - t[r - m] + slack, after));
+                }
+                m *= 2;
+            }
+        }
     }
     // Turning back: the mean velocities of two neighbouring stretches can
     // differ by at most a * (their combined time) / 2. Only stretches more
@@ -423,7 +523,11 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     // from where the movement began to where it ended.
     let end = pos[n - 1];
     let length = end.0.hypot(end.1);
-    if n < HAND_MIN_REPORTS || length <= 0.0 {
+    // Without steady times the bounds above cannot tell stray counts around
+    // a spike from a gradual start or stop, so the shape is judged without
+    // them.
+    let (from, to) = if trusted { (0, n - 1) } else { (from, to) };
+    if to - from + 1 < HAND_MIN_REPORTS || length <= 0.0 {
         return shape;
     }
     let (ux, uy) = (end.0 / length, end.1 / length);
@@ -441,7 +545,7 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     // interval after a report, so jitter in the times cannot move a report
     // across an end; the first report covers one interval before it.
     let poll = shortest.max(MIN_REPORT_INTERVAL_S);
-    let span = t[n - 1] - t[0] + poll;
+    let span = t[to] - t[from] + poll;
     let w = poll * (span / 5.0 / poll).floor().max(1.0);
     let at = |time: f64| {
         let i = t.partition_point(|&r| r <= time);
@@ -452,8 +556,8 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
         }
     };
     let speed = |until: f64| (at(until) - at(until - w)) / w;
-    let first_end = t[0] - poll / 2.0 + w;
-    let top = t
+    let first_end = t[from] - poll / 2.0 + w;
+    let top = t[from..=to]
         .iter()
         .map(|&r| r + poll / 2.0)
         .filter(|&end| end >= first_end)
@@ -462,7 +566,7 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
         .fold(0.0, f64::max);
     let ramped = top > 0.0
         && speed(first_end) <= RAMP_MAX * top
-        && speed(t[n - 1] + poll / 2.0) <= RAMP_MAX * top;
+        && speed(t[to] + poll / 2.0) <= RAMP_MAX * top;
     shape.smooth = sideways && back && ramped;
     shape
 }
@@ -1360,6 +1464,53 @@ mod tests {
             "{:?}",
             bursts
         );
+    }
+
+    #[test]
+    fn test_spike_among_stray_counts_is_a_jump() {
+        // 1000 Hz, 3200 DPI: a 3 mm sensor spike in 6 ms, with a resting
+        // hand's stray counts 15 and 8 ms before it and 5 and 13 ms after.
+        // Taken as one movement it sped up and slowed down gently enough
+        // for a hand nudge, and was not judged.
+        let dpi = 3200.0;
+        let mut reports = vec![(485.0, 1, 0), (492.0, 0, 1)];
+        reports.extend((0..6).map(|i| (500.0 + i as f64, 63, 0)));
+        reports.extend([(510.0, 1, 0), (518.0, 0, -1)]);
+        let bursts = run(&mut LiftDetector::new(dpi), &reports);
+        assert_eq!(kinds(&bursts, dpi), vec![BurstKind::Jump], "{:?}", bursts);
+        // One stray count 5-19 ms before or after a spike (1000 Hz, 1600
+        // DPI, 3 mm in 8 ms) made it no more than a possible jump.
+        let dpi = 1600.0;
+        let spike: Vec<(f64, i32, i32)> = (0..8).map(|i| (500.0 + i as f64, 24, 0)).collect();
+        for gap in [5.0, 8.0, 12.0, 16.0, 19.0] {
+            let mut before = vec![(500.0 - gap, 0, 1)];
+            before.extend(&spike);
+            let mut after = spike.clone();
+            after.push((507.0 + gap, 0, -1));
+            for reports in [before, after] {
+                let bursts = run(&mut LiftDetector::new(dpi), &reports);
+                assert_eq!(
+                    kinds(&bursts, dpi),
+                    vec![BurstKind::Jump],
+                    "{gap} ms: {:?}",
+                    bursts
+                );
+            }
+        }
+        // A hand nudge with stray counts around it is still the hand.
+        for dpi in [800.0, 3200.0] {
+            let mut reports = nudge(500.0, 1000.0, dpi, 3.0, 60.0, 0.0);
+            let (first, last) = (reports[0].0, reports[reports.len() - 1].0);
+            reports.insert(0, (first - 9.0, 0, 1));
+            reports.push((last + 12.0, 1, 0));
+            let bursts = run(&mut LiftDetector::new(dpi), &reports);
+            assert_eq!(
+                kinds(&bursts, dpi),
+                vec![BurstKind::Nudge],
+                "{dpi} DPI: {:?}",
+                bursts
+            );
+        }
     }
 
     #[test]
