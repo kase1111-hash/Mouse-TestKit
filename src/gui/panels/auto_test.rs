@@ -621,6 +621,10 @@ impl AutoTestPanel {
                                     "Movement: worst interval",
                                     format!("{:.1} ms", m.max_interval_ms),
                                 ),
+                                (
+                                    "Movement: freezes (0.1-1 s)",
+                                    m.movement_freezes.to_string(),
+                                ),
                                 ("Movement: pauses > 1 s", m.movement_pauses.to_string()),
                                 (
                                     "Clicks: left / right / other",

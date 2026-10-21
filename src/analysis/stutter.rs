@@ -10,7 +10,9 @@
 //! [`crate::analysis::polling::is_saturated_pair`]) and that are not the
 //! small reports of a hand slowing to a brief stop (see
 //! [`MIN_RELATIVE_REPORT_SIZE`]), compares them against the median of such
-//! intervals, and counts each interval exactly once.
+//! intervals, and counts each interval exactly once. The same rule finds
+//! freezes: gaps longer than a poll between two such reports, which a hand
+//! that slows down to stop never leaves (see [`is_freeze`]).
 //!
 //! [`analyze_stutter`] is the older deviation-from-mean classifier for a plain
 //! list of intervals. It knows nothing about pauses or slow movement and is
@@ -46,6 +48,32 @@ pub const MIN_STUTTER_GAP_MS: f64 = 2.5;
 /// the one after it is ordinary (counts lost, or a catch-up burst) or larger
 /// (it carries the counts of the missed polls).
 pub const MIN_RELATIVE_REPORT_SIZE: f64 = 0.25;
+
+/// Longest gap (ms) judged as a freeze (see [`is_freeze`]). A longer one is
+/// left as a pause: the cursor stopping for over a second is plain to see
+/// without a test, and Auto Diagnostics notes such pauses separately.
+pub const MAX_FREEZE_MS: f64 = 1000.0;
+
+/// Whether a gap between two reports of a saturated pair, longer than
+/// [`MAX_POLL_INTERVAL_MS`] and at most [`MAX_FREEZE_MS`], is a freeze: the
+/// reports stopped while the hand kept moving the same way, as when a
+/// wireless link or a cable drops out.
+///
+/// `smaller` is the size (counts) of the smaller of the two reports and
+/// `median_size` the median report size of fast movement. A hand that stops
+/// slows down first and starts again from rest, so the reports either side
+/// of its pause are small (see [`MIN_RELATIVE_REPORT_SIZE`]). Lifting the
+/// mouse while moving and setting it down still moving the same way looks
+/// the same, so a single freeze is not proof of a fault.
+pub fn is_freeze(interval_ms: f64, smaller: f64, median_size: f64) -> bool {
+    interval_ms > MAX_POLL_INTERVAL_MS
+        && interval_ms <= MAX_FREEZE_MS
+        && smaller >= MIN_RELATIVE_REPORT_SIZE * median_size
+}
+
+/// This many freezes in a session are a fault whatever the stutter rate: a
+/// lift while moving can explain one, not a repeat.
+pub const CONFIRMED_FREEZES: usize = 2;
 
 /// Judged intervals collected before the median baseline is trusted.
 /// Intervals seen before that are held back and judged once it exists.
@@ -159,11 +187,12 @@ pub fn rate_stutters(judged_secs: f64, stutters: usize) -> StutterRating {
 ///
 /// Each interval between two consecutive motion reports is considered once:
 /// it is *judged* only when the two reports form a saturated pair (fast
-/// motion in a steady direction), neither is much smaller than the median
-/// report of such movement (see [`MIN_RELATIVE_REPORT_SIZE`]), and it is no
-/// longer than [`MAX_POLL_INTERVAL_MS`] (longer gaps are the hand stopping or
-/// lifting). A judged interval longer than
-/// [`stutter_threshold_ms`]`(median, multiplier)` is a stutter.
+/// motion in a steady direction) and neither is much smaller than the median
+/// report of such movement (see [`MIN_RELATIVE_REPORT_SIZE`]). A judged
+/// interval longer than [`stutter_threshold_ms`]`(median, multiplier)` is a
+/// stutter. Only intervals up to [`MAX_POLL_INTERVAL_MS`] shape the median;
+/// a judged interval longer than that is also a freeze (see [`is_freeze`]),
+/// and intervals over [`MAX_FREEZE_MS`] are not judged.
 #[derive(Debug, Clone)]
 pub struct StutterDetector {
     multiplier: f64,
@@ -189,6 +218,7 @@ pub struct StutterDetector {
     minor: usize,
     moderate: usize,
     severe: usize,
+    freezes: usize,
     worst_gap_ms: f64,
     events: VecDeque<StutterEvent>,
 }
@@ -213,6 +243,7 @@ impl StutterDetector {
             minor: 0,
             moderate: 0,
             severe: 0,
+            freezes: 0,
             worst_gap_ms: 0.0,
             events: VecDeque::new(),
         }
@@ -236,24 +267,25 @@ impl StutterDetector {
         self.reports += 1;
         let (prev_t, pdx, pdy) = self.last.replace((t, dx, dy))?;
         let interval = (t - prev_t) * 1000.0;
-        if !is_saturated_pair((pdx, pdy), (dx, dy))
-            || interval <= 0.0
-            || interval > MAX_POLL_INTERVAL_MS
-        {
+        if !is_saturated_pair((pdx, pdy), (dx, dy)) || interval <= 0.0 || interval > MAX_FREEZE_MS {
             return None;
         }
         let size = (dx as f64).hypot(dy as f64);
         let smaller = (pdx as f64).hypot(pdy as f64).min(size);
 
-        self.recent.push_back(interval);
-        if self.recent.len() > BASELINE_WINDOW {
-            self.recent.pop_front();
+        // A longer gap is a pause or a freeze, judged by the size of its
+        // reports; it says nothing about the poll period.
+        if interval <= MAX_POLL_INTERVAL_MS {
+            self.recent.push_back(interval);
+            if self.recent.len() > BASELINE_WINDOW {
+                self.recent.pop_front();
+            }
+            self.recent_sizes.push_back(size);
+            if self.recent_sizes.len() > BASELINE_WINDOW {
+                self.recent_sizes.pop_front();
+            }
+            self.since_refresh += 1;
         }
-        self.recent_sizes.push_back(size);
-        if self.recent_sizes.len() > BASELINE_WINDOW {
-            self.recent_sizes.pop_front();
-        }
-        self.since_refresh += 1;
 
         if self.median_ms.is_none() {
             self.pending.push((index, interval, smaller));
@@ -289,6 +321,9 @@ impl StutterDetector {
         };
         if smaller < MIN_RELATIVE_REPORT_SIZE * median_size {
             return false;
+        }
+        if is_freeze(interval, smaller, median_size) {
+            self.freezes += 1;
         }
         self.judged += 1;
         self.judged_sum_ms += interval;
@@ -381,6 +416,11 @@ impl StutterDetector {
         }
     }
 
+    /// Stutters longer than [`MAX_POLL_INTERVAL_MS`] (see [`is_freeze`]).
+    pub fn freezes(&self) -> usize {
+        self.freezes
+    }
+
     /// (minor, moderate, severe) stutter counts.
     pub fn severity_counts(&self) -> (usize, usize, usize) {
         (self.minor, self.moderate, self.severe)
@@ -396,8 +436,20 @@ impl StutterDetector {
         self.events.iter()
     }
 
+    /// The session's rating. Repeated freezes are visible however long the
+    /// session, so they make it at least Fair.
     pub fn rating(&self) -> StutterRating {
-        rate_stutters(self.judged_secs(), self.stutter_count)
+        let rating = rate_stutters(self.judged_secs(), self.stutter_count);
+        if self.freezes >= CONFIRMED_FREEZES
+            && matches!(
+                rating,
+                StutterRating::Inconclusive | StutterRating::Excellent | StutterRating::Good
+            )
+        {
+            StutterRating::Fair
+        } else {
+            rating
+        }
     }
 }
 
@@ -863,6 +915,78 @@ mod detector_tests {
             let d = run(&simulate(hz, stop_and_go(v), drop, 30e-6), 2.0);
             assert_eq!(d.stutter_count(), 20, "{} Hz", hz);
         }
+    }
+
+    /// Like [`stop_and_go`], with stops of `rest(i)` seconds.
+    fn stop_and_go_with(v: f64, rest: impl Fn(usize) -> f64) -> Vec<Seg> {
+        let ramp = STOP_GO_RAMP;
+        let mut segs = Vec::new();
+        for i in 0..20 {
+            segs.push(seg(STOP_GO_CRUISE, move |t| (v * t, 0.0)));
+            segs.push(seg(ramp, move |w| {
+                let wave = ramp / TAU * (TAU / 2.0 * w / ramp).sin();
+                (v * (w / 2.0 + wave), 0.0)
+            }));
+            segs.push(pause(rest(i)));
+            segs.push(seg(ramp, move |w| {
+                let wave = ramp / TAU * (TAU / 2.0 * w / ramp).sin();
+                (v * (w / 2.0 - wave), 0.0)
+            }));
+        }
+        segs
+    }
+
+    #[test]
+    fn longer_stops_in_the_same_direction_are_not_freezes() {
+        // Stops of 0.12-0.88 s, each slowing down first and starting from
+        // rest. A hand at about 0.5 m/s with the mouse at 26000 DPI: the
+        // reports either side of each stop still carry 2+ counts.
+        let rest = |i: usize| 0.12 + 0.04 * i as f64;
+        for hz in [125.0, 250.0, 500.0] {
+            let v = 500_000.0;
+            let reports = simulate(hz, stop_and_go_with(v, rest), no_drops, 30e-6);
+            // The stops really leave same-direction pairs of 2+ count reports
+            // further apart than a poll
+            let long_gaps = reports
+                .windows(2)
+                .filter(|w| {
+                    is_saturated_pair((w[0].1, w[0].2), (w[1].1, w[1].2))
+                        && (w[1].0 - w[0].0) * 1000.0 > MAX_POLL_INTERVAL_MS
+                })
+                .count();
+            assert!(long_gaps >= 5, "{} Hz: {}", hz, long_gaps);
+            let d = run(&reports, 2.0);
+            assert_eq!(d.freezes(), 0, "{} Hz", hz);
+            assert_eq!(d.stutter_count(), 0, "{} Hz", hz);
+            assert_eq!(d.rating(), StutterRating::Excellent, "{} Hz", hz);
+        }
+    }
+
+    #[test]
+    fn freezes_while_moving_are_detected() {
+        // A wireless link that drops out for 150-400 ms every 2 s while the
+        // hand keeps circling; the counts carry over to the next report.
+        let drop = |t: f64| {
+            let k = (t / 2.0).floor();
+            let start = k * 2.0 + 1.0;
+            t > 0.5 && (start..start + 0.15 + 0.05 * (k % 6.0)).contains(&t)
+        };
+        for (hz, radius) in [(125.0, 400.0), (1000.0, 600.0)] {
+            let reports = simulate(hz, vec![circles(12.0, radius, 1.0)], drop, 30e-6);
+            let d = run(&reports, 2.0);
+            assert_eq!(d.freezes(), 6, "{} Hz", hz);
+            assert_eq!(d.stutter_count(), 6, "{} Hz", hz);
+            assert!(d.worst_gap_ms() > 300.0, "{}", d.worst_gap_ms());
+            assert_eq!(d.rating(), StutterRating::Fair, "{} Hz", hz);
+        }
+        // One freeze (a lift while moving looks the same) is not a fault
+        let one = |t: f64| (5.0..5.3).contains(&t);
+        let d = run(
+            &simulate(1000.0, vec![circles(12.0, 600.0, 1.0)], one, 30e-6),
+            2.0,
+        );
+        assert_eq!(d.freezes(), 1);
+        assert_eq!(d.rating(), StutterRating::Good);
     }
 
     #[test]

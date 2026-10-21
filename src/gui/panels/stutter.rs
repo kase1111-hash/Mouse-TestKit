@@ -341,12 +341,13 @@ impl StutterPanel {
                     }
                     let (minor, moderate, severe) = self.detector.severity_counts();
                     ui.label(format!(
-                        "Stutter rate: {:.2}% | Worst gap: {:.1} ms | Minor (<4 ms late): {} | Moderate (4-8 ms): {} | Severe (8+ ms): {}",
+                        "Stutter rate: {:.2}% | Worst gap: {:.1} ms | Minor (<4 ms late): {} | Moderate (4-8 ms): {} | Severe (8+ ms): {} | Freezes (0.1-1 s): {}",
                         self.detector.stutter_rate_percent(),
                         self.detector.worst_gap_ms(),
                         minor,
                         moderate,
-                        severe
+                        severe,
+                        self.detector.freezes()
                     ));
                 });
         }

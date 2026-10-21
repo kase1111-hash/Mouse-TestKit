@@ -141,6 +141,12 @@ fn print_summary(detector: &StutterDetector) {
         println!("  Moderate (4-8 ms):    {}", moderate);
         println!("  Minor (under 4 ms):   {}", minor);
         println!("  Worst gap: {:.1} ms", detector.worst_gap_ms());
+        if detector.freezes() > 0 {
+            println!(
+                "  Freezes (0.1-1 s while moving the same way): {}",
+                detector.freezes()
+            );
+        }
     }
 
     println!("\nRating: {} - {}", rating.label(), rating.message());
@@ -152,7 +158,7 @@ fn print_summary(detector: &StutterDetector) {
         );
     }
     println!(
-        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms.)",
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s; two or more rate the session at least Fair.)",
         DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
     );
 }

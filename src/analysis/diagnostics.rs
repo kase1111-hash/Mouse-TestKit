@@ -5,9 +5,11 @@
 //! 1. **Rest** - the mouse must not be touched. Any movement, click or scroll
 //!    is a phantom event (sensor jitter, drift, a failing switch).
 //! 2. **Movement** - continuous motion. Measures the report rate and looks
-//!    for stutters (late reports), unstable rates and dropouts. Only reports
-//!    sent while the mouse moves fast enough to have counts on every poll are
-//!    timed: a slowly moving mouse skips polls that carry no motion, which is
+//!    for stutters (late reports), unstable rates and freezes (dropouts).
+//!    Only intervals between reports sent while the mouse moves fast enough,
+//!    in a steady direction, to have counts on every poll are timed, with the
+//!    rules of the Stutter test (`analysis::stutter`): a slowly moving,
+//!    turning or stopping mouse skips polls that carry no motion, which is
 //!    normal and says nothing about the link.
 //! 3. **Clicks** - normal clicking. Looks for switch bounce (accidental
 //!    double clicks), extremely short presses, sticky releases and buttons
@@ -34,7 +36,12 @@ use crate::analysis::liftoff::{
     self, counts_to_mm, mm_to_counts, LiftDetector, LiftTally, LiftVerdict, JUMP_THRESHOLD_MM,
     JUMP_WINDOW_MS,
 };
-use crate::analysis::polling::{estimate_hz, median_in_place, nominal_rate, MAX_POLL_INTERVAL_MS};
+use crate::analysis::polling::{
+    estimate_hz, is_saturated_pair, median_in_place, nominal_rate, MAX_POLL_INTERVAL_MS,
+};
+use crate::analysis::stutter::{
+    is_freeze, CONFIRMED_FREEZES, MAX_FREEZE_MS, MIN_RELATIVE_REPORT_SIZE,
+};
 use crate::types::{MouseButton, MouseEvent};
 
 /// The guided phases, in order.
@@ -149,6 +156,9 @@ pub struct Metrics {
     pub stutter_rate_percent: f64,
     pub unstable_interval_percent: f64,
     pub max_interval_ms: f64,
+    /// Gaps of 0.1-1 s while the mouse kept moving the same way (see
+    /// `analysis::stutter::is_freeze`).
+    pub movement_freezes: usize,
     pub movement_pauses: usize,
     // Clicks
     pub left_clicks: usize,
@@ -213,7 +223,8 @@ pub struct Config {
     pub rest_secs: f64,
     pub movement_secs: f64,
     /// The movement phase ends early once this many fast-movement intervals
-    /// (see `saturated_report_counts`) are recorded...
+    /// (between reports of a saturated pair, see
+    /// `polling::is_saturated_pair`) are recorded...
     pub movement_target_intervals: usize,
     /// ... and once this many seconds of fast movement are recorded, so a
     /// 2-8 kHz mouse is not judged on a fraction of a second.
@@ -223,11 +234,6 @@ pub struct Config {
     pub movement_min_intervals: usize,
     /// ... and below this many seconds of fast movement.
     pub movement_min_secs: f64,
-    /// A report whose larger axis carries at least this many counts shows the
-    /// mouse moving more than one count per poll, so the next poll is certain
-    /// to carry motion too. Only intervals between two such reports are timed;
-    /// slower motion skips empty polls and its gaps are not stutters.
-    pub saturated_report_counts: i32,
     pub clicks_secs: f64,
     pub clicks_target_left: usize,
     pub clicks_target_right: usize,
@@ -290,7 +296,6 @@ impl Default for Config {
             movement_target_secs: 3.0,
             movement_min_intervals: 200,
             movement_min_secs: 1.0,
-            saturated_report_counts: 2,
             clicks_secs: 20.0,
             clicks_target_left: 20,
             clicks_target_right: 5,
@@ -427,10 +432,18 @@ pub struct AutoTest {
     rest_distance: f64,
     rest_seconds: Vec<RestSecond>,
     // Movement
-    /// Time and larger-axis counts of the previous motion report.
-    last_move: Option<(f64, i32)>,
-    /// Intervals between consecutive reports that were both saturated.
+    /// Time and counts of the previous motion report.
+    last_move: Option<(f64, i32, i32)>,
+    /// Intervals (up to a poll) between consecutive reports that form a
+    /// saturated pair...
     fast_intervals_ms: Vec<f64>,
+    /// ... with the size (counts) of the smaller of the two reports and of
+    /// the later one, to leave out the small reports around a brief stop.
+    fast_sizes: Vec<(f64, f64)>,
+    /// Longer gaps between the reports of a saturated pair, up to
+    /// `MAX_FREEZE_MS`, with the smaller report's size: a brief stop or a
+    /// freeze, told apart by that size once the median is known.
+    long_gaps: Vec<(f64, f64)>,
     /// Running sum of `fast_intervals_ms`, checked on every report.
     fast_total_ms: f64,
     /// All report intervals, for the "move faster" hint.
@@ -477,6 +490,8 @@ impl AutoTest {
             rest_seconds: Vec::new(),
             last_move: None,
             fast_intervals_ms: Vec::new(),
+            fast_sizes: Vec::new(),
+            long_gaps: Vec::new(),
             fast_total_ms: 0.0,
             all_intervals: 0,
             movement_pauses: 0,
@@ -915,36 +930,72 @@ impl AutoTest {
     // ── Movement ───────────────────────────────────────────────────────
 
     fn feed_movement(&mut self, t: f64, event: &MouseEvent) {
-        if let MouseEvent::Move { dx, dy } = event {
-            if *dx == 0 && *dy == 0 {
+        if let MouseEvent::Move { dx, dy } = *event {
+            if dx == 0 && dy == 0 {
                 return;
             }
-            let counts = dx.saturating_abs().max(dy.saturating_abs());
-            if let Some((last_t, last_counts)) = self.last_move {
+            if let Some((last_t, ldx, ldy)) = self.last_move {
                 let interval_ms = (t - last_t) * 1000.0;
-                if interval_ms > 1000.0 {
+                if interval_ms > MAX_FREEZE_MS {
                     self.movement_pauses += 1;
                 } else if interval_ms > 0.0 {
                     self.all_intervals += 1;
-                    let fast = self.cfg.saturated_report_counts;
-                    // Longer gaps are a lift or a pause, not a poll (as in
-                    // `estimate_hz`), and must not count as timed movement.
-                    if last_counts >= fast && counts >= fast && interval_ms <= MAX_POLL_INTERVAL_MS
-                    {
-                        self.fast_intervals_ms.push(interval_ms);
-                        self.fast_total_ms += interval_ms;
+                    // Only fast movement in a steady direction is certain to
+                    // report on every poll (a reversal inside one poll
+                    // cancels its counts), as in the Stutter test.
+                    if is_saturated_pair((ldx, ldy), (dx, dy)) {
+                        let size = (dx as f64).hypot(dy as f64);
+                        let smaller = (ldx as f64).hypot(ldy as f64).min(size);
+                        // Longer gaps are a stop or a freeze, not a poll (as
+                        // in `estimate_hz`), and must not count as timed
+                        // movement.
+                        if interval_ms <= MAX_POLL_INTERVAL_MS {
+                            self.fast_intervals_ms.push(interval_ms);
+                            self.fast_sizes.push((smaller, size));
+                            self.fast_total_ms += interval_ms;
+                        } else {
+                            self.long_gaps.push((interval_ms, smaller));
+                        }
                     }
                 }
             }
-            self.last_move = Some((t, counts));
+            self.last_move = Some((t, dx, dy));
         }
     }
 
+    /// Fast-movement intervals to judge, and freezes: those whose smaller
+    /// report is not one of the small reports of a hand slowing to a stop
+    /// (see `stutter::MIN_RELATIVE_REPORT_SIZE`).
+    fn judged_movement(&self) -> (Vec<f64>, Vec<f64>) {
+        let mut sizes: Vec<f64> = self.fast_sizes.iter().map(|&(_, size)| size).collect();
+        let Some(median_size) = median_in_place(&mut sizes) else {
+            return (Vec::new(), Vec::new());
+        };
+        let intervals = self
+            .fast_intervals_ms
+            .iter()
+            .zip(&self.fast_sizes)
+            .filter(|(_, &(smaller, _))| smaller >= MIN_RELATIVE_REPORT_SIZE * median_size)
+            .map(|(&ms, _)| ms)
+            .collect();
+        let freezes = self
+            .long_gaps
+            .iter()
+            .filter(|&&(ms, smaller)| is_freeze(ms, smaller, median_size))
+            .map(|&(ms, _)| ms)
+            .collect();
+        (intervals, freezes)
+    }
+
     fn finalize_movement(&mut self) {
-        let usable = self.fast_intervals_ms.clone();
-        let usable_secs = self.fast_secs();
+        let (usable, freezes) = self.judged_movement();
+        let usable_secs = usable.iter().sum::<f64>() / 1000.0;
         self.metrics.move_intervals = usable.len();
         self.metrics.movement_pauses = self.movement_pauses;
+        self.metrics.movement_freezes = freezes.len();
+        // A freeze is judged whether or not enough movement was timed: the
+        // link dropping out may be why there was too little.
+        self.push_movement_freezes(&freezes);
 
         if usable.len() < self.cfg.movement_min_intervals
             || usable_secs < self.cfg.movement_min_secs
@@ -1068,14 +1119,42 @@ impl AutoTest {
         }
     }
 
+    fn push_movement_freezes(&mut self, freezes: &[f64]) {
+        let longest = freezes.iter().copied().fold(0.0, f64::max);
+        if freezes.len() >= CONFIRMED_FREEZES {
+            self.push(
+                Severity::Warning,
+                Phase::Movement,
+                "Movement froze",
+                format!(
+                    "{} times the reports stopped for {:.0}-{:.0} ms while the mouse kept moving the same way (the reports either side were full-size, so the hand had not slowed down). The cursor freezes like this when the connection drops out: move a wireless receiver closer and away from USB 3 ports and cables, or try another port or cable.",
+                    freezes.len(),
+                    freezes.iter().copied().fold(f64::MAX, f64::min),
+                    longest
+                ),
+            );
+        } else if freezes.len() == 1 {
+            self.push(
+                Severity::Info,
+                Phase::Movement,
+                "One freeze during movement",
+                format!(
+                    "Once, the reports stopped for {:.0} ms while the mouse kept moving the same way. Lifting the mouse while moving and setting it down still moving looks the same; if you did not, the connection dropped out. Re-run to check.",
+                    longest
+                ),
+            );
+        }
+    }
+
     fn push_movement_pauses(&mut self) {
         self.push(
             Severity::Info,
             Phase::Movement,
             "Pauses during movement",
             format!(
-                "{} gap(s) longer than 1 s were seen while you were asked to keep moving. If you did not stop, the connection is dropping out.",
-                self.movement_pauses
+                "{} gap(s) longer than {:.0} s were seen while you were asked to keep moving. If you did not stop, the connection is dropping out.",
+                self.movement_pauses,
+                MAX_FREEZE_MS / 1000.0
             ),
         );
     }
@@ -1705,6 +1784,198 @@ mod tests {
         }
         sim.t = t0 + secs;
         sim.at.tick(sim.t);
+    }
+
+    /// Feeds `secs` of hand movement along `pos(t)` (counts, `t` in seconds
+    /// from now) the way a real mouse reports it: polled at `poll_hz`, a
+    /// report only once a whole count has built up, the fraction kept.
+    /// Polls where `lost(t)` is true are not delivered (counts carry over).
+    fn path_stream(
+        sim: &mut Sim,
+        secs: f64,
+        poll_hz: f64,
+        pos: impl Fn(f64) -> (f64, f64),
+        lost: impl Fn(f64) -> bool,
+    ) {
+        let t0 = sim.t;
+        let (mut rx, mut ry) = (0i64, 0i64);
+        for k in 1..=(secs * poll_hz) as usize {
+            let t = k as f64 / poll_hz;
+            if lost(t) {
+                continue;
+            }
+            let (x, y) = pos(t);
+            let dx = (x - rx as f64).trunc() as i64;
+            let dy = (y - ry as f64).trunc() as i64;
+            if dx != 0 || dy != 0 {
+                rx += dx;
+                ry += dy;
+                sim.t = t0 + t;
+                sim.at.feed(
+                    sim.t,
+                    &MouseEvent::Move {
+                        dx: dx as i32,
+                        dy: dy as i32,
+                    },
+                );
+            }
+        }
+        sim.t = t0 + secs;
+        sim.at.tick(sim.t);
+    }
+
+    /// Back and forth along X: smooth (minimum-jerk) strokes of `stroke`
+    /// counts lasting `stroke_s`, with a dwell of `dwell(i)` seconds at the
+    /// end of the i-th stroke, and a slight drift on Y.
+    fn back_and_forth_with_dwells(
+        stroke: f64,
+        stroke_s: f64,
+        dwell: impl Fn(usize) -> f64,
+    ) -> impl Fn(f64) -> (f64, f64) {
+        let mut plan = Vec::new();
+        let mut t = 0.0;
+        for i in 0..200 {
+            plan.push((t, i));
+            t += stroke_s + dwell(i);
+        }
+        move |time: f64| {
+            let &(start, i) = plan.iter().rev().find(|(s, _)| *s <= time).unwrap();
+            let s = ((time - start) / stroke_s).min(1.0);
+            let done = stroke * (10.0 * s.powi(3) - 15.0 * s.powi(4) + 6.0 * s.powi(5));
+            // Strokes end between counts, as a real hand's do
+            let x = 0.4 + if i % 2 == 0 { done } else { stroke - done };
+            (x, 0.02 * stroke * (time * 0.7).sin())
+        }
+    }
+
+    #[test]
+    fn test_back_and_forth_with_dwells_is_not_a_stutter() {
+        // A hand moving side to side at about 1.5 Hz (80 mm strokes, 0.3 s
+        // each) instead of circling, resting 30-60 ms at each end, with
+        // the mouse at 1000, 1600 and 3200 DPI.
+        for (hz, stroke) in [(125.0, 3150.3), (250.0, 5040.3), (500.0, 10_080.3)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let dwell = |i: usize| 0.03 + 0.003 * (i % 11) as f64;
+            let pos = back_and_forth_with_dwells(stroke, 0.3, dwell);
+            path_stream(&mut sim, 12.5, hz, pos, |_| false);
+            assert_eq!(sim.phase(), Some(Phase::Clicks), "{} Hz", hz);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} Hz flagged: {:?}",
+                hz,
+                f
+            );
+            assert_eq!(sim.at.metrics.stutter_count, 0, "{} Hz", hz);
+            assert_eq!(sim.at.metrics.polling_nominal_hz, Some(hz as u32));
+        }
+    }
+
+    /// Circles of `radius` counts, one per second of movement, where once a
+    /// second the hand slows to a stop over 30 ms, rests `pause` seconds and
+    /// carries on the same way.
+    fn circles_with_stops(radius: f64, pause: f64) -> impl Fn(f64) -> (f64, f64) {
+        use std::f64::consts::{PI, TAU};
+        let ramp = 0.03;
+        let cycle = 1.0 + pause + ramp;
+        let wave = move |w: f64| ramp / TAU * (PI * w / ramp).sin();
+        // Seconds of full-speed movement covered by time `t`
+        let travelled = move |t: f64| {
+            let (n, f) = ((t / cycle).floor(), t % cycle);
+            let part = if f < 1.0 - ramp {
+                f
+            } else if f < 1.0 {
+                let w = f - (1.0 - ramp);
+                1.0 - ramp + w / 2.0 + wave(w)
+            } else if f < 1.0 + pause {
+                1.0 - ramp / 2.0
+            } else {
+                let w = f - 1.0 - pause;
+                1.0 - ramp / 2.0 + w / 2.0 - wave(w)
+            };
+            n * 1.0 + part
+        };
+        move |t: f64| {
+            let a = TAU * travelled(t);
+            (radius * a.cos(), radius * a.sin())
+        }
+    }
+
+    #[test]
+    fn test_circles_with_hesitations_are_not_a_stutter() {
+        // Brisk circles at 125 Hz with the hand stopping for 40 ms once a
+        // second and carrying on the same way.
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        path_stream(
+            &mut sim,
+            12.5,
+            125.0,
+            circles_with_stops(600.0, 0.04),
+            |_| false,
+        );
+        let f = movement_findings(&sim);
+        assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
+        assert_eq!(sim.at.metrics.polling_nominal_hz, Some(125));
+    }
+
+    #[test]
+    fn test_longer_stops_are_not_freezes() {
+        // The hand stops for 0.3 s once a second: at 125 Hz and 26000 DPI
+        // the reports either side still carry 2+ counts.
+        for (hz, radius) in [(125.0, 30_000.0), (1000.0, 600.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            path_stream(&mut sim, 12.5, hz, circles_with_stops(radius, 0.3), |_| {
+                false
+            });
+            let f = movement_findings(&sim);
+            assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
+            assert_eq!(sim.at.metrics.movement_freezes, 0, "{} Hz", hz);
+        }
+    }
+
+    #[test]
+    fn test_freezes_while_moving_are_flagged() {
+        // Brisk circles while the link drops out for 150-400 ms every 2 s
+        // (a wireless receiver next to a USB 3 port), at 1 kHz and 125 Hz.
+        let lost = |t: f64| {
+            let n = (t / 2.0).floor();
+            let start = n * 2.0 + 1.0;
+            (start..start + 0.15 + 0.05 * (n % 6.0)).contains(&t)
+        };
+        for (hz, radius) in [(1000.0, 600.0), (125.0, 400.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let circle = move |t: f64| {
+                let a = std::f64::consts::TAU * t;
+                (radius * a.cos(), radius * a.sin())
+            };
+            path_stream(&mut sim, 12.5, hz, circle, lost);
+            let f = movement_findings(&sim);
+            assert!(
+                f.contains(&(Severity::Warning, "Movement froze".to_string())),
+                "{} Hz: {:?}",
+                hz,
+                f
+            );
+            // At 1 kHz the step ends once 3 s of fast movement are timed
+            let freezes = sim.at.metrics.movement_freezes;
+            assert!((2..=6).contains(&freezes), "{} Hz: {}", hz, freezes);
+        }
+
+        // One freeze (a lift while moving looks the same) is only noted
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        let circle = |t: f64| {
+            let a = std::f64::consts::TAU * t;
+            (600.0 * a.cos(), 600.0 * a.sin())
+        };
+        path_stream(&mut sim, 12.5, 1000.0, circle, |t| (2.0..2.3).contains(&t));
+        let f = movement_findings(&sim);
+        assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
+        assert!(f.iter().any(|(_, t)| t == "One freeze during movement"));
     }
 
     fn movement_findings(sim: &Sim) -> Vec<(Severity, String)> {
