@@ -117,6 +117,12 @@ impl PollingPanel {
         }
     }
 
+    /// The standard USB rate the average corresponds to, if any. Deliveries
+    /// of batched reports are connection events, not a USB rate.
+    fn nominal_hz(&self) -> Option<u32> {
+        usb_nominal_rate(self.avg_hz).filter(|_| self.samples > 0 && !self.ever_batched)
+    }
+
     pub fn is_running(&self) -> bool {
         self.is_running
     }
@@ -206,9 +212,9 @@ impl PollingPanel {
                     self.stat_box(
                         ui,
                         "Nominal",
-                        &match usb_nominal_rate(self.avg_hz) {
-                            Some(n) if self.samples > 0 => format!("{} Hz", n),
-                            _ => "-".to_string(),
+                        &match self.nominal_hz() {
+                            Some(n) => format!("{} Hz", n),
+                            None => "-".to_string(),
                         },
                         egui::Color32::LIGHT_GRAY,
                     );
@@ -225,7 +231,7 @@ impl PollingPanel {
         if let Some(b) = self.batching {
             ui.add_space(8.0);
             ui.label(format!(
-                "Reports arrive in batches of about {:.1} every {:.1} ms, as a Bluetooth mouse sends them once per connection event. The cursor moves once per delivery, so the rate shown is deliveries per second.",
+                "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate shown is deliveries per second.",
                 b.reports_per_event, b.event_period_ms
             ));
         }
@@ -589,26 +595,34 @@ mod tests {
 
     #[test]
     fn bluetooth_batches_read_as_deliveries() {
-        // A Bluetooth mouse sampling at 250 Hz, served every 11.25 ms: about
-        // 2.8 reports per connection event, 0.4 ms apart
-        let mut p = PollingPanel::new();
-        p.start();
-        let t0 = Instant::now();
-        let mut events = Vec::new();
-        let mut sent = 0u64;
-        for k in 1..=300u64 {
-            let made = k * 11_250 / 4_000;
-            for (i, _) in (sent..made).enumerate() {
-                let at = t0 + Duration::from_micros(k * 11_250 + 400 * i as u64);
-                events.push(mv(at, 6, 2));
+        // A Bluetooth mouse sampling at 250 Hz, served every 11.25 ms (about
+        // 2.8 reports per connection event, 0.4 ms apart) or every 7.5 ms;
+        // and one sampling at 100 Hz, served every 11.25 ms (two reports in
+        // one event of eight)
+        for (event_us, sample_us) in [(11_250u64, 4_000u64), (7_500, 4_000), (11_250, 10_000)] {
+            let mut p = PollingPanel::new();
+            p.start();
+            let t0 = Instant::now();
+            let mut events = Vec::new();
+            let mut sent = 0u64;
+            // 3 s of movement
+            for k in 1..=3_000_000 / event_us {
+                let made = k * event_us / sample_us;
+                for (i, _) in (sent..made).enumerate() {
+                    let at = t0 + Duration::from_micros(k * event_us + 400 * i as u64);
+                    events.push(mv(at, 6, 2));
+                }
+                sent = made;
             }
-            sent = made;
+            drive(&mut p, &events);
+            let e = p.export().unwrap();
+            let hz = 1e6 / event_us as f64;
+            assert!((e.avg_hz - hz).abs() < 2.0, "{} {}", event_us, e.avg_hz);
+            assert!(e.batched_delivery, "{}", event_us);
+            assert!(p.batching.is_some(), "{}", event_us);
+            // 133 deliveries a second are not a 125 Hz USB mouse
+            assert_eq!(p.nominal_hz(), None, "{}", event_us);
         }
-        drive(&mut p, &events);
-        let e = p.export().unwrap();
-        assert!((e.avg_hz - 88.9).abs() < 2.0, "{}", e.avg_hz);
-        assert!(e.batched_delivery);
-        assert!(p.batching.is_some());
     }
 
     #[test]

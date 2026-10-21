@@ -151,7 +151,7 @@ fn print_summary(detector: &StutterDetector) {
     }
     if let Some(b) = detector.batching() {
         println!(
-            "Reports arrive in batches of about {:.1} every {:.1} ms (Bluetooth): rate and stutters are per delivery.",
+            "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms (Bluetooth): rate and stutters are per delivery.",
             b.reports_per_event, b.event_period_ms
         );
     }

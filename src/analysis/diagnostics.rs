@@ -153,7 +153,8 @@ pub struct Metrics {
     pub polling_hz: Option<u32>,
     /// The standard USB rate (125, 250, 500, 1000 ... Hz) nearest
     /// `polling_hz`. None below 110 Hz, where no USB rate fits: that is the
-    /// Bluetooth range or a USB mouse running slow.
+    /// Bluetooth range or a USB mouse running slow. None too when reports
+    /// arrive batched (`batched_delivery`): the rate is then deliveries.
     pub polling_nominal_hz: Option<u32>,
     /// Reports arrived several at a time, one Bluetooth connection event
     /// apart (see `polling::batched_delivery`): the rate, stutter and
@@ -1267,7 +1268,10 @@ impl AutoTest {
         let mut sorted = timed.clone();
         let period = median_in_place(&mut sorted).unwrap_or(0.0);
         let hz = estimate_hz(&timed, 1);
-        let nominal = hz.and_then(|h| usb_nominal_rate(h as f64));
+        // Deliveries 5+ ms apart are connection events, not a USB rate
+        let nominal = hz
+            .filter(|_| batching.is_none())
+            .and_then(|h| usb_nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
         self.metrics.batched_delivery = batching.is_some();
@@ -1323,7 +1327,7 @@ impl AutoTest {
                     Phase::Movement,
                     "Reports arrive in batches",
                     format!(
-                        "About {:.1} reports arrive together every {:.1} ms, as a Bluetooth mouse sends them once per connection event. The cursor moves once per delivery, so the rate and steadiness here are judged per delivery ({} Hz), not per report.",
+                        "{:.1} reports arrive together per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate and steadiness here are judged per delivery ({} Hz), not per report.",
                         b.reports_per_event, b.event_period_ms, hz
                     ),
                 );
@@ -2705,7 +2709,47 @@ mod tests {
                 hz
             );
             assert_eq!(sim.at.metrics.stutter_count, 0);
+            // Deliveries per second are not a USB rate (133 Hz at 7.5 ms)
+            assert_eq!(sim.at.metrics.polling_nominal_hz, None);
         }
+
+        // A mouse sampling at 100 or 150 Hz over an 11.25 or 7.5 ms
+        // interval: two reports in one connection event of eight, which per
+        // report makes over a tenth of the intervals near zero
+        for (sample_ms, event_ms) in [(10.0, 11.25), (6.67, 7.5)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            bluetooth_stream(&mut sim, 12.5, sample_ms, event_ms, |_| false);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} ms: {:?}",
+                event_ms,
+                f
+            );
+            assert!(sim.at.metrics.batched_delivery, "{} ms", event_ms);
+            assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        }
+
+        // A 125 Hz USB mouse, a fifth of whose reports reach the program
+        // almost a poll late, together with the next: not batching
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        let t0 = sim.t;
+        for k in 1..1500 {
+            let late = if k % 5 == 0 { 7.2 } else { 0.0 };
+            sim.t = t0 + (k as f64 * 8.0 + late) / 1000.0;
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 6, dy: -3 });
+        }
+        sim.at.tick(sim.t + 0.1);
+        let f = movement_findings(&sim);
+        assert!(
+            f.contains(&(Severity::Warning, "Unstable polling interval".to_string())),
+            "{:?}",
+            f
+        );
+        assert!(!sim.at.metrics.batched_delivery);
+        assert_eq!(sim.at.metrics.polling_nominal_hz, Some(125));
 
         // The link misses one connection event in four: per delivery that
         // is still an unsteady link

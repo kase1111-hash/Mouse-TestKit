@@ -190,8 +190,18 @@ const MAX_BATCH_SPAN_MS: f64 = 2.0;
 pub const MIN_EVENT_PERIOD_MS: f64 = 5.0;
 
 /// Delivery is batched when at least this share of fast-movement intervals
-/// fall inside a delivery (two reports per event are half of them)...
-const MIN_BATCHED_SHARE: f64 = 0.25;
+/// fall inside a delivery (two reports in every event are half of them; a
+/// mouse that makes reports a little faster than its connection events
+/// sends two in one event of every few, a tenth or so)...
+const MIN_BATCHED_SHARE: f64 = 0.05;
+
+/// ... and at most half the deliveries of several reports come this many
+/// delivery periods or more after the one before. A connection event comes
+/// on schedule and carries the reports made since the last one. Reports
+/// held up on the way (a USB mouse's report reaching the program almost a
+/// poll late, with the next one right behind it) arrive together after a
+/// gap: a catch-up, the instability batching must not excuse.
+const CATCH_UP_PERIODS: f64 = 1.5;
 
 /// ... and a delivery carries at most this many reports on average. A
 /// Bluetooth mouse samples at about 125-250 Hz, so even a 15 ms connection
@@ -236,18 +246,41 @@ pub fn event_intervals_ms(intervals_ms: &[f64]) -> Vec<f64> {
     out
 }
 
+/// Deliveries after the first (see [`event_intervals_ms`]): time (ms) from
+/// the first report of the delivery before, reports in it, and time (ms)
+/// from its first report to its last.
+fn deliveries(intervals_ms: &[f64]) -> Vec<(f64, usize, f64)> {
+    let mut out: Vec<(f64, usize, f64)> = Vec::new();
+    let mut first_span = 0.0;
+    for &i in intervals_ms {
+        if i > BATCH_GAP_MS {
+            let span = out.last().map_or(first_span, |d| d.2);
+            out.push((span + i, 1, 0.0));
+        } else if let Some(d) = out.last_mut() {
+            d.1 += 1;
+            d.2 += i;
+        } else {
+            first_span += i;
+        }
+    }
+    out
+}
+
 /// Whether fast-movement intervals (ms, in arrival order) show reports
 /// delivered several at a time, as a Bluetooth mouse does when it has more
-/// than one report ready per connection event: a large share of near-zero
-/// intervals ([`BATCH_GAP_MS`]) alternating with the event period (at least
+/// than one report ready per connection event: near-zero intervals
+/// ([`BATCH_GAP_MS`]) among intervals of the event period (at least
 /// [`MIN_EVENT_PERIOD_MS`]), few reports per delivery, each delivery
-/// arriving within [`MAX_BATCH_SPAN_MS`].
+/// arriving within [`MAX_BATCH_SPAN_MS`], and the deliveries of several
+/// reports coming on schedule, not after a gap ([`CATCH_UP_PERIODS`]).
 ///
-/// Judged per report, such a mouse looks wildly unsteady (half its intervals
-/// near zero, half 7.5-15 ms) and its median interval is meaningless; per
-/// delivery it is as steady as the link. A USB mouse, even at 4-8 kHz,
-/// sends one report per poll, never several within a fraction of a poll
-/// and then nothing for 5 ms, so its instability is not excused as batching.
+/// Judged per report, such a mouse looks unsteady (up to half its intervals
+/// near zero, the rest 7.5-15 ms) and its median interval can be
+/// meaningless; per delivery it is as steady as the link. A USB mouse, even
+/// at 4-8 kHz, sends one report per poll, never several within a fraction of
+/// a poll and then nothing for 5 ms; reports of a 125 Hz mouse that reach
+/// the program together came after a gap. Its instability is not excused as
+/// batching.
 pub fn batched_delivery(intervals_ms: &[f64]) -> Option<Batching> {
     if intervals_ms.len() < MIN_BATCH_INTERVALS {
         return None;
@@ -261,24 +294,23 @@ pub fn batched_delivery(intervals_ms: &[f64]) -> Option<Batching> {
     if reports_per_event > MAX_REPORTS_PER_EVENT {
         return None;
     }
-    // Span of each delivery that held more than one report
-    let mut spans = Vec::new();
-    let mut span = 0.0;
-    for &i in intervals_ms {
-        if i <= BATCH_GAP_MS {
-            span += i;
-        } else {
-            if span > 0.0 {
-                spans.push(span);
-            }
-            span = 0.0;
-        }
-    }
+    let deliveries = deliveries(intervals_ms);
+    let batches: Vec<(f64, f64)> = deliveries
+        .iter()
+        .filter(|d| d.1 >= 2)
+        .map(|d| (d.0, d.2))
+        .collect();
+    let mut spans: Vec<f64> = batches.iter().map(|b| b.1).collect();
     if median_in_place(&mut spans)? > MAX_BATCH_SPAN_MS {
         return None;
     }
-    let event_period_ms = median_in_place(&mut event_intervals_ms(intervals_ms))?;
-    (event_period_ms >= MIN_EVENT_PERIOD_MS).then_some(Batching {
+    let mut periods: Vec<f64> = deliveries.iter().map(|d| d.0).collect();
+    let event_period_ms = median_in_place(&mut periods)?;
+    let catch_ups = batches
+        .iter()
+        .filter(|b| b.0 >= CATCH_UP_PERIODS * event_period_ms)
+        .count();
+    (event_period_ms >= MIN_EVENT_PERIOD_MS && 2 * catch_ups <= batches.len()).then_some(Batching {
         event_period_ms,
         reports_per_event,
     })
@@ -626,6 +658,15 @@ mod tests {
                 .collect();
             assert_eq!(window_hz(&window), Some(per_delivery));
         }
+        // Sampling a little faster than the connection events: two reports
+        // in one event of every four to eight. Per report, a tenth or more
+        // of the intervals are near zero.
+        for (sample_hz, event_ms) in [(100.0, 11.25), (150.0, 7.5), (80.0, 15.0)] {
+            let i = intervals(&bluetooth_arrivals(3.0, sample_hz, event_ms, |_| false));
+            let b = batched_delivery(&i).expect("batched");
+            assert!((b.event_period_ms - event_ms).abs() < 0.3, "{:?}", b);
+            assert!(b.reports_per_event < 1.3, "{:?}", b);
+        }
         // 133 Hz sampling over a 7.5 ms interval: one report per event,
         // nothing to fold
         let i = intervals(&bluetooth_arrivals(3.0, 133.0, 7.5, |_| false));
@@ -683,6 +724,21 @@ mod tests {
             .map(|k| k as f64 + if k % 3 == 1 { 0.95 } else { 0.0 })
             .collect();
         assert_eq!(batched_delivery(&intervals(&paired)), None);
+        // A 125 Hz mouse, 5-45% of whose reports reach the program almost a
+        // poll late, right before the next: those pairs come after a gap
+        for share in [0.05, 0.1, 0.2, 0.3, 0.45] {
+            let late: Vec<f64> = (0..3000)
+                .map(|k| {
+                    let late = if rng.unit() < share {
+                        6.6 + 1.3 * rng.unit()
+                    } else {
+                        0.0
+                    };
+                    k as f64 * 8.0 + late
+                })
+                .collect();
+            assert_eq!(batched_delivery(&intervals(&late)), None, "{}", share);
+        }
     }
 
     #[test]

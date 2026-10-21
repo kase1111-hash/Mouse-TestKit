@@ -409,7 +409,7 @@ impl StutterPanel {
         if let Some(b) = d.batching() {
             notes.push((
                 format!(
-                    "Reports arrive in batches of about {:.1} every {:.1} ms, as a Bluetooth mouse sends them once per connection event. The cursor moves once per delivery, so the rate, median and stutters are per delivery.",
+                    "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate, median and stutters are per delivery.",
                     b.reports_per_event, b.event_period_ms
                 ),
                 egui::Color32::LIGHT_GRAY,
