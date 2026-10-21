@@ -56,7 +56,7 @@ Detects reports that arrive late while the mouse is moving fast (choppy cursor m
 2. Move the mouse quickly and continuously in circles until at least 3 s of fast movement has been judged
 3. Spikes above the red threshold line indicate stutters
 
-Only intervals during fast, steady movement are judged against the median interval; slow passes, direction reversals and pauses are ignored because a healthy mouse legitimately sends fewer reports then. Each interval is counted once. A stutter must also be at least 2.5 ms long, so normal sub-millisecond timing noise at 2-8 kHz is not flagged. A gap of 0.1-1 s between full-size reports in the same direction is a **freeze** (the hand had not slowed down, so the link dropped out); two or more make the rating at least Fair. The rating is **Inconclusive** until enough fast movement was recorded.
+Only intervals during fast, steady movement are judged against the median interval; slow passes, direction reversals and pauses are ignored because a healthy mouse legitimately sends fewer reports then. Each interval is counted once. A stutter must also be at least 2.5 ms long, so normal sub-millisecond timing noise at 2-8 kHz is not flagged. A gap of 0.1-1 s between full-size reports in the same direction is a **freeze** (the hand had not slowed down, so the link dropped out or the sensor lost tracking). Lifting the mouse while moving looks the same, so it takes two or more to make the rating at least Fair. The rating is **Inconclusive** until enough fast movement was recorded.
 
 **Tip:** Adjust sensitivity slider (multiple of the median interval) - lower = more sensitive detection.
 

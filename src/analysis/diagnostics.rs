@@ -1260,7 +1260,7 @@ impl AutoTest {
                 Phase::Movement,
                 "Movement froze",
                 format!(
-                    "{} times the reports stopped for {:.0}-{:.0} ms while the mouse kept moving the same way (the reports either side were full-size, so the hand had not slowed down). The cursor freezes like this when the connection drops out: move a wireless receiver closer and away from USB 3 ports and cables, or try another port or cable.",
+                    "{} times the reports stopped for {:.0}-{:.0} ms while the mouse kept moving the same way (the reports either side were full-size, so the hand had not slowed down). The cursor freezes like this when the connection drops out (move a wireless receiver closer and away from USB 3 ports and cables, or try another port or cable) or when the sensor loses tracking on the surface (try a plain cloth pad).",
                     freezes.len(),
                     freezes.iter().copied().fold(f64::MAX, f64::min),
                     longest
@@ -1272,7 +1272,7 @@ impl AutoTest {
                 Phase::Movement,
                 "One freeze during movement",
                 format!(
-                    "Once, the reports stopped for {:.0} ms while the mouse kept moving the same way. Lifting the mouse while moving and setting it down still moving looks the same; if you did not, the connection dropped out. Re-run to check.",
+                    "Once, the reports stopped for {:.0} ms while the mouse kept moving the same way. Lifting the mouse while moving and setting it down still moving looks the same; if you did not, the connection dropped out or the sensor lost tracking. Re-run to check.",
                     longest
                 ),
             );
