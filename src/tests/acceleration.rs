@@ -21,8 +21,8 @@ use crate::input_windows::{self as input, MouseEvent};
 /// A recorded pass needs at least this many counts to be a deliberate movement.
 const MIN_PASS_COUNTS: f64 = 100.0;
 
-/// Returns false when no mouse was measured (none selected, or it sent
-/// nothing), so the test suite does not count the test as run.
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
 pub fn run() -> bool {
     println!("\n=== Acceleration Detection ===");
     println!("This test detects acceleration in the mouse's sensor or firmware.");

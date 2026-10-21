@@ -21,8 +21,8 @@ use crate::input_windows::{self as input, MouseEvent};
 /// Judged intervals kept for the live graph.
 const GRAPH_SAMPLES: usize = 60;
 
-/// Returns false when no mouse was measured (none selected, or it sent
-/// nothing), so the test suite does not count the test as run.
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
 pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
     println!("Move your mouse quickly and continuously in circles.");
