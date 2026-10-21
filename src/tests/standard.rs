@@ -3,8 +3,9 @@
 //!
 //! The summary only reports what each test actually found. Tests that return
 //! a [`TestOutcome`] are summarised with it; the others are listed as "ran"
-//! with their result shown above. A test that was skipped, stopped or had no
-//! mouse is never counted as completed.
+//! with their result shown above, unless they say no mouse was measured. A
+//! test that was skipped, stopped or had no mouse is never counted as
+//! completed.
 
 use std::io::{self, Write};
 
@@ -63,8 +64,9 @@ impl TestStatus {
 enum Runner {
     /// The test reports what it found.
     Reports(fn() -> TestOutcome),
-    /// The test only prints its result.
-    Plain(fn()),
+    /// The test only prints its result, and says whether a mouse was
+    /// measured at all.
+    Plain(fn() -> bool),
 }
 
 const SUITE: [(&str, Runner); 10] = [
@@ -148,10 +150,7 @@ pub fn run_all() {
         println!("══════════════════════════════════════════════════════════");
         statuses[i] = match runner {
             Runner::Reports(run) => TestStatus::Finished(run()),
-            Runner::Plain(run) => {
-                run();
-                TestStatus::Ran
-            }
+            Runner::Plain(run) => plain_status(run()),
         };
     }
 
@@ -174,6 +173,16 @@ pub fn run_all() {
     println!("\nPress Enter to return to menu...");
     input.clear();
     io::stdin().read_line(&mut input).ok();
+}
+
+/// Status of a test that only prints its result, from whether it measured
+/// a mouse at all.
+fn plain_status(measured: bool) -> TestStatus {
+    if measured {
+        TestStatus::Ran
+    } else {
+        TestStatus::Finished(TestOutcome::NoDevice)
+    }
 }
 
 /// Whether any mouse device can be opened at all.
@@ -271,6 +280,17 @@ mod tests {
         assert!(s.contains("3 test(s) did not run"), "{}", s);
         assert!(!s.contains('✓'), "{}", s);
         assert!(!s.to_lowercase().contains("success"), "{}", s);
+    }
+
+    #[test]
+    fn test_plain_test_without_a_mouse_did_not_run() {
+        // Device selection cancelled in the polling, stutter, acceleration
+        // or jitter test
+        let statuses = [plain_status(false), plain_status(true)];
+        assert_eq!(statuses[0], TestStatus::Finished(TestOutcome::NoDevice));
+        let s = summary(&statuses);
+        assert!(s.contains("1 test(s) did not run"), "{}", s);
+        assert!(s.contains("1 test(s) show a measurement"), "{}", s);
     }
 
     #[test]

@@ -18,7 +18,9 @@ use crate::input::{self, MouseEvent};
 #[cfg(target_os = "windows")]
 use crate::input_windows::{self as input, MouseEvent};
 
-pub fn run() {
+/// Returns false when no mouse was measured (none selected, or it sent
+/// nothing), so the test suite does not count the test as run.
+pub fn run() -> bool {
     println!("\n=== Polling Rate Monitor ===");
     println!("Move your mouse quickly and continuously (e.g. in circles) to measure");
     println!("its polling rate. Slow movement sends fewer reports and is not measured.");
@@ -29,7 +31,7 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
@@ -114,6 +116,7 @@ pub fn run() {
     }
 
     terminal::wait_for_enter();
+    true
 }
 
 /// Polling rate of the last second's reports, from fast movement only.

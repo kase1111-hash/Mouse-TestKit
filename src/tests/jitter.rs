@@ -42,7 +42,9 @@ fn disturbed(moves: &[(f64, i32, i32)]) -> bool {
     total >= NOISE_COUNTS && seconds.len() < Config::default().rest_spread_windows
 }
 
-pub fn run() {
+/// Returns false when no mouse was measured (none selected, or it sent
+/// nothing), so the test suite does not count the test as run.
+pub fn run() -> bool {
     println!("\n=== Jitter Test ===");
     println!("This test measures sensor noise when the mouse is stationary.");
     println!("\nInstructions:");
@@ -59,7 +61,7 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
@@ -74,7 +76,7 @@ pub fn run() {
         println!("No movement came from the selected device: it may be the wrong one of");
         println!("several entries, in use by another program, or disconnected.");
         terminal::wait_for_enter();
-        return;
+        return false;
     }
     println!("Now let go of the mouse and leave it still.");
 
@@ -249,6 +251,7 @@ pub fn run() {
     }
 
     terminal::wait_for_enter();
+    true
 }
 
 fn analyze_jitter(movements: &[(i32, i32)]) -> JitterSample {

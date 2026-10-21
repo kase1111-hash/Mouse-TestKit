@@ -21,7 +21,9 @@ use crate::input_windows::{self as input, MouseEvent};
 /// Judged intervals kept for the live graph.
 const GRAPH_SAMPLES: usize = 60;
 
-pub fn run() {
+/// Returns false when no mouse was measured (none selected, or it sent
+/// nothing), so the test suite does not count the test as run.
+pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
     println!("Move your mouse quickly and continuously in circles.");
     println!("Only fast, steady movement is judged; slow movement, direction");
@@ -34,7 +36,7 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
@@ -93,6 +95,7 @@ pub fn run() {
     print_summary(&detector);
 
     terminal::wait_for_enter();
+    true
 }
 
 /// The live screen below the title.
