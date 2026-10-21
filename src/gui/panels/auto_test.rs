@@ -38,12 +38,29 @@ pub struct AutoTestPanel {
 /// events. Counting every event as a notch would overcount, and a tiny
 /// backwards wobble would look like an encoder skip, so partial movement is
 /// summed until it reaches a whole line (one notch on a standard wheel).
+///
+/// macOS is the exception: it reports each notch of a standard wheel as one
+/// line event whose size is accelerated (a slow notch is a fraction of a
+/// line, a fast one several lines), so there each line event is one notch.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct WheelAccumulator {
     lines: f32,
+    line_event_is_notch: bool,
 }
 
 impl WheelAccumulator {
+    /// The accumulator for the window system this build runs on.
+    pub(crate) fn for_platform() -> Self {
+        Self::new(cfg!(target_os = "macos"))
+    }
+
+    pub(crate) fn new(line_event_is_notch: bool) -> Self {
+        Self {
+            lines: 0.0,
+            line_event_is_notch,
+        }
+    }
+
     /// Add one wheel event and return the whole notches it completes
     /// (positive = up / away from the user). `points_per_line` converts
     /// point deltas; a page delta counts as one notch per page, which is what
@@ -55,6 +72,10 @@ impl WheelAccumulator {
         };
         if !lines.is_finite() || lines == 0.0 {
             return 0;
+        }
+        if self.line_event_is_notch && unit == egui::MouseWheelUnit::Line {
+            self.lines = 0.0;
+            return lines.signum() as i32;
         }
         // Leftover from scrolling one way must not eat into the other way.
         if self.lines != 0.0 && self.lines.signum() != lines.signum() {
@@ -110,7 +131,7 @@ impl AutoTestPanel {
             epoch: Instant::now(),
             last_run_raw: true,
             show_metrics: false,
-            wheel: WheelAccumulator::default(),
+            wheel: WheelAccumulator::for_platform(),
         }
     }
 
@@ -195,13 +216,19 @@ impl AutoTestPanel {
             ..Config::default()
         });
         self.last_run_raw = has_bridge;
-        self.wheel = WheelAccumulator::default();
+        self.wheel = WheelAccumulator::for_platform();
         self.engine.start(self.secs(Instant::now()));
     }
 
     #[cfg(test)]
     pub(crate) fn start_for_test(&mut self, has_bridge: bool) {
         self.start(has_bridge);
+    }
+
+    /// Use the wheel conversion of every platform but macOS.
+    #[cfg(test)]
+    fn use_line_wheel_for_test(&mut self) {
+        self.wheel = WheelAccumulator::new(false);
     }
 
     /// Time origin: tests build event timestamps as `epoch + seconds`.
@@ -777,6 +804,7 @@ mod tests {
         ctx.set_fonts(egui::FontDefinitions::default());
         let mut panel = AutoTestPanel::new();
         panel.start_for_test(false);
+        panel.use_line_wheel_for_test();
         assert_eq!(
             panel.engine.phases(),
             &[Phase::Rest, Phase::Clicks, Phase::Scroll]
@@ -837,6 +865,18 @@ mod tests {
         let mut w = WheelAccumulator::default();
         let total: i32 = (0..10).map(|_| w.add(Point, -12.0, 40.0)).sum();
         assert_eq!(total, -3);
+    }
+
+    #[test]
+    fn macos_line_events_are_one_notch_each_whatever_their_size() {
+        let mut w = WheelAccumulator::new(true);
+        // A slow notch is a fraction of a line, a fast one several lines
+        assert_eq!(w.add(Line, -0.1, 40.0), -1);
+        assert_eq!(w.add(Line, -4.5, 40.0), -1);
+        assert_eq!(w.add(Line, 0.3, 40.0), 1);
+        // Smooth-scrolling devices still add up point deltas
+        assert_eq!(w.add(Point, 25.0, 40.0), 0);
+        assert_eq!(w.add(Point, 25.0, 40.0), 1);
     }
 
     #[test]
