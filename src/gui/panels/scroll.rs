@@ -4,11 +4,14 @@
 //! `mouse_testkit::analysis::scroll`: notches reported in the wrong direction
 //! (encoder skipping) and a direction that never registers. Scrolling speed
 //! is shown but not rated, since it describes the hand rather than the wheel.
+//! Without raw input, up and down are the window system's, which a "natural
+//! scrolling" setting swaps, so a dead direction is then not named.
 
 use eframe::egui;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use super::auto_test::WheelAccumulator;
 use crate::export::ScrollExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
 use mouse_testkit::analysis::scroll::{WheelCheck, WheelVerdict};
@@ -37,30 +40,21 @@ pub struct ScrollPanel {
     wheel: WheelCheck,
     /// Time of the first wheel report, the origin for `wheel` timestamps
     epoch: Option<Instant>,
-    /// Framework line scrolling not yet adding up to a whole notch
-    line_remainder: f32,
+    /// Turns framework line scrolling into notches, as Auto Diagnostics does:
+    /// fractions of a line are summed, except on macOS where each line event
+    /// is one notch of accelerated size
+    line_wheel: WheelAccumulator,
     /// Framework input delivered pixel (smooth) scrolling, which has no notches
     saw_smooth_scroll: bool,
+    /// Some notches came from the window system, whose up and down follow
+    /// the system's scroll-direction setting ("natural scrolling", the macOS
+    /// default, swaps them), so the physical direction is unknown.
+    system_directions: bool,
 }
 
 struct ScrollEvent {
     timestamp: Instant,
     direction_up: bool,
-}
-
-/// Whole notches from framework line deltas. High-resolution wheels send
-/// fractions of a line; they are summed until they make a whole notch. A
-/// change of direction starts the sum again, so a reversed notch is never
-/// cancelled out by a leftover fraction from the other direction.
-fn whole_notches(remainder: &mut f32, lines: f32) -> i32 {
-    if *remainder != 0.0 && remainder.signum() != lines.signum() {
-        *remainder = 0.0;
-    }
-    *remainder += lines;
-    // The small bias keeps sums like 8 x 0.125 from landing just under 1.0
-    let whole = (*remainder + remainder.signum() * 1e-3).trunc();
-    *remainder -= whole;
-    whole as i32
 }
 
 impl ScrollPanel {
@@ -78,8 +72,9 @@ impl ScrollPanel {
             current_speed: 0.0,
             wheel: WheelCheck::new(),
             epoch: None,
-            line_remainder: 0.0,
+            line_wheel: WheelAccumulator::for_platform(),
             saw_smooth_scroll: false,
+            system_directions: false,
         }
     }
 
@@ -102,7 +97,7 @@ impl ScrollPanel {
         if !has_bridge {
             ui.label(
                 egui::RichText::new(
-                    "Note: Raw input unavailable — counting the scroll lines your system reports. System scroll acceleration can make these differ from physical notches.",
+                    "Note: Raw input unavailable — counting the scroll lines your system reports. System scroll acceleration can make these differ from physical notches, and up and down are as your system reports them: natural scrolling (the macOS default) swaps them.",
                 )
                 .color(egui::Color32::YELLOW)
                 .size(11.0),
@@ -395,8 +390,9 @@ impl ScrollPanel {
                     }
                     match unit {
                         egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
-                            let notches = whole_notches(&mut self.line_remainder, lines);
+                            let notches = self.line_wheel.add(unit, lines, 1.0);
                             if notches != 0 {
+                                self.system_directions = true;
                                 self.record(now, notches);
                             }
                         }
@@ -484,6 +480,14 @@ impl ScrollPanel {
                     w.skips, skip_ms
                 ),
             ),
+            WheelVerdict::OneDirectionOnly { .. } if self.system_directions => (
+                "One direction does not register".to_string(),
+                egui::Color32::YELLOW,
+                format!(
+                    "{} notches registered one way and none the other. Turn the wheel the other way too: if nothing registers, that direction of the wheel encoder is dead. Up and down are not named because the system's scroll-direction setting may have swapped them.",
+                    w.total()
+                ),
+            ),
             WheelVerdict::OneDirectionOnly { missing_up } => {
                 let (seen, missing, count) = if missing_up {
                     ("down", "up", w.down)
@@ -546,8 +550,9 @@ impl ScrollPanel {
         self.current_speed = 0.0;
         self.wheel = WheelCheck::new();
         self.epoch = None;
-        self.line_remainder = 0.0;
+        self.line_wheel = WheelAccumulator::for_platform();
         self.saw_smooth_scroll = false;
+        self.system_directions = false;
     }
 
     pub fn export(&self) -> Option<ScrollExport> {
@@ -573,7 +578,22 @@ impl ScrollPanel {
             direction_changes: self.direction_changes,
             avg_speed_sps: avg_speed,
             consistency_percent: consistency,
+            skips: self.wheel.skips,
+            skip_window_ms: mouse_testkit::analysis::diagnostics::Config::default()
+                .scroll_reversal_ms,
+            verdict: self.export_verdict(),
         })
+    }
+
+    /// The verdict in one line, for exports.
+    fn export_verdict(&self) -> String {
+        match self.wheel.verdict() {
+            WheelVerdict::KeepScrolling => format!(
+                "Inconclusive: fewer than {} notches each way",
+                self.wheel.min_each()
+            ),
+            _ => self.verdict_text().0,
+        }
     }
 }
 
@@ -626,6 +646,8 @@ mod tests {
         let export = panel.export().unwrap();
         assert_eq!(export.total_steps, 40);
         assert_eq!(export.consistency_percent, 100);
+        assert_eq!(export.skips, 0);
+        assert_eq!(export.verdict, "No skipping detected");
         assert_eq!(panel.wheel.verdict(), WheelVerdict::NoFaultFound);
     }
 
@@ -641,7 +663,10 @@ mod tests {
         run(&mut panel, &notches);
         assert_eq!(panel.wheel.skips, 8);
         assert_eq!(panel.wheel.verdict(), WheelVerdict::Skipping);
-        assert!(panel.export().unwrap().consistency_percent < 100);
+        let export = panel.export().unwrap();
+        assert_eq!(export.skips, 8);
+        assert_eq!(export.consistency_percent, 85);
+        assert_eq!(export.verdict, "Wheel is skipping");
     }
 
     #[test]
@@ -734,20 +759,109 @@ mod tests {
         assert_eq!(panel.total_up, 10.0);
     }
 
+    /// Frames of framework (window-system) wheel input over the test area.
+    fn run_framework(panel: &mut ScrollPanel, lines: &[f32]) {
+        let ctx = egui::Context::default();
+        let frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                panel.ui(ui, &ctx, &[], false);
+            });
+        };
+        frame(
+            panel,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 200.0))],
+        );
+        for &y in lines {
+            let notch = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, y),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(panel, vec![notch]);
+        }
+    }
+
+    #[test]
+    fn dead_direction_from_raw_input_is_named() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let notches: Vec<(u64, i32)> = (1..=15).map(|i| (i * 80, -1)).collect();
+        run(&mut panel, &notches);
+        let (title, _, message) = panel.verdict_text();
+        assert_eq!(title, "No up notches registered");
+        assert!(message.contains("15 notches down and none up"));
+        assert_eq!(panel.export().unwrap().verdict, "No up notches registered");
+    }
+
+    #[test]
+    fn dead_direction_from_system_input_is_not_named() {
+        // Without raw input the system's scroll direction applies: with
+        // natural scrolling (the macOS default) a dead physical "down"
+        // arrives as notches going up only. Naming "down" as the dead
+        // direction would send the user to check the wrong one.
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        run_framework(&mut panel, &[1.0; 15]);
+        assert_eq!(panel.total_up, 15.0);
+        let (title, _, message) = panel.verdict_text();
+        assert_eq!(title, "One direction does not register");
+        assert!(message.contains("15 notches registered one way and none the other"));
+        assert!(!message.contains("none down") && !message.contains("Scroll down"));
+    }
+
+    #[test]
+    fn export_carries_skips_and_verdict() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        run(&mut panel, &[(100, -1), (200, -1)]);
+        let export = panel.export().unwrap();
+        assert_eq!(export.skips, 0);
+        assert_eq!(export.skip_window_ms, 60.0);
+        assert_eq!(
+            export.verdict,
+            "Inconclusive: fewer than 10 notches each way"
+        );
+    }
+
     #[test]
     fn framework_line_deltas_make_whole_notches() {
-        let mut r = 0.0;
-        // Classic wheel: one line per notch
-        assert_eq!(whole_notches(&mut r, -1.0), -1);
-        assert_eq!(whole_notches(&mut r, 1.0), 1);
-        // High-resolution wheel: 1/8 notch per event
-        let sum: i32 = (0..16).map(|_| whole_notches(&mut r, 0.125)).sum();
-        assert_eq!(sum, 2);
-        // A reversed notch is not swallowed by a leftover fraction
-        let mut r = 0.0;
-        assert_eq!(whole_notches(&mut r, 0.5), 0);
-        assert_eq!(whole_notches(&mut r, -1.0), -1);
-        // Multi-line events from fast scrolling
-        assert_eq!(whole_notches(&mut r, -3.0), -3);
+        // Windows, X11 and Wayland: one line per notch, fractions summed
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.line_wheel = WheelAccumulator::new(false);
+        // Classic wheel, then a high-resolution wheel at 1/8 notch per event
+        let mut lines = vec![-1.0, 1.0];
+        lines.extend([0.125; 16]);
+        run_framework(&mut panel, &lines);
+        assert_eq!((panel.total_down, panel.total_up), (1.0, 3.0));
+        // A reversed notch is not swallowed by a leftover fraction, and
+        // a multi-line event from fast scrolling counts every line
+        run_framework(&mut panel, &[0.5, -1.0, -3.0]);
+        assert_eq!((panel.total_down, panel.total_up), (5.0, 3.0));
+    }
+
+    #[test]
+    fn macos_slow_notches_are_not_lost() {
+        // macOS sends one line event per notch of a standard wheel, sized
+        // by its scroll acceleration: a slow notch is a fraction of a line.
+        // Summed, the "roll 10 slow clicks" check would show 1 and suggest
+        // a wheel that loses notches.
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.line_wheel = WheelAccumulator::new(true);
+        run_framework(&mut panel, &[-0.1; 10]);
+        assert_eq!(panel.total_down, 10.0);
+        run_framework(&mut panel, &[0.1, 0.3, 4.5]);
+        assert_eq!(panel.total_up, 3.0);
     }
 }

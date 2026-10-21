@@ -141,6 +141,9 @@ pub struct Metrics {
     /// sent while the mouse moved fast enough to report on every poll.
     pub move_intervals: usize,
     pub polling_hz: Option<u32>,
+    /// The standard USB rate (125, 250, 500, 1000 ... Hz) nearest
+    /// `polling_hz`. None below 110 Hz, where no USB rate fits: that is the
+    /// Bluetooth range or a USB mouse running slow.
     pub polling_nominal_hz: Option<u32>,
     pub stutter_count: usize,
     pub stutter_rate_percent: f64,
@@ -348,6 +351,42 @@ fn button_index(b: MouseButton) -> usize {
 
 fn button_name(i: usize) -> &'static str {
     ["left", "right", "middle", "side", "extra", "unknown"][i.min(5)]
+}
+
+/// The slowest rate a USB mouse runs at is 125 Hz; this leaves room for
+/// timing error. Below it a mouse is on Bluetooth, where one report per
+/// 7.5-15 ms connection interval (67-133 Hz) is normal, or is a USB mouse
+/// set to a low rate.
+const USB_MIN_POLLING_HZ: u32 = 110;
+/// Fewer reports than a 60 Hz screen shows frames: the pointer moves in
+/// visible steps whatever the connection. A healthy Bluetooth link (15 ms at
+/// most, 67 Hz) stays above it.
+const CHOPPY_POLLING_HZ: u32 = 60;
+
+/// Severity, title and detail for a measured report rate below what a USB
+/// mouse uses, or None when the rate is normal for any mouse.
+fn low_polling_finding(hz: u32) -> Option<(Severity, &'static str, String)> {
+    if hz < CHOPPY_POLLING_HZ {
+        Some((
+            Severity::Warning,
+            "Very low polling rate",
+            format!(
+                "{} Hz is fewer reports than a 60 Hz screen shows frames, so the pointer moves in visible steps. A Bluetooth mouse normally reports at 67-133 Hz: this slow, it is likely in a power-saving mode (charge it) or the computer set up a slow Bluetooth connection. A USB mouse should report 125 Hz or more: check the polling rate in its software and try another USB port.",
+                hz
+            ),
+        ))
+    } else if hz < USB_MIN_POLLING_HZ {
+        Some((
+            Severity::Info,
+            "Low polling rate (normal for Bluetooth)",
+            format!(
+                "{} Hz is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: if this is one, check the polling rate in its software and try another USB port.",
+                hz
+            ),
+        ))
+    } else {
+        None
+    }
 }
 
 /// Movement seen in one second of the rest phase.
@@ -935,7 +974,9 @@ impl AutoTest {
         let mut sorted = usable.clone();
         let period = median_in_place(&mut sorted).unwrap_or(0.0);
         let hz = estimate_hz(&usable, self.cfg.movement_min_intervals);
-        let nominal = hz.map(|h| nominal_rate(h as f64));
+        let nominal = hz
+            .filter(|&h| h >= USB_MIN_POLLING_HZ)
+            .map(|h| nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
         self.metrics.max_interval_ms = usable.iter().copied().fold(0.0, f64::max);
@@ -961,29 +1002,24 @@ impl AutoTest {
         let lost_percent =
             late.iter().map(|i| i - period).sum::<f64>() / (usable_secs * 1000.0) * 100.0;
 
-        if let (Some(hz), Some(nominal)) = (hz, nominal) {
+        if let Some(hz) = hz {
+            let looks_like = nominal
+                .map(|n| format!(" (looks like a {} Hz mouse)", n))
+                .unwrap_or_default();
             self.push(
                 Severity::Info,
                 Phase::Movement,
                 "Polling rate measured",
                 format!(
-                    "Typical report interval {:.3} ms = {} Hz (looks like a {} Hz mouse), from {} reports sent while moving fast.",
+                    "Typical report interval {:.3} ms = {} Hz{}, from {} reports sent while moving fast.",
                     period,
                     hz,
-                    nominal,
+                    looks_like,
                     usable.len()
                 ),
             );
-            if hz < 110 {
-                self.push(
-                    Severity::Warning,
-                    Phase::Movement,
-                    "Very low polling rate",
-                    format!(
-                        "{} Hz is below the 125 Hz USB minimum. A wireless mouse may be in a power-saving mode, or the receiver is struggling.",
-                        hz
-                    ),
-                );
+            if let Some((severity, title, detail)) = low_polling_finding(hz) {
+                self.push(severity, Phase::Movement, title, detail);
             }
         }
 
@@ -1311,20 +1347,31 @@ impl AutoTest {
             format!("{} notches down, {} notches up.", down, up),
         );
         if up == 0 || down == 0 {
-            let (seen, missing) = if up == 0 {
-                ("down", "up")
+            // Without raw input up and down are the window system's, which
+            // natural scrolling (the macOS default) swaps: naming the missing
+            // direction could point at the one that works.
+            let detail = if self.cfg.timing_reliable {
+                let (seen, missing) = if up == 0 {
+                    ("down", "up")
+                } else {
+                    ("up", "down")
+                };
+                format!(
+                    "{} notches {} and none {}. If you also scrolled {}, that direction of the wheel may be dead; if you did not, it was not tested.",
+                    total, seen, missing, missing
+                )
             } else {
-                ("up", "down")
+                format!(
+                    "{} notches registered one way and none the other. If you also turned the wheel the other way, that direction may be dead; if you did not, it was not tested. Up and down are not named because the system's scroll-direction setting may have swapped them.",
+                    total
+                )
             };
             self.untested.push(Phase::Scroll);
             self.push(
                 Severity::Info,
                 Phase::Scroll,
                 "Wheel only registered one direction",
-                format!(
-                    "{} notches {} and none {}. If you also scrolled {}, that direction of the wheel may be dead; if you did not, it was not tested.",
-                    total, seen, missing, missing
-                ),
+                detail,
             );
         }
         // Like switch bounce, judged on the count. Three are needed because a
@@ -1813,15 +1860,74 @@ mod tests {
     fn test_movement_low_rate_and_pauses() {
         let mut sim = Sim::new(cfg());
         sim.good_rest();
-        // 60 Hz mouse with a 2 s dropout in the middle
-        sim.move_for(3.0, 16.67);
+        // 40 Hz mouse with a 2 s dropout in the middle
+        sim.move_for(3.0, 25.0);
         sim.t += 2.0;
-        sim.move_for(3.0, 16.67);
+        sim.move_for(3.0, 25.0);
         sim.idle(12.0);
+        assert_eq!(sim.at.metrics.polling_hz, Some(40));
+        assert!(movement_findings(&sim)
+            .contains(&(Severity::Warning, "Very low polling rate".to_string())));
         let f = sim.at.findings_so_far();
-        assert!(f.iter().any(|f| f.title == "Very low polling rate"));
         assert!(f.iter().any(|f| f.title == "Pauses during movement"));
         assert_eq!(sim.at.metrics.movement_pauses, 1);
+    }
+
+    #[test]
+    fn test_bluetooth_polling_rate_is_noted_not_flagged() {
+        // A healthy Bluetooth mouse reports once per 11.25 ms connection
+        // interval (89 Hz), moved briskly for the whole step
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        while sim.phase() == Some(Phase::Movement) {
+            sim.move_for(0.5, 11.25);
+            sim.at.tick(sim.t);
+        }
+        assert_eq!(sim.at.metrics.polling_hz, Some(89));
+        let movement = movement_findings(&sim);
+        assert!(
+            movement.iter().all(|(s, _)| *s == Severity::Info),
+            "{:?}",
+            movement
+        );
+        assert!(movement
+            .iter()
+            .any(|(_, t)| t == "Low polling rate (normal for Bluetooth)"));
+        // No USB rate fits 89 Hz, so none is named: "looks like a 125 Hz
+        // mouse" would read as a USB mouse running slow
+        assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        let measured = sim
+            .at
+            .findings_so_far()
+            .iter()
+            .find(|f| f.title == "Polling rate measured")
+            .map(|f| f.detail.clone())
+            .unwrap();
+        assert!(measured.contains("= 89 Hz,"), "{}", measured);
+        assert!(!measured.contains("looks like"), "{}", measured);
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Healthy, "findings: {:?}", titles(r));
+    }
+
+    #[test]
+    fn test_low_polling_rate_thresholds() {
+        let sev = |hz| low_polling_finding(hz).map(|(s, _, _)| s);
+        // Bluetooth connection intervals of 7.5-15 ms: 133-67 Hz
+        assert_eq!(sev(133), None);
+        assert_eq!(sev(89), Some(Severity::Info));
+        assert_eq!(sev(67), Some(Severity::Info));
+        // Fewer reports than a 60 Hz screen shows frames
+        assert_eq!(sev(59), Some(Severity::Warning));
+        assert_eq!(sev(30), Some(Severity::Warning));
+        // USB mice: 125 Hz and up, with room for timing error
+        assert_eq!(sev(125), None);
+        assert_eq!(sev(110), None);
+        assert_eq!(sev(109), Some(Severity::Info));
+        let (_, _, detail) = low_polling_finding(100).unwrap();
+        assert!(detail.contains("Bluetooth") && detail.contains("125 Hz"));
     }
 
     #[test]
@@ -1980,10 +2086,37 @@ mod tests {
         }
         sim.idle(13.0);
         let f = sim.at.findings_so_far();
-        assert!(f
+        let dead = f
             .iter()
-            .any(|f| f.title == "Wheel only registered one direction"));
+            .find(|f| f.title == "Wheel only registered one direction")
+            .unwrap();
+        assert!(dead.detail.starts_with("12 notches down and none up."));
         assert_eq!(sim.at.metrics.scroll_reversals, 0);
+    }
+
+    #[test]
+    fn test_scroll_dead_direction_without_raw_input_is_not_named() {
+        // Framework input: natural scrolling (the macOS default) swaps up
+        // and down, so a dead physical "down" arrives as up notches only
+        let mut sim = Sim::new(Config {
+            timing_reliable: false,
+            ..cfg()
+        });
+        sim.good_rest();
+        sim.good_clicks();
+        for _ in 0..12 {
+            sim.scroll(1, 80.0);
+        }
+        sim.idle(13.0);
+        let f = sim.at.findings_so_far();
+        let dead = f
+            .iter()
+            .find(|f| f.title == "Wheel only registered one direction")
+            .unwrap();
+        assert!(dead
+            .detail
+            .starts_with("12 notches registered one way and none the other."));
+        assert!(!dead.detail.contains("none down"), "{}", dead.detail);
     }
 
     #[test]
