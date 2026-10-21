@@ -362,23 +362,22 @@ impl ClickPanel {
                                 self.response_right_press_start = Some(event.timestamp);
                             }
                         }
-                        RawInputKind::ButtonRelease(RawButton::Right) => {
-                            if self.response_right_is_pressed {
-                                self.response_right_is_pressed = false;
-                                self.response_right_click_count += 1;
-                                self.response_right_click_times.push_back(event.timestamp);
+                        RawInputKind::ButtonRelease(RawButton::Right)
+                            if self.response_right_is_pressed =>
+                        {
+                            self.response_right_is_pressed = false;
+                            self.response_right_click_count += 1;
+                            self.response_right_click_times.push_back(event.timestamp);
 
-                                if let Some(start) = self.response_right_press_start {
-                                    let hold_ms =
-                                        event.timestamp.duration_since(start).as_secs_f64()
-                                            * 1000.0;
-                                    self.response_right_hold_times.push_back(hold_ms);
-                                    if self.response_right_hold_times.len() > 100 {
-                                        self.response_right_hold_times.pop_front();
-                                    }
+                            if let Some(start) = self.response_right_press_start {
+                                let hold_ms =
+                                    event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                self.response_right_hold_times.push_back(hold_ms);
+                                if self.response_right_hold_times.len() > 100 {
+                                    self.response_right_hold_times.pop_front();
                                 }
-                                self.response_right_press_start = None;
                             }
+                            self.response_right_press_start = None;
                         }
                         _ => {}
                     }
@@ -669,22 +668,21 @@ impl ClickPanel {
                                 self.sticky_right_press_start = Some(event.timestamp);
                             }
                         }
-                        RawInputKind::ButtonRelease(RawButton::Right) => {
-                            if self.sticky_right_is_pressed {
-                                self.sticky_right_is_pressed = false;
+                        RawInputKind::ButtonRelease(RawButton::Right)
+                            if self.sticky_right_is_pressed =>
+                        {
+                            self.sticky_right_is_pressed = false;
 
-                                if let Some(start) = self.sticky_right_press_start {
-                                    let hold_ms =
-                                        event.timestamp.duration_since(start).as_secs_f64()
-                                            * 1000.0;
-                                    self.sticky_right_holds.push(hold_ms);
+                            if let Some(start) = self.sticky_right_press_start {
+                                let hold_ms =
+                                    event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
+                                self.sticky_right_holds.push(hold_ms);
 
-                                    if hold_ms > 100.0 {
-                                        self.sticky_right_count += 1;
-                                    }
+                                if hold_ms > 100.0 {
+                                    self.sticky_right_count += 1;
                                 }
-                                self.sticky_right_press_start = None;
                             }
+                            self.sticky_right_press_start = None;
                         }
                         _ => {}
                     }

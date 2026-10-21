@@ -78,7 +78,9 @@ jobs:
             artifact_name: mouse-testkit-gui
             asset_name: mouse-testkit-gui-macos-arm64
 
-          - os: macos-13
+          # Intel build is cross-compiled on Apple Silicon: the macos-13
+          # Intel runners are retired and jobs queued for them never start.
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact_name: mouse-testkit-gui
             asset_name: mouse-testkit-gui-macos-x64
