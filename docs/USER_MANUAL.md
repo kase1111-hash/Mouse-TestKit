@@ -8,7 +8,7 @@ Precision diagnostics for your mouse.
 
 Launch the application and you'll see the Dashboard. Use the sidebar to navigate between tests.
 
-The Dashboard shows the **input source**. "RAW INPUT" means the app reads the mouse hardware directly and timing tests are precise. "FRAMEWORK" means it only sees what the window system delivers (frame-rate limited); on Linux, add your user to the `input` group (`sudo usermod -aG input $USER`) and log in again to get raw input.
+The Dashboard shows the **input source** and which device the tests measure. Mouse TRAP reads every mouse-like device; in **Auto** it measures the one you click, scroll or move a few millimetres, and keeps that device while a test runs (a bumped second mouse or a drifting TrackPoint cannot take over). Use the **Measure** list to pin a specific device, or choose "Pointer (framework input)". "RAW INPUT" plus the device name means the app reads that mouse's hardware reports directly and timing tests are precise. "FRAMEWORK" means the tests only see what the window system delivers (frame-rate limited, after OS acceleration): this is the case until you use a readable mouse, when the pointer is driven by something that cannot be read directly (touchpad, tablet, remote session), and on Linux when your user is not in the `input` group (`sudo usermod -aG input $USER`, then log in again). If the pointer keeps moving while the measured device reports nothing, a warning appears: select the mouse you are actually testing. A mouse that is unplugged and plugged back in is picked up again within a few seconds.
 
 ---
 

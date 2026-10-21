@@ -7,7 +7,7 @@
 //!
 //! - Real-time polling rate monitoring with live graphs
 //! - Stutter detection and timing analysis
-//! - Click response testing (latency, stickiness, double-click)
+//! - Click testing (hold time, click rate, stickiness, double-click)
 //! - DPI accuracy verification
 //! - Sensor analysis (jitter, acceleration, angle snapping)
 //! - Export results to JSON or CSV
