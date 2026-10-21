@@ -642,12 +642,16 @@ impl ClickPanel {
                 self.sticky_right_press_start,
             ),
         };
-        let current_hold_ms = press_start.filter(|_| is_pressed).map(|start| {
-            Instant::now()
-                .saturating_duration_since(start)
-                .as_secs_f64()
-                * 1000.0
-        });
+        // A press still open after Stop never gets its release, so it says
+        // nothing about the switch.
+        let current_hold_ms = press_start
+            .filter(|_| is_pressed && self.sticky_running)
+            .map(|start| {
+                Instant::now()
+                    .saturating_duration_since(start)
+                    .as_secs_f64()
+                    * 1000.0
+            });
         let verdict = sticky_verdict(holds, current_hold_ms, &cfg);
         let slow = matches!(verdict, StickyVerdict::SlowReleases { .. });
         let warn_color = egui::Color32::ORANGE;
@@ -771,12 +775,20 @@ impl ClickPanel {
         if self.sticky_running {
             let now = Instant::now();
 
+            // Only presses that start in the test area count. Raw input sees
+            // every click, including the Stop button and the sidebar, whose
+            // release this panel never gets once it stops or is left: the
+            // press would stay open and later read as a long hold.
+            let in_test_area = ctx
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| rect.contains(pos));
+
             if has_bridge {
                 // Raw input path: process all button events from the bridge
                 for event in raw_events {
                     match &event.kind {
                         // Left click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Left) => {
+                        RawInputKind::ButtonPress(RawButton::Left) if in_test_area => {
                             if !self.sticky_is_pressed {
                                 self.sticky_is_pressed = true;
                                 self.sticky_press_start = Some(event.timestamp);
@@ -800,7 +812,7 @@ impl ClickPanel {
                             }
                         }
                         // Right click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Right) => {
+                        RawInputKind::ButtonPress(RawButton::Right) if in_test_area => {
                             if !self.sticky_right_is_pressed {
                                 self.sticky_right_is_pressed = true;
                                 self.sticky_right_press_start = Some(event.timestamp);
@@ -830,12 +842,6 @@ impl ClickPanel {
                 let pointer = ctx.input(|i| i.pointer.clone());
                 let is_primary_down = pointer.primary_down();
                 let is_secondary_down = pointer.secondary_down();
-
-                // Only track clicks that start within the test area
-                let in_test_area = pointer
-                    .hover_pos()
-                    .map(|pos| rect.contains(pos))
-                    .unwrap_or(false);
 
                 // Left click handling
                 if in_test_area && is_primary_down && !self.sticky_is_pressed {
@@ -1180,12 +1186,32 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Run the stickiness panel over left clicks with the given hold times
-    /// (ms), 300 ms apart, through the raw-input path.
-    fn sticky_panel_with_holds(holds_ms: &[u64]) -> ClickPanel {
+    /// Pointer positions inside and outside (on the heading) the
+    /// stickiness test area, in a 1280x900 window.
+    const IN_TEST_AREA: egui::Pos2 = egui::pos2(400.0, 230.0);
+    const ON_HEADING: egui::Pos2 = egui::pos2(60.0, 10.0);
+
+    /// One frame of the stickiness panel with the pointer at `pointer`,
+    /// fed `events` through the raw-input path.
+    fn sticky_frame(panel: &mut ClickPanel, pointer: egui::Pos2, events: &[RawInputEvent]) {
         let ctx = egui::Context::default();
-        let mut panel = ClickPanel::new();
-        panel.sticky_running = true;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            events: vec![egui::Event::PointerMoved(pointer)],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_sticky(ui, &ctx, events, true);
+        });
+    }
+
+    /// Raw left press/release pairs with the given hold times (ms), 300 ms
+    /// apart.
+    fn left_clicks(holds_ms: &[u64]) -> Vec<RawInputEvent> {
         let mut t = Instant::now();
         let mut events = Vec::new();
         for &hold in holds_ms {
@@ -1199,11 +1225,31 @@ mod tests {
             });
             t += Duration::from_millis(hold + 300);
         }
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let ctx = ui.ctx().clone();
-            panel.ui_sticky(ui, &ctx, &events, true);
-        });
+        events
+    }
+
+    /// Run the stickiness panel over left clicks in the test area with the
+    /// given hold times (ms), through the raw-input path.
+    fn sticky_panel_with_holds(holds_ms: &[u64]) -> ClickPanel {
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        sticky_frame(&mut panel, IN_TEST_AREA, &left_clicks(holds_ms));
         panel
+    }
+
+    #[test]
+    fn clicks_outside_the_test_area_are_not_holds() {
+        // Raw input sees every click. A press on the sidebar or the Stop
+        // button whose release arrives after leaving the panel (5 s later)
+        // must not become a 5 s hold or a button left held down.
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        let events = left_clicks(&[5000]);
+        sticky_frame(&mut panel, ON_HEADING, &events[..1]);
+        assert!(!panel.sticky_is_pressed);
+        sticky_frame(&mut panel, IN_TEST_AREA, &events[1..]);
+        assert!(panel.sticky_holds.is_empty());
+        assert_eq!(panel.sticky_count, 0);
     }
 
     #[test]
