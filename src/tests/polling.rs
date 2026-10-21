@@ -4,7 +4,7 @@
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::polling::{estimate_hz, nominal_rate, PollingStats};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 /// Minimum reports in the one-second window before a Hz value is published.
 const MIN_EVENTS_FOR_ESTIMATE: usize = 10;
@@ -34,7 +34,6 @@ pub fn run() {
     let mut stats = PollingStats::new();
     let mut last_print = Instant::now();
     let mut timestamps: Vec<Instant> = Vec::new();
-    let mut last_event_time: Option<SystemTime> = None;
 
     let _guard = terminal::TerminalGuard::new();
 
@@ -52,28 +51,12 @@ pub fn run() {
             }
         }
 
-        // Read mouse events
-        #[cfg(target_os = "linux")]
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
-                    // Use event timestamp to deduplicate X/Y events from same poll
-                    let event_time = ev.timestamp();
-                    if last_event_time != Some(event_time) {
-                        timestamps.push(Instant::now());
-                        last_event_time = Some(event_time);
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                if let MouseEvent::Move { .. } = ev {
-                    // Windows Raw Input already deduplicates events
-                    timestamps.push(Instant::now());
-                }
+        // Read mouse events. Each report keeps the time the device sent it;
+        // stamping at read time would bunch a whole batch together and turn
+        // a 2-8 kHz mouse into millions of Hz.
+        for timed in input::fetch_timed_events(&mut device) {
+            if let MouseEvent::Move { .. } = timed.event {
+                timestamps.push(timed.time);
             }
         }
 
