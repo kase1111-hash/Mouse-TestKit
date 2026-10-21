@@ -269,9 +269,10 @@ pub struct Config {
     /// Rest movement only counts as jitter or drift when it appears in at
     /// least this many separate one-second windows. Bumping the mouse or desk
     /// is one burst well under a second long; a drifting or noisy sensor
-    /// keeps reporting. Movement that runs from the start of the step and
-    /// then stops for good (the hand leaving late) is not counted, and
-    /// severity is judged on the movement outside the largest burst.
+    /// keeps reporting. The hand leaving late is not counted: movement that
+    /// runs from the start of the step and then stops, or everything up to
+    /// the largest burst when only noise follows it for a second or more.
+    /// Severity is judged on the movement outside the largest burst.
     pub rest_spread_windows: usize,
     /// A direction change within this many ms of the previous notch is a skip.
     pub scroll_reversal_ms: f64,
@@ -394,6 +395,9 @@ fn low_polling_finding(hz: u32) -> Option<(Severity, &'static str, String)> {
         None
     }
 }
+
+/// Rest movement (counts) below which it is ordinary sensor noise.
+const REST_NOISE_COUNTS: f64 = 3.0;
 
 /// Movement seen in one second of the rest phase.
 #[derive(Debug, Default, Clone, Copy)]
@@ -830,16 +834,29 @@ impl AutoTest {
         // Movement that runs from the start of the step and then stops for
         // good is the hand still leaving the mouse, however long that took.
         // Only movement after it can show the sensor moving on its own.
+        let windows_in_step = self.cfg.rest_secs.ceil() as usize;
         let lead = self
             .rest_seconds
             .iter()
             .take_while(|s| s.reports > 0)
             .count();
-        let skip = if lead < self.cfg.rest_secs.ceil() as usize {
-            lead
-        } else {
-            0
-        };
+        // A hand resting on the mouse moves it only now and then, so it can
+        // also leave after a still second: the largest burst is the hand
+        // lifting off when only noise follows it for at least a whole
+        // second, and everything before it was the hand too. A burst in the
+        // last second is not excused: it may be the next step started early.
+        let lift_off = self
+            .rest_seconds
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
+            .map(|(i, _)| i)
+            .filter(|&i| {
+                let after: f64 = self.rest_seconds[i + 1..].iter().map(|s| s.distance).sum();
+                i + 1 < windows_in_step && after < REST_NOISE_COUNTS
+            })
+            .map_or(0, |i| i + 1);
+        let skip = if lead < windows_in_step { lead } else { 0 }.max(lift_off);
         let later = &self.rest_seconds[skip.min(self.rest_seconds.len())..];
         let windows = later.iter().filter(moved).count();
         let later_reports: usize = later.iter().map(|s| s.reports).sum();
@@ -855,7 +872,7 @@ impl AutoTest {
                 "Sensor perfectly still at rest",
                 "No movement was reported while the mouse was untouched.".to_string(),
             );
-        } else if d < 3.0 {
+        } else if d < REST_NOISE_COUNTS {
             self.push(
                 Severity::Info,
                 Phase::Rest,
@@ -872,10 +889,10 @@ impl AutoTest {
                 "Movement at the start of the rest step",
                 format!(
                     "{} movement report(s) totalling {:.1} {} in the first {} second(s) after the {:.0} s allowed for letting go, then none until the step ended: the hand leaving the mouse late, not the sensor. A drifting sensor keeps moving. If nobody touched the mouse then, re-run to check.",
-                    n, d, unit, lead, self.cfg.rest_settle_secs
+                    n, d, unit, skip, self.cfg.rest_settle_secs
                 ),
             );
-        } else if windows < self.cfg.rest_spread_windows || spread < 3.0 {
+        } else if windows < self.cfg.rest_spread_windows || spread < REST_NOISE_COUNTS {
             self.push(
                 Severity::Info,
                 Phase::Rest,
@@ -2895,6 +2912,76 @@ mod tests {
             .iter()
             .any(|(_, t)| t == "Movement at the start of the rest step"));
         assert_eq!(sim.at.metrics.rest_motion_seconds, 4);
+    }
+
+    #[test]
+    fn test_hand_leaving_late_after_a_still_second_is_not_a_fault() {
+        // The hand rests on the mouse after Start: nothing in the first
+        // second after the settle time, a few single-count tremors, then the
+        // hand lifts off at 5.1 s and nothing more.
+        for tremor in [1, 3] {
+            let mut sim = Sim::new(cfg());
+            for t in [3.2, 3.8, 4.3, 4.7] {
+                sim.at.feed(t, &MouseEvent::Move { dx: tremor, dy: 0 });
+            }
+            sim.t = 5.1;
+            for _ in 0..6 {
+                sim.at.feed(sim.t, &MouseEvent::Move { dx: 12, dy: 7 });
+                sim.t += 0.008;
+            }
+            sim.idle(2.5);
+            assert_eq!(sim.phase(), Some(Phase::Movement));
+            let f = rest_findings(&sim);
+            assert_eq!(
+                f,
+                vec![(
+                    Severity::Info,
+                    "Movement at the start of the rest step".to_string()
+                )],
+                "tremor {}",
+                tremor
+            );
+        }
+    }
+
+    #[test]
+    fn test_drift_before_an_early_start_is_still_a_fault() {
+        // The sensor drifts all through the step, then the user starts the
+        // movement step early: the burst at the end excuses nothing.
+        let mut sim = Sim::new(cfg());
+        for i in 0..45 {
+            sim.at
+                .feed(2.05 + 0.1 * i as f64, &MouseEvent::Move { dx: 1, dy: 0 });
+        }
+        sim.t = 6.8;
+        for _ in 0..20 {
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 15, dy: 4 });
+            sim.t += 0.008;
+        }
+        sim.idle(0.5);
+        assert_eq!(sim.phase(), Some(Phase::Movement));
+        let f = rest_findings(&sim);
+        assert!(
+            f.contains(&(Severity::Critical, "Sensor moves on its own".to_string())),
+            "{:?}",
+            f
+        );
+
+        // Drift that stops after the hand leaves late is still drift
+        let mut sim = Sim::new(cfg());
+        sim.t = 3.0;
+        for _ in 0..6 {
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 12, dy: 7 });
+            sim.t += 0.008;
+        }
+        for i in 0..30 {
+            sim.at
+                .feed(4.05 + 0.1 * i as f64, &MouseEvent::Move { dx: 1, dy: 1 });
+        }
+        sim.t = 7.0;
+        sim.idle(0.5);
+        let f = rest_findings(&sim);
+        assert!(f.iter().any(|(s, _)| *s >= Severity::Warning), "{:?}", f);
     }
 
     #[test]
