@@ -66,7 +66,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Tests for cursor jump during mouse lift |
 | Detection | Motion that starts after the mouse has been still for 100 ms is summed over its first 100 ms; carrying the cursor more than 2 mm is a jump. Counts are converted with the mouse's DPI (800 assumed, and reported as assumed, when not given). Movement that continues more than 2 mm after that window is sliding and is not judged |
-| Verdict | 2+ jumps = problem, 1 = possible problem (repeat); "no jumps" needs 5 lifts reported with SPACE, otherwise inconclusive. The Auto Diagnostics lift step uses the same rules |
+| Verdict | 2+ jumps = problem, 1 = possible problem (repeat); with the DPI assumed, 2+ jumps = inconclusive (they may be ordinary set-down shifts at a higher DPI); "no jumps" needs 5 lifts reported with SPACE, otherwise inconclusive. The Auto Diagnostics lift step uses the same jump rules, but cannot count lifts: one movement after a pause is enough for its "no jumps" note, which says when no lift or set-down motion was seen at all |
 | Availability | CLI menu option 6 and GUI panel; needs raw input |
 | Use Case | Evaluating sensor lift-off behavior and calibration |
 
@@ -141,7 +141,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Component | Requirement |
 |-----------|-------------|
 | Platform | Linux x64, Windows x64, macOS ARM64/x64 |
-| Rust | 1.70 or later |
+| Rust | 1.92 or later |
 | USB | USB 2.0 or higher |
 | Input | HID-compliant mouse device |
 

@@ -21,7 +21,7 @@ cargo build --bin mouse-testkit-gui
 # Release build (GUI)
 cargo build --release --bin mouse-testkit-gui
 
-# CLI build (Linux only)
+# CLI build (Linux and Windows)
 cargo build --release --bin mouse-testkit
 
 # Ultra-compact build
@@ -174,7 +174,7 @@ rather than show a number.
 | Platform | GUI | CLI |
 |----------|-----|-----|
 | Linux x64 | Yes | Yes |
-| Windows x64 | Yes | No |
+| Windows x64 | Yes | Yes |
 | macOS ARM64 | Yes | No |
 | macOS x64 | Yes | No |
 
