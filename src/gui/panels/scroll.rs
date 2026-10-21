@@ -697,7 +697,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut panel = ScrollPanel::new();
         panel.start_for_test();
-        let mut frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
+        let frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
