@@ -46,13 +46,16 @@ pub fn run() -> bool {
     let mut recent: VecDeque<f64> = VecDeque::with_capacity(GRAPH_SAMPLES + 1);
     let epoch = Instant::now();
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 ..
@@ -63,7 +66,16 @@ pub fn run() -> bool {
         }
 
         // One Move per hardware report, stamped when the device sent it
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data {
+            // The hole left by dropped reports is not a stutter of the mouse
+            gaps += 1;
+            detector.break_continuity();
+        }
+        for timed in batch.events {
             if let MouseEvent::Move { dx, dy } = timed.event {
                 let t = timed.time.saturating_duration_since(epoch).as_secs_f64();
                 if let Some(interval) = detector.feed(t, dx, dy) {
@@ -94,6 +106,10 @@ pub fn run() -> bool {
     println!("\n\n=== Stutter Test Complete ===");
     print_summary(&detector);
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     true
 }
@@ -231,6 +247,37 @@ mod tests {
         let screen = terminal::raw_lines(&live_text(&d, &recent));
         assert!(screen.contains("Median interval"), "{}", screen);
         assert!(!screen.replace("\r\n", "").contains('\n'), "{}", screen);
+    }
+
+    /// `secs` of 1000 Hz reports of 4 counts from `t0`, with the reports
+    /// from `hole.0` to `hole.1` (seconds) missing.
+    fn feed_1khz(d: &mut StutterDetector, t0: f64, secs: f64, hole: Option<(f64, f64)>) -> f64 {
+        let n = (secs * 1000.0) as usize;
+        for i in 0..n {
+            let t = t0 + i as f64 / 1000.0;
+            if hole.is_some_and(|(from, to)| t >= from && t < to) {
+                continue;
+            }
+            d.feed(t, 4, 1);
+        }
+        t0 + n as f64 / 1000.0
+    }
+
+    #[test]
+    fn reports_dropped_by_the_system_are_not_a_stutter() {
+        // The reader stalls for 30 ms during fast movement and the kernel
+        // drops the queued reports: without the gap mark that is a severe
+        // stutter of a healthy mouse.
+        let mut d = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+        let t = feed_1khz(&mut d, 0.0, 2.0, None);
+        d.break_continuity();
+        feed_1khz(&mut d, t + 0.030, 2.0, None);
+        assert_eq!(d.stutter_count(), 0);
+
+        // The same hole in the mouse's own reports is still caught
+        let mut d = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+        feed_1khz(&mut d, 0.0, 4.0, Some((2.0, 2.030)));
+        assert_eq!(d.stutter_count(), 1);
     }
 
     #[test]

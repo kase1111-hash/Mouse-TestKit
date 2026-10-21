@@ -74,6 +74,8 @@ pub struct MouseTestKitApp {
     config_dirty_since: Option<Instant>,
     /// Background raw input thread (None on unsupported platforms)
     input_bridge: Option<InputBridge>,
+    /// Pages whose test run lost some of the mouse's reports
+    lost_reports: LostReportsNotice,
 }
 
 impl MouseTestKitApp {
@@ -121,6 +123,7 @@ impl MouseTestKitApp {
             config,
             config_dirty_since: None,
             input_bridge,
+            lost_reports: LostReportsNotice::default(),
         }
     }
 
@@ -134,6 +137,33 @@ impl MouseTestKitApp {
             || self.double_click_panel.is_running()
             || self.scroll_panel.is_running()
             || self.auto_test_panel.is_running()
+    }
+
+    /// Pages whose test is running. Pages that share a panel (the three
+    /// click tests; angle snap and acceleration) count as running together.
+    fn running_pages(&self) -> Vec<ActiveTest> {
+        let click = self.click_panel.is_running();
+        let accel = self.accel_panel.is_running();
+        [
+            (ActiveTest::AutoTest, self.auto_test_panel.is_running()),
+            (ActiveTest::PollingRate, self.polling_panel.is_running()),
+            (ActiveTest::Stutter, self.stutter_panel.is_running()),
+            (ActiveTest::ClickResponse, click),
+            (ActiveTest::ClickSticky, click),
+            (ActiveTest::LiftOff, click),
+            (ActiveTest::ScrollWheel, self.scroll_panel.is_running()),
+            (ActiveTest::Dpi, self.dpi_panel.is_running()),
+            (ActiveTest::AngleSnap, accel),
+            (ActiveTest::Acceleration, accel),
+            (
+                ActiveTest::DoubleClick,
+                self.double_click_panel.is_running(),
+            ),
+            (ActiveTest::Jitter, self.jitter_panel.is_running()),
+        ]
+        .into_iter()
+        .filter_map(|(page, running)| running.then_some(page))
+        .collect()
     }
 
     /// Collect current settings and update config
@@ -676,6 +706,13 @@ impl MouseTestKitApp {
                     .color(egui::Color32::YELLOW),
                 );
             }
+            if let Some(hint) = &status.permission_hint {
+                ui.label(
+                    egui::RichText::new(hint)
+                        .size(11.0)
+                        .color(egui::Color32::YELLOW),
+                );
+            }
             if let Some(bridge) = self.input_bridge.as_mut() {
                 ui.add_space(8.0);
                 device_picker(ui, bridge);
@@ -867,6 +904,64 @@ struct InputSourceStatus {
     detail: String,
     /// The measured device is not the one moving the pointer.
     warning: Option<String>,
+    /// Some mouse could not be opened for lack of permission: how to fix it.
+    permission_hint: Option<String>,
+}
+
+/// Shown when a mouse-capable device could not be opened (Linux: the user
+/// is not in the `input` group). Another device being readable says nothing
+/// about the mouse being tested, so this is shown whenever one is denied.
+fn permission_hint(unreadable: usize) -> Option<String> {
+    (unreadable > 0).then(|| {
+        format!(
+            "{unreadable} mouse device(s) cannot be read: permission denied. If the mouse you are testing is one of them, add your user to the 'input' group (sudo usermod -aG input $USER) and log in again."
+        )
+    })
+}
+
+/// Shown on a test's page when some of the measured mouse's reports were
+/// lost while the test ran.
+const LOST_REPORTS_WARNING: &str = "Some reports from the mouse were lost during this test: the computer did not read them in time (it was busy). A stutter, gap or missed click at that moment may not be the mouse's fault - run the test again to confirm.";
+
+/// Pages whose running test takes the mouse's input whichever page is
+/// shown; every other test only sees input while its page is shown.
+const BACKGROUND_PAGES: [ActiveTest; 2] = [ActiveTest::AutoTest, ActiveTest::Jitter];
+
+/// Remembers which test pages lost some of the measured mouse's reports
+/// (the system dropped them, see `InputBridge::gaps`) during their test's
+/// run, until that test runs again.
+#[derive(Default)]
+struct LostReportsNotice {
+    /// Pages whose test was running in the last frame.
+    was_running: Vec<ActiveTest>,
+    pages: Vec<ActiveTest>,
+}
+
+impl LostReportsNotice {
+    /// Update once per frame with the pages whose test is running, the page
+    /// shown and whether reports were lost this frame. Only a running test
+    /// that took this frame's input is flagged: the one on the page shown,
+    /// and Auto Diagnostics and Jitter, which take input on any page. Old
+    /// results on a page whose test is not running are left alone.
+    fn update(&mut self, running: &[ActiveTest], shown: ActiveTest, lost: bool) {
+        // A test that starts again starts without the notice
+        let was_running = std::mem::replace(&mut self.was_running, running.to_vec());
+        self.pages
+            .retain(|page| was_running.contains(page) || !running.contains(page));
+        if !lost {
+            return;
+        }
+        for &page in running {
+            let took_input = page == shown || BACKGROUND_PAGES.contains(&page);
+            if took_input && !self.pages.contains(&page) {
+                self.pages.push(page);
+            }
+        }
+    }
+
+    fn applies_to(&self, page: ActiveTest) -> bool {
+        self.pages.contains(&page)
+    }
 }
 
 const FRAMEWORK_HEADLINE: &str = "FRAMEWORK (REDUCED ACCURACY)";
@@ -887,8 +982,10 @@ fn input_source_status(bridge: Option<&InputBridge>) -> InputSourceStatus {
             raw: false,
             detail: detail.to_string(),
             warning: None,
+            permission_hint: None,
         };
     };
+    let hint = permission_hint(bridge.unreadable_mice());
     if let Some(device) = bridge.active_device() {
         let detail = if bridge.choice() == DeviceChoice::Auto {
             format!(
@@ -903,6 +1000,7 @@ fn input_source_status(bridge: Option<&InputBridge>) -> InputSourceStatus {
             raw: true,
             detail,
             warning: pointer_mismatch_warning(bridge),
+            permission_hint: hint,
         };
     }
     let detail = if bridge.choice() == DeviceChoice::Pointer {
@@ -926,6 +1024,7 @@ fn input_source_status(bridge: Option<&InputBridge>) -> InputSourceStatus {
         raw: false,
         detail,
         warning: None,
+        permission_hint: hint,
     }
 }
 
@@ -998,6 +1097,13 @@ impl eframe::App for MouseTestKitApp {
             }
             None => Vec::new(),
         };
+        let reports_lost = self
+            .input_bridge
+            .as_ref()
+            .is_some_and(|bridge| !bridge.gaps().is_empty());
+        let running_pages = self.running_pages();
+        self.lost_reports
+            .update(&running_pages, self.active_test, reports_lost);
         // Raw input is used only while a device is actually being measured;
         // until then (and when pointer input is chosen) panels use framework
         // input and say so.
@@ -1059,6 +1165,14 @@ impl eframe::App for MouseTestKitApp {
                         );
                         ui.add_space(8.0);
                     }
+                }
+                if self.lost_reports.applies_to(self.active_test) {
+                    ui.label(
+                        egui::RichText::new(LOST_REPORTS_WARNING)
+                            .size(11.0)
+                            .color(egui::Color32::YELLOW),
+                    );
+                    ui.add_space(8.0);
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| match self.active_test {
                     ActiveTest::Dashboard => self.render_dashboard(ui),
@@ -1208,6 +1322,82 @@ mod tests {
             "{}",
             status.detail
         );
+    }
+
+    #[test]
+    fn a_denied_mouse_gets_the_group_hint_even_when_another_device_is_readable() {
+        // Not in the 'input' group: a virtual device the desktop lets every
+        // user open is readable, the real mouse is not
+        let (mut bridge, sender) = InputBridge::for_test();
+        sender
+            .send(device(1, "Virtual pointer", "event20"))
+            .unwrap();
+        sender.send(BridgeMessage::Unreadable(1)).unwrap();
+        bridge.poll();
+        let status = input_source_status(Some(&bridge));
+        let hint = status.permission_hint.expect("hint shown");
+        assert!(hint.contains("usermod -aG input"), "{}", hint);
+        // Still shown once that device is being measured
+        sender.send(press(1)).unwrap();
+        bridge.poll();
+        assert!(input_source_status(Some(&bridge)).permission_hint.is_some());
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        render_dashboard(&mut app);
+
+        // Every mouse readable: no hint
+        let (mut bridge, sender) = InputBridge::for_test();
+        sender.send(device(2, "USB Mouse", "event5")).unwrap();
+        sender.send(BridgeMessage::Unreadable(0)).unwrap();
+        bridge.poll();
+        assert!(input_source_status(Some(&bridge)).permission_hint.is_none());
+    }
+
+    #[test]
+    fn lost_reports_are_noted_on_the_running_test_until_the_next_run() {
+        use ActiveTest::{AutoTest, Dashboard, Dpi, Stutter};
+        let mut notice = LostReportsNotice::default();
+        // Lost while nothing runs: not about any test
+        notice.update(&[], Stutter, true);
+        assert!(!notice.applies_to(Stutter));
+        // A clean run is never flagged
+        for _ in 0..100 {
+            notice.update(&[Stutter], Stutter, false);
+        }
+        assert!(!notice.applies_to(Stutter));
+        // Lost during a Stutter run with Auto Diagnostics going as well
+        notice.update(&[AutoTest, Stutter], Stutter, true);
+        notice.update(&[], Stutter, false);
+        assert!(notice.applies_to(Stutter));
+        assert!(notice.applies_to(AutoTest));
+        assert!(!notice.applies_to(Dpi));
+        // Kept after the run ends, cleared when that test runs again
+        notice.update(&[Stutter], Stutter, false);
+        assert!(!notice.applies_to(Stutter));
+        assert!(notice.applies_to(AutoTest));
+        notice.update(&[AutoTest], AutoTest, false);
+        assert!(!notice.applies_to(AutoTest));
+        // Leaving a running test's page and coming back is not a new run
+        notice.update(&[Stutter], Stutter, true);
+        notice.update(&[Stutter], Dashboard, false);
+        notice.update(&[Stutter], Stutter, false);
+        assert!(notice.applies_to(Stutter));
+    }
+
+    #[test]
+    fn lost_reports_are_only_noted_on_tests_that_took_the_input() {
+        use ActiveTest::{AutoTest, Jitter, PollingRate, Stutter};
+        let mut notice = LostReportsNotice::default();
+        // Auto Diagnostics runs while the user looks at the Stutter page,
+        // whose test is not running: its earlier results are not affected
+        notice.update(&[AutoTest], Stutter, true);
+        assert!(notice.applies_to(AutoTest));
+        assert!(!notice.applies_to(Stutter));
+        // A jitter sample takes input on any page; a polling run whose page
+        // is not shown saw none of it
+        notice.update(&[AutoTest, PollingRate, Jitter], Stutter, true);
+        assert!(notice.applies_to(Jitter));
+        assert!(!notice.applies_to(PollingRate));
+        assert!(!notice.applies_to(Stutter));
     }
 
     #[test]

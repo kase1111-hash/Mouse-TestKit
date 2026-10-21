@@ -12,6 +12,7 @@
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::diagnostics::{AutoTest, Config, Phase, Report, Severity};
+use mouse_testkit::types::InputBatch;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -61,9 +62,12 @@ pub fn run() {
     let mut last_phase: Option<Phase> = None;
     let mut last_print = Instant::now();
     let mut announced: usize = 0;
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 ..
@@ -76,8 +80,16 @@ pub fn run() {
 
         // One move per hardware report (X and Y merged), each with its own
         // device timestamp.
-        for timed in input::fetch_timed_events(&mut device) {
-            engine.feed(secs(timed.time), &timed.event);
+        match input::read_events(&mut device, terminal::READ_WAIT) {
+            Ok(batch) => feed_batch(&mut engine, &batch, &secs, &mut gaps),
+            Err(_) => {
+                // The step in progress did not see everything: the engine
+                // says so instead of judging it, and the run stops
+                device_lost = true;
+                engine.input_lost();
+                engine.abort();
+                break;
+            }
         }
 
         engine.tick(secs(Instant::now()));
@@ -129,8 +141,6 @@ pub fn run() {
             }
             last_print = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
 
     drop(_guard);
@@ -141,7 +151,29 @@ pub fn run() {
         None => println!("\nNo report produced."),
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
+}
+
+/// Feed one read of the mouse to the engine; a gap left by dropped reports
+/// is passed on first (and counted) so nothing is judged across it.
+fn feed_batch(
+    engine: &mut AutoTest,
+    batch: &InputBatch,
+    secs: &impl Fn(Instant) -> f64,
+    gaps: &mut usize,
+) {
+    if batch.lost_data {
+        *gaps += 1;
+        let resumed = batch.events.first().map_or_else(Instant::now, |e| e.time);
+        engine.input_gap(secs(resumed));
+    }
+    for timed in &batch.events {
+        engine.feed(secs(timed.time), &timed.event);
+    }
 }
 
 fn progress_bar(progress: f64, width: usize) -> String {
@@ -255,6 +287,8 @@ fn print_report(report: &Report, total_phases: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mouse_testkit::analysis::diagnostics::Verdict;
+    use mouse_testkit::types::{MouseEvent, TimedEvent};
 
     #[test]
     fn test_secs_since_handles_events_before_the_epoch() {
@@ -265,6 +299,64 @@ mod tests {
             assert!((secs_since(epoch, earlier) + 0.005).abs() < 1e-9);
         }
         assert_eq!(secs_since(epoch, epoch), 0.0);
+    }
+
+    /// Stutters the Movement step counts in 4 s of fast 1000 Hz movement
+    /// with the reports of 30 ms missing at 1.5 s, read as two batches; the
+    /// second is marked as following dropped reports when `marked`.
+    fn movement_with_a_hole(marked: bool) -> (usize, usize) {
+        let cfg = Config::default();
+        let mut engine = AutoTest::new(cfg.clone());
+        let epoch = Instant::now();
+        let secs = |t: Instant| secs_since(epoch, t);
+        engine.start(0.0);
+        let rest_end = cfg.rest_settle_secs + cfg.rest_secs;
+        engine.tick(rest_end);
+        assert_eq!(engine.current_phase(), Some(Phase::Movement));
+
+        let at = |ms: u64| epoch + Duration::from_secs_f64(rest_end) + Duration::from_millis(ms);
+        let report = |ms: u64| TimedEvent {
+            time: at(ms),
+            event: MouseEvent::Move { dx: 4, dy: 1 },
+        };
+        let before = InputBatch {
+            events: (1..1500).map(report).collect(),
+            lost_data: false,
+        };
+        let after = InputBatch {
+            events: (1530..5500).map(report).collect(),
+            lost_data: marked,
+        };
+        let mut gaps = 0;
+        feed_batch(&mut engine, &before, &secs, &mut gaps);
+        feed_batch(&mut engine, &after, &secs, &mut gaps);
+        assert_ne!(engine.current_phase(), Some(Phase::Movement));
+        engine.abort();
+        let report = engine.report().expect("aborted runs report");
+        (report.metrics.stutter_count, gaps)
+    }
+
+    #[test]
+    fn test_reports_dropped_by_the_system_are_not_a_stutter() {
+        assert_eq!(movement_with_a_hole(true), (0, 1));
+        // The same hole sent by the mouse itself is still a stutter
+        assert_eq!(movement_with_a_hole(false), (1, 0));
+    }
+
+    #[test]
+    fn test_a_mouse_lost_mid_run_is_never_healthy() {
+        // Unplugged during the rest step, which then saw nothing at all
+        let mut engine = AutoTest::new(Config::default());
+        engine.start(0.0);
+        engine.tick(4.0);
+        engine.input_lost();
+        engine.abort();
+        let report = engine.report().unwrap();
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.title == "Input lost during the step"));
     }
 
     #[test]

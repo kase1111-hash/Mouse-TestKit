@@ -706,6 +706,27 @@ impl AutoTest {
         );
     }
 
+    /// Reports were lost just before the next event fed: the reader fell
+    /// behind and the system dropped them (the mouse stayed connected; see
+    /// `types::InputBatch::lost_data`). Nothing is judged across the gap:
+    /// the next motion report starts a new interval, presses waiting for
+    /// their release and the last press and release times are forgotten (a
+    /// release restored after the gap carries the time of the drop, not its
+    /// own), and a lift step in progress watches again from `t`, the time
+    /// of the first event after the gap.
+    pub fn input_gap(&mut self, t: f64) {
+        self.last_move = None;
+        for st in &mut self.buttons {
+            st.pressed_at = None;
+            st.last_press = None;
+            st.last_release = None;
+        }
+        if self.lift.is_some() {
+            let (dpi, _) = self.lift_dpi();
+            self.lift = Some(LiftDetector::new(dpi).watching_from(t));
+        }
+    }
+
     /// Advance time without an event. Call regularly (each frame / loop).
     pub fn tick(&mut self, now: f64) {
         self.now = self.now.max(now);

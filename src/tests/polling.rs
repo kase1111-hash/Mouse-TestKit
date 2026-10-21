@@ -41,14 +41,16 @@ pub fn run() -> bool {
     let mut stats = PollingStats::new();
     let mut last_print = Instant::now();
     let mut reports: Vec<(Instant, i32, i32)> = Vec::new();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
     loop {
-        // Check for quit key
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // Check for quit key (the wait happens on the mouse below)
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 ..
@@ -61,7 +63,17 @@ pub fn run() -> bool {
         // Read mouse events. Each report keeps the time the device sent it;
         // stamping at read time would bunch a whole batch together and turn
         // a 2-8 kHz mouse into millions of Hz.
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data {
+            // Reports were dropped: the interval across the hole is not a
+            // poll, so the rate window starts again after it
+            gaps += 1;
+            reports.clear();
+        }
+        for timed in batch.events {
             if let MouseEvent::Move { dx, dy } = timed.event {
                 reports.push((timed.time, dx, dy));
             }
@@ -115,6 +127,10 @@ pub fn run() -> bool {
         println!("No rate measured: move the mouse quickly and continuously.");
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     true
 }
