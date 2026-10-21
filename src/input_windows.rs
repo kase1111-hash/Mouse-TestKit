@@ -37,10 +37,9 @@ const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 // Re-export canonical types from the shared library crate.
 pub use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
 
-/// Represents a connected mouse device on Windows
+/// A selected mouse on Windows: its reports arrive from the raw-input thread
+/// started by [`select_mouse`].
 pub struct MouseDevice {
-    pub name: String,
-    pub handle: usize,
     receiver: Receiver<RawMouseData>,
     /// Wheel movement not yet adding up to a whole notch (high-resolution
     /// wheels report fractions of `WHEEL_DELTA`).
@@ -120,15 +119,6 @@ impl MouseDevice {
         }
 
         events
-    }
-
-    /// Fetch pending events (non-blocking)
-    pub fn fetch_events(&mut self) -> Result<Vec<MouseEvent>, std::io::Error> {
-        Ok(self
-            .fetch_timed_events()
-            .into_iter()
-            .map(|timed| timed.event)
-            .collect())
     }
 }
 
@@ -301,8 +291,6 @@ pub fn select_mouse() -> Option<MouseDevice> {
     });
 
     Some(MouseDevice {
-        name: selected.name.clone(),
-        handle: selected.handle,
         receiver,
         wheel_remainder: 0,
         _thread_handle: Some(thread_handle),
@@ -439,17 +427,5 @@ unsafe fn process_raw_input(
         if data.dx != 0 || data.dy != 0 || data.button_flags != 0 {
             let _ = sender.send(data);
         }
-    }
-}
-
-/// Parse a raw event into a MouseEvent (compatibility with evdev API)
-pub fn parse_event(data: &RawMouseData) -> Option<MouseEvent> {
-    if data.dx != 0 || data.dy != 0 {
-        Some(MouseEvent::Move {
-            dx: data.dx,
-            dy: data.dy,
-        })
-    } else {
-        None
     }
 }
