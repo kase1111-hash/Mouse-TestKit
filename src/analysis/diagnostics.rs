@@ -265,18 +265,13 @@ pub struct Config {
     pub rest_spread_windows: usize,
     /// A direction change within this many ms of the previous notch is a skip.
     pub scroll_reversal_ms: f64,
-    /// No longer used: lift-off jumps are found with the rules in
-    /// `analysis::liftoff`. Kept so existing code that sets it compiles.
-    pub lift_idle_ms: f64,
-    /// No longer used (see `lift_idle_ms`): a fixed count limit on one
-    /// report missed jumps spread over many reports and flagged ordinary
-    /// starts at high DPI or 125 Hz.
-    pub lift_jump_counts: f64,
-    /// Whether to run the lift-off phase at all.
+    /// Whether to run the lift-off phase at all. Lift-off jumps are judged
+    /// with the rules in `analysis::liftoff`.
     pub include_lift: bool,
     /// The mouse's DPI, used to turn lift-off motion into mm. `None` when
-    /// unknown: `liftoff::DEFAULT_DPI` (800) is assumed and the findings
-    /// say so.
+    /// unknown: `liftoff::DEFAULT_DPI` (800) is assumed, the findings say
+    /// so, and jumps found then make the step inconclusive rather than a
+    /// warning, since at a higher DPI they may be ordinary set-down shifts.
     pub dpi: Option<f64>,
 }
 
@@ -311,8 +306,6 @@ impl Default for Config {
             timing_jitter_ms: 0.5,
             rest_spread_windows: 3,
             scroll_reversal_ms: 60.0,
-            lift_idle_ms: 80.0,
-            lift_jump_counts: 50.0,
             include_lift: true,
             dpi: None,
         }
@@ -1469,6 +1462,22 @@ impl AutoTest {
                     max_mm, threshold, dpi_note
                 ),
             ),
+            // Without the DPI the counts are no distance: the 63 counts that
+            // are 2 mm at the assumed 800 DPI are 0.5 mm at 3200 DPI, which
+            // an ordinary set-down can shift the mouse. Such jumps leave the
+            // step inconclusive instead of raising a warning.
+            LiftVerdict::Jumps if assumed => {
+                self.untested.push(Phase::Lift);
+                self.push(
+                    Severity::Info,
+                    Phase::Lift,
+                    "Possible cursor jumps on lift",
+                    format!(
+                        "{} movements after a pause carried the cursor more than {} and then stopped (largest {:.1} mm). The mouse's DPI was not given: if it is set to {:.0} DPI or lower, the sensor keeps tracking while lifted (lower the lift-off distance or use a plainer surface); at a higher DPI the same counts are a shorter distance and may be ordinary set-down shifts. Run the Lift-Off Jump test with the mouse's DPI set to tell them apart.",
+                        n, threshold, max_mm, dpi
+                    ),
+                );
+            }
             LiftVerdict::Jumps => self.push(
                 Severity::Warning,
                 Phase::Lift,
@@ -1991,7 +2000,10 @@ mod tests {
 
     #[test]
     fn test_lift_jumps_flagged() {
-        let mut sim = Sim::new(cfg());
+        let mut sim = Sim::new(Config {
+            dpi: Some(800.0),
+            ..cfg()
+        });
         sim.good_rest();
         sim.good_movement();
         sim.good_clicks();
@@ -2010,7 +2022,7 @@ mod tests {
         assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
         assert!((r.metrics.lift_max_jump_counts - 100.0).abs() < 1e-9);
         assert!((r.metrics.lift_max_jump_mm - 3.175).abs() < 1e-9);
-        assert!(r.metrics.lift_dpi_assumed);
+        assert!(!r.metrics.lift_dpi_assumed);
         assert!(r
             .findings
             .iter()
@@ -2022,7 +2034,10 @@ mod tests {
     fn test_lift_jump_spread_over_many_reports_is_flagged() {
         // A set-down jump of 200 counts (6.4 mm at 800 DPI) delivered at
         // 1000 Hz as 10 counts per report. No single report is large.
-        let mut sim = sim_at_lift(cfg());
+        let mut sim = sim_at_lift(Config {
+            dpi: Some(800.0),
+            ..cfg()
+        });
         for _ in 0..3 {
             sim.idle(0.6);
             sim.set_down(&[(10, 0); 20], 1.0);
@@ -2088,12 +2103,15 @@ mod tests {
             }
             sim.idle(10.5);
         };
-        let mut sim = sim_at_lift(cfg());
+        let mut sim = sim_at_lift(Config {
+            dpi: Some(800.0),
+            ..cfg()
+        });
         lifts(&mut sim);
         let r = sim.at.report().unwrap();
         assert_eq!(r.metrics.lift_jumps, 3);
         assert_eq!(lift_finding(r).title, "Cursor jumps on lift");
-        assert!(lift_finding(r).detail.contains("800 DPI is assumed"));
+        assert!(!lift_finding(r).detail.contains("assumed"));
 
         let mut sim = sim_at_lift(Config {
             dpi: Some(1600.0),
@@ -2110,6 +2128,45 @@ mod tests {
         assert!(!lift_finding(r).detail.contains("assumed"));
         assert!(!r.metrics.lift_dpi_assumed);
         assert_eq!(r.metrics.lift_dpi, 1600.0);
+    }
+
+    #[test]
+    fn test_lift_jumps_with_dpi_unknown_are_inconclusive_not_a_warning() {
+        // A healthy 3200 DPI mouse at 1000 Hz shifts 0.6 mm (75 counts) on
+        // each set-down. Taken for 800 DPI that is 2.4 mm, a "jump"; without
+        // the DPI the step cannot tell, so it must not raise a warning.
+        let lifts = |sim: &mut Sim| {
+            for _ in 0..3 {
+                sim.idle(0.8);
+                sim.set_down(&[(3, 0); 25], 1.0);
+                sim.idle(1.0);
+                sim.move_for(0.6, 1.0);
+            }
+            sim.idle(10.5);
+        };
+        let mut sim = sim_at_lift(cfg());
+        lifts(&mut sim);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
+        assert_eq!(r.count(Severity::Warning), 0, "{:?}", titles(r));
+        let f = lift_finding(r);
+        assert_eq!(
+            (f.severity, f.title.as_str()),
+            (Severity::Info, "Possible cursor jumps on lift")
+        );
+        assert!(f.detail.contains("DPI was not given"), "{}", f.detail);
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+
+        // With its DPI given, the same motion is a set of clean set-downs.
+        let mut sim = sim_at_lift(Config {
+            dpi: Some(3200.0),
+            ..cfg()
+        });
+        lifts(&mut sim);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 0, "{:?}", titles(r));
+        assert_eq!(lift_finding(r).title, "No cursor jumps on lift");
+        assert_eq!(r.verdict, Verdict::Healthy, "{:?}", titles(r));
     }
 
     #[test]
