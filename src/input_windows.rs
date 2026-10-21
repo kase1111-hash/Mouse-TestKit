@@ -16,6 +16,7 @@ use std::mem;
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Instant;
 
 use winapi::shared::hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
 use winapi::shared::minwindef::UINT;
@@ -30,14 +31,19 @@ use winapi::um::winuser::{
     RAWINPUTDEVICELIST, RIDEV_INPUTSINK, RIDI_DEVICENAME, RIM_TYPEMOUSE,
 };
 
-// Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseButton, MouseEvent};
+/// `RAWMOUSE::usFlags` bit for absolute coordinates.
+const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 
-/// Represents a connected mouse device on Windows
+// Re-export canonical types from the shared library crate.
+pub use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
+
+/// A selected mouse on Windows: its reports arrive from the raw-input thread
+/// started by [`select_mouse`].
 pub struct MouseDevice {
-    pub name: String,
-    pub handle: usize,
     receiver: Receiver<RawMouseData>,
+    /// Wheel movement not yet adding up to a whole notch (high-resolution
+    /// wheels report fractions of `WHEEL_DELTA`).
+    wheel_remainder: i32,
     _thread_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -48,56 +54,78 @@ pub struct RawMouseData {
     pub dy: i32,
     pub button_flags: u16,
     pub button_data: u16,
+    /// When the raw-input thread received the report.
+    pub time: Instant,
 }
 
+/// Button transition flags in `RAWMOUSE::usButtonFlags`, in event order.
+const BUTTON_FLAGS: [(u16, MouseButton, bool); 10] = [
+    (0x0001, MouseButton::Left, true),
+    (0x0002, MouseButton::Left, false),
+    (0x0004, MouseButton::Right, true),
+    (0x0008, MouseButton::Right, false),
+    (0x0010, MouseButton::Middle, true),
+    (0x0020, MouseButton::Middle, false),
+    (0x0040, MouseButton::Side, true),
+    (0x0080, MouseButton::Side, false),
+    (0x0100, MouseButton::Extra, true),
+    (0x0200, MouseButton::Extra, false),
+];
+/// RI_MOUSE_WHEEL: vertical wheel movement in `usButtonData`.
+const RI_MOUSE_WHEEL: u16 = 0x0400;
+/// One wheel notch.
+const WHEEL_DELTA: i32 = 120;
+
 impl MouseDevice {
-    /// Fetch pending events (non-blocking)
-    pub fn fetch_events(&mut self) -> Result<Vec<MouseEvent>, std::io::Error> {
+    /// Fetch pending events (non-blocking), each stamped with the time the
+    /// raw-input thread received it.
+    pub fn fetch_timed_events(&mut self) -> Vec<TimedEvent> {
         let mut events = Vec::new();
 
         while let Ok(data) = self.receiver.try_recv() {
-            // Convert raw data to MouseEvents
+            let mut push = |event| {
+                events.push(TimedEvent {
+                    time: data.time,
+                    event,
+                })
+            };
             if data.dx != 0 || data.dy != 0 {
-                events.push(MouseEvent::Move {
+                push(MouseEvent::Move {
                     dx: data.dx,
                     dy: data.dy,
                 });
             }
-
-            // Check button flags
-            // RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
-            if data.button_flags & 0x0001 != 0 {
-                events.push(MouseEvent::ButtonPress(MouseButton::Left));
+            for (flag, button, pressed) in BUTTON_FLAGS {
+                if data.button_flags & flag != 0 {
+                    push(if pressed {
+                        MouseEvent::ButtonPress(button)
+                    } else {
+                        MouseEvent::ButtonRelease(button)
+                    });
+                }
             }
-            // RI_MOUSE_LEFT_BUTTON_UP = 0x0002
-            if data.button_flags & 0x0002 != 0 {
-                events.push(MouseEvent::ButtonRelease(MouseButton::Left));
-            }
-            // RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004
-            if data.button_flags & 0x0004 != 0 {
-                events.push(MouseEvent::ButtonPress(MouseButton::Right));
-            }
-            // RI_MOUSE_RIGHT_BUTTON_UP = 0x0008
-            if data.button_flags & 0x0008 != 0 {
-                events.push(MouseEvent::ButtonRelease(MouseButton::Right));
-            }
-            // RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010
-            if data.button_flags & 0x0010 != 0 {
-                events.push(MouseEvent::ButtonPress(MouseButton::Middle));
-            }
-            // RI_MOUSE_MIDDLE_BUTTON_UP = 0x0020
-            if data.button_flags & 0x0020 != 0 {
-                events.push(MouseEvent::ButtonRelease(MouseButton::Middle));
-            }
-            // RI_MOUSE_WHEEL = 0x0400
-            if data.button_flags & 0x0400 != 0 {
-                let delta = data.button_data as i16 as i32 / 120; // WHEEL_DELTA
-                events.push(MouseEvent::Scroll { delta });
+            if data.button_flags & RI_MOUSE_WHEEL != 0 {
+                let delta = data.button_data as i16 as i32;
+                if delta.signum() != self.wheel_remainder.signum() {
+                    self.wheel_remainder = 0;
+                }
+                self.wheel_remainder += delta;
+                let notches = self.wheel_remainder / WHEEL_DELTA;
+                if notches != 0 {
+                    self.wheel_remainder -= notches * WHEEL_DELTA;
+                    push(MouseEvent::Scroll { delta: notches });
+                }
             }
         }
 
-        Ok(events)
+        events
     }
+}
+
+/// Fetch pending events with the time each was received (same signature as
+/// the Linux `input::fetch_timed_events`, so CLI tests need no `cfg`).
+pub fn fetch_timed_events(device: &mut MouseDevice) -> Vec<TimedEvent> {
+    device.fetch_timed_events()
 }
 
 /// Device info for enumeration
@@ -256,21 +284,23 @@ pub fn select_mouse() -> Option<MouseDevice> {
 
     // Create input receiver thread
     let (sender, receiver) = mpsc::channel();
+    let device_handle = selected.handle;
 
     let thread_handle = thread::spawn(move || {
-        run_input_loop(sender);
+        run_input_loop(sender, device_handle);
     });
 
     Some(MouseDevice {
-        name: selected.name.clone(),
-        handle: selected.handle,
         receiver,
+        wheel_remainder: 0,
         _thread_handle: Some(thread_handle),
     })
 }
 
-/// Run the Raw Input message loop in a background thread
-fn run_input_loop(sender: Sender<RawMouseData>) {
+/// Run the Raw Input message loop in a background thread, forwarding reports
+/// from the device with the given raw-input handle only (Raw Input delivers
+/// every mouse and touchpad to the same window).
+fn run_input_loop(sender: Sender<RawMouseData>, device_handle: usize) {
     unsafe {
         // Register window class
         let class_name: Vec<u16> = "MouseTrapInput\0".encode_utf16().collect();
@@ -336,7 +366,7 @@ fn run_input_loop(sender: Sender<RawMouseData>) {
             }
 
             if msg.message == WM_INPUT {
-                process_raw_input(msg.lParam as HRAWINPUT, &sender);
+                process_raw_input(msg.lParam as HRAWINPUT, &sender, device_handle);
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -345,7 +375,12 @@ fn run_input_loop(sender: Sender<RawMouseData>) {
 }
 
 /// Process a WM_INPUT message
-unsafe fn process_raw_input(handle: HRAWINPUT, sender: &Sender<RawMouseData>) {
+unsafe fn process_raw_input(
+    handle: HRAWINPUT,
+    sender: &Sender<RawMouseData>,
+    device_handle: usize,
+) {
+    let time = Instant::now();
     let mut size: UINT = 0;
 
     GetRawInputData(
@@ -375,31 +410,22 @@ unsafe fn process_raw_input(handle: HRAWINPUT, sender: &Sender<RawMouseData>) {
 
     let raw = &*(buffer.as_ptr() as *const RAWINPUT);
 
-    if raw.header.dwType == RIM_TYPEMOUSE {
+    if raw.header.dwType == RIM_TYPEMOUSE && raw.header.hDevice as usize == device_handle {
         let mouse = raw.data.mouse();
+        // Absolute reports (tablets, remote desktop) carry positions, not counts.
+        let relative = mouse.usFlags & MOUSE_MOVE_ABSOLUTE == 0;
 
         let data = RawMouseData {
-            dx: mouse.lLastX,
-            dy: mouse.lLastY,
+            dx: if relative { mouse.lLastX } else { 0 },
+            dy: if relative { mouse.lLastY } else { 0 },
             button_flags: mouse.usButtonFlags,
             button_data: mouse.usButtonData,
+            time,
         };
 
         // Only send if there's actual data
         if data.dx != 0 || data.dy != 0 || data.button_flags != 0 {
             let _ = sender.send(data);
         }
-    }
-}
-
-/// Parse a raw event into a MouseEvent (compatibility with evdev API)
-pub fn parse_event(data: &RawMouseData) -> Option<MouseEvent> {
-    if data.dx != 0 || data.dy != 0 {
-        Some(MouseEvent::Move {
-            dx: data.dx,
-            dy: data.dy,
-        })
-    } else {
-        None
     }
 }

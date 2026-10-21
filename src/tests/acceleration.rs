@@ -1,8 +1,15 @@
 //! Acceleration Detection
-//! Tests for unwanted mouse acceleration curves
+//! Tests for unwanted acceleration in the mouse's sensor/firmware
+//!
+//! The raw counts read here come before the OS applies pointer acceleration,
+//! so this test covers sensor/firmware acceleration only and says so.
 
 use crate::terminal;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use mouse_testkit::analysis::acceleration::{
+    ACCEL_TOLERANCE, MIN_SPEED_RATIO, MIN_STROKES_PER_GROUP,
+};
+use mouse_testkit::analysis::polling::median_in_place;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -11,15 +18,24 @@ use crate::input::{self, MouseEvent};
 #[cfg(target_os = "windows")]
 use crate::input_windows::{self as input, MouseEvent};
 
-pub fn run() {
+/// A recorded pass needs at least this many counts to be a deliberate movement.
+const MIN_PASS_COUNTS: f64 = 100.0;
+
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
+pub fn run() -> bool {
     println!("\n=== Acceleration Detection ===");
-    println!("This test detects if your mouse has acceleration enabled.");
+    println!("This test detects acceleration in the mouse's sensor or firmware.");
+    println!("It reads raw counts, before the OS applies pointer acceleration, so OS");
+    println!("acceleration (Windows 'Enhance pointer precision', libinput) is NOT covered.");
     println!("\nInstructions:");
     println!("  1. Move mouse SLOWLY across the same distance");
     println!("  2. Press SPACE to record slow movement");
     println!("  3. Move mouse QUICKLY across the same distance");
     println!("  4. Press SPACE to record fast movement");
-    println!("  5. Repeat for multiple samples\n");
+    println!("  5. Record at least {} of each", MIN_STROKES_PER_GROUP);
+    println!("Press SPACE as soon as a pass reaches its end mark. Sliding the mouse");
+    println!("back to the start first is fine: only the last movement is recorded.\n");
     println!("With acceleration: fast movement = more counts");
     println!("Without acceleration: same distance = same counts\n");
 
@@ -28,16 +44,14 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
     #[cfg(target_os = "linux")]
     device.grab().ok();
 
-    let mut total_counts: i64 = 0;
-    let _total_time: Duration = Duration::ZERO;
-    let mut move_start: Option<Instant> = None;
+    let mut pass = Pass::default();
     let mut slow_samples: Vec<AccelSample> = Vec::new();
     let mut fast_samples: Vec<AccelSample> = Vec::new();
     let mut last_print = Instant::now();
@@ -50,63 +64,41 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
+            if let Some(code) = event::read().ok().and_then(|e| pressed_key(&e)) {
+                match code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('s') => {
                         recording_slow = true;
-                        total_counts = 0;
-                        move_start = None;
+                        pass = Pass::default();
                         println!("\r\x1B[KMode: SLOW - Move slowly and press SPACE");
                     }
                     KeyCode::Char('f') => {
                         recording_slow = false;
-                        total_counts = 0;
-                        move_start = None;
+                        pass = Pass::default();
                         println!("\r\x1B[KMode: FAST - Move quickly and press SPACE");
                     }
                     KeyCode::Char('r') => {
-                        total_counts = 0;
-                        move_start = None;
+                        pass = Pass::default();
                         println!("\r\x1B[KReset. Move and press SPACE to record.");
                     }
                     KeyCode::Char(' ') => {
-                        if total_counts.abs() > 100 {
-                            let time = move_start.map(|s| s.elapsed()).unwrap_or(Duration::ZERO);
-                            let speed = if time.as_secs_f64() > 0.0 {
-                                total_counts.abs() as f64 / time.as_secs_f64()
+                        if let Some(sample) = pass.sample() {
+                            let label = if recording_slow { "Slow" } else { "Fast" };
+                            let list = if recording_slow {
+                                &mut slow_samples
                             } else {
-                                0.0
+                                &mut fast_samples
                             };
-
-                            let sample = AccelSample {
-                                counts: total_counts.abs(),
-                                time,
-                                speed,
-                            };
-
-                            if recording_slow {
-                                slow_samples.push(sample);
-                                println!(
-                                    "\r\x1B[KSlow #{}: {} counts in {:.2}s ({:.0} counts/s)",
-                                    slow_samples.len(),
-                                    total_counts.abs(),
-                                    time.as_secs_f64(),
-                                    speed
-                                );
-                            } else {
-                                fast_samples.push(sample);
-                                println!(
-                                    "\r\x1B[KFast #{}: {} counts in {:.2}s ({:.0} counts/s)",
-                                    fast_samples.len(),
-                                    total_counts.abs(),
-                                    time.as_secs_f64(),
-                                    speed
-                                );
-                            }
-
-                            total_counts = 0;
-                            move_start = None;
+                            list.push(sample);
+                            println!(
+                                "\r\x1B[K{} #{}: {:.0} counts in {:.2}s ({:.0} counts/s)",
+                                label,
+                                list.len(),
+                                sample.counts,
+                                sample.secs,
+                                sample.speed
+                            );
+                            pass = Pass::default();
                         } else {
                             println!("\r\x1B[KNot enough movement. Try again.");
                         }
@@ -116,30 +108,20 @@ pub fn run() {
             }
         }
 
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                #[cfg(target_os = "linux")]
-                let parsed = input::parse_event(&ev);
-                #[cfg(target_os = "windows")]
-                let parsed = Some(ev);
-
-                if let Some(MouseEvent::Move { dx, .. }) = parsed {
-                    if dx != 0 {
-                        if move_start.is_none() {
-                            move_start = Some(Instant::now());
-                        }
-                        total_counts += dx.abs() as i64;
-                    }
-                }
+        // One Move per report, stamped when the device sent it, so the pass
+        // duration is first to last movement (not until SPACE is pressed).
+        for timed in input::fetch_timed_events(&mut device) {
+            if let MouseEvent::Move { dx, dy } = timed.event {
+                pass.add(timed.time, dx, dy);
             }
         }
 
         if last_print.elapsed() >= Duration::from_millis(100) {
             print!("\r\x1B[K");
             print!(
-                "[{}] Counts: {} | Slow: {} | Fast: {} | ",
+                "[{}] Counts: {:.0} | Slow: {} | Fast: {} | ",
                 if recording_slow { "SLOW" } else { "FAST" },
-                total_counts,
+                pass.counts(),
                 slow_samples.len(),
                 fast_samples.len()
             );
@@ -153,62 +135,74 @@ pub fn run() {
     println!("\n\n=== Acceleration Detection Complete ===\n");
 
     if !slow_samples.is_empty() && !fast_samples.is_empty() {
-        let avg_slow_counts: f64 =
-            slow_samples.iter().map(|s| s.counts as f64).sum::<f64>() / slow_samples.len() as f64;
-        let avg_fast_counts: f64 =
-            fast_samples.iter().map(|s| s.counts as f64).sum::<f64>() / fast_samples.len() as f64;
+        // Medians, as in the GUI: one pass that went wrong cannot decide it
+        let median = |samples: &[AccelSample], f: fn(&AccelSample) -> f64| {
+            median_in_place(&mut samples.iter().map(f).collect::<Vec<_>>()).unwrap_or(0.0)
+        };
+        let slow_counts = median(&slow_samples, |s| s.counts);
+        let fast_counts = median(&fast_samples, |s| s.counts);
+        let slow_speed = median(&slow_samples, |s| s.speed);
+        let fast_speed = median(&fast_samples, |s| s.speed);
 
-        let avg_slow_speed: f64 =
-            slow_samples.iter().map(|s| s.speed).sum::<f64>() / slow_samples.len() as f64;
-        let avg_fast_speed: f64 =
-            fast_samples.iter().map(|s| s.speed).sum::<f64>() / fast_samples.len() as f64;
-
-        // Calculate acceleration ratio
         // If acceleration exists, fast counts will be higher than slow counts
         // for the same physical distance
-        let count_ratio = avg_fast_counts / avg_slow_counts;
-        let speed_ratio = avg_fast_speed / avg_slow_speed;
+        let count_ratio = fast_counts / slow_counts;
+        let speed_ratio = fast_speed / slow_speed.max(f64::MIN_POSITIVE);
 
         println!("Slow movements: {} samples", slow_samples.len());
-        println!("  Average counts: {:.0}", avg_slow_counts);
-        println!("  Average speed: {:.0} counts/s\n", avg_slow_speed);
+        println!("  Typical (median) counts: {:.0}", slow_counts);
+        println!("  Typical (median) speed: {:.0} counts/s\n", slow_speed);
 
         println!("Fast movements: {} samples", fast_samples.len());
-        println!("  Average counts: {:.0}", avg_fast_counts);
-        println!("  Average speed: {:.0} counts/s\n", avg_fast_speed);
+        println!("  Typical (median) counts: {:.0}", fast_counts);
+        println!("  Typical (median) speed: {:.0} counts/s\n", fast_speed);
 
         println!("Analysis:");
         println!("  Count ratio (fast/slow): {:.2}", count_ratio);
         println!("  Speed ratio (fast/slow): {:.2}", speed_ratio);
 
-        // Acceleration coefficient
-        // With perfect 1:1, count_ratio should be ~1.0 regardless of speed
-        let accel_coefficient = (count_ratio - 1.0) / (speed_ratio - 1.0).max(0.1);
-
-        if count_ratio > 1.2 {
-            println!("\n⚠ ACCELERATION DETECTED");
-            println!(
-                "  Fast movements register {:.0}% more counts.",
-                (count_ratio - 1.0) * 100.0
-            );
-            println!("  Acceleration coefficient: {:.2}", accel_coefficient);
-            println!("  Check OS settings or mouse software to disable.");
-        } else if count_ratio > 1.1 {
-            println!("\n⚠ Mild acceleration detected");
-            println!(
-                "  Fast movements register {:.0}% more counts.",
-                (count_ratio - 1.0) * 100.0
-            );
-        } else if count_ratio < 0.9 {
-            println!("\n⚠ Negative acceleration (deceleration) detected");
-            println!(
-                "  Fast movements register {:.0}% fewer counts.",
-                (1.0 - count_ratio) * 100.0
-            );
-        } else {
-            println!("\n✓ No significant acceleration detected");
-            println!("  Your mouse appears to have 1:1 input.");
+        match verdict(
+            slow_samples.len(),
+            fast_samples.len(),
+            count_ratio,
+            speed_ratio,
+        ) {
+            Verdict::TooFewPasses => {
+                println!(
+                    "\nInconclusive: record at least {} slow and {} fast passes.",
+                    MIN_STROKES_PER_GROUP, MIN_STROKES_PER_GROUP
+                );
+            }
+            Verdict::SpeedsTooSimilar => {
+                println!(
+                    "\nInconclusive: the fast passes were not at least {:.1}x faster than the slow ones.",
+                    MIN_SPEED_RATIO
+                );
+                println!("  Make the slow passes slower and the fast passes faster.");
+            }
+            Verdict::Acceleration => {
+                println!("\n⚠ SENSOR/FIRMWARE ACCELERATION DETECTED");
+                println!(
+                    "  Fast movements register {:.0}% more counts.",
+                    (count_ratio - 1.0) * 100.0
+                );
+                println!("  Check the mouse's own software or on-board settings.");
+            }
+            Verdict::Deceleration => {
+                println!("\n⚠ Negative acceleration (deceleration) detected");
+                println!(
+                    "  Fast movements register {:.0}% fewer counts.",
+                    (1.0 - count_ratio) * 100.0
+                );
+                println!("  The sensor may be losing tracking at speed (surface, or above its speed limit).");
+            }
+            Verdict::None => {
+                println!("\n✓ No significant sensor/firmware acceleration detected");
+                println!("  The mouse reports the same counts for the same distance at any speed.");
+            }
         }
+        println!("\nNote: OS pointer acceleration acts after these raw counts and is not");
+        println!("covered by this result; check that setting separately.");
     } else {
         println!("Need both slow and fast samples for comparison.");
         println!(
@@ -219,11 +213,191 @@ pub fn run() {
     }
 
     terminal::wait_for_enter();
+    true
 }
 
+/// The key of a key press. Windows also reports key releases, and a SPACE
+/// release would record the movement since the press as another pass.
+fn pressed_key(event: &Event) -> Option<KeyCode> {
+    match event {
+        Event::Key(KeyEvent {
+            code,
+            kind: KeyEventKind::Press,
+            ..
+        }) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Movement since the last SPACE press.
+#[derive(Default)]
+struct Pass {
+    /// Every motion report: (time, dx, dy).
+    reports: Vec<(Instant, i32, i32)>,
+}
+
+impl Pass {
+    fn add(&mut self, t: Instant, dx: i32, dy: i32) {
+        if dx != 0 || dy != 0 {
+            self.reports.push((t, dx, dy));
+        }
+    }
+
+    /// The pass itself: the movement from the point farthest from where the
+    /// mouse ended up. Between passes the mouse has to get back to the start
+    /// mark; when it is slid back rather than lifted, that return trip is
+    /// left out instead of being added to the next pass's counts and time.
+    fn leg(&self) -> &[(Instant, i32, i32)] {
+        let end = self
+            .reports
+            .iter()
+            .fold((0i64, 0i64), |(x, y), &(_, dx, dy)| {
+                (x + dx as i64, y + dy as i64)
+            });
+        let (mut pos, mut start, mut farthest) = ((0i64, 0i64), 0, -1.0);
+        for (i, &(_, dx, dy)) in self.reports.iter().enumerate() {
+            // Distance to the end from where the mouse was before report i
+            let to_end = ((end.0 - pos.0) as f64).hypot((end.1 - pos.1) as f64);
+            if to_end >= farthest {
+                farthest = to_end;
+                start = i;
+            }
+            pos = (pos.0 + dx as i64, pos.1 + dy as i64);
+        }
+        &self.reports[start..]
+    }
+
+    /// Counts travelled during the pass.
+    fn counts(&self) -> f64 {
+        self.leg()
+            .iter()
+            .map(|&(_, dx, dy)| (dx as f64).hypot(dy as f64))
+            .sum()
+    }
+
+    /// The pass as a sample, or `None` when it is too short to judge.
+    fn sample(&self) -> Option<AccelSample> {
+        let counts = self.counts();
+        if counts < MIN_PASS_COUNTS {
+            return None;
+        }
+        let leg = self.leg();
+        let secs = match (leg.first(), leg.last()) {
+            (Some(first), Some(last)) => last.0.saturating_duration_since(first.0).as_secs_f64(),
+            _ => 0.0,
+        }
+        // A pass shorter than a millisecond counts as one, to avoid dividing by zero
+        .max(0.001);
+        Some(AccelSample {
+            counts,
+            secs,
+            speed: counts / secs,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
 struct AccelSample {
-    counts: i64,
-    #[allow(dead_code)]
-    time: Duration,
+    counts: f64,
+    secs: f64,
     speed: f64,
+}
+
+#[derive(Debug, PartialEq)]
+enum Verdict {
+    TooFewPasses,
+    SpeedsTooSimilar,
+    Acceleration,
+    Deceleration,
+    None,
+}
+
+/// Same rules as the GUI (`analysis::acceleration`): enough passes, a real
+/// speed contrast, and a count ratio outside 1 +/- ACCEL_TOLERANCE.
+fn verdict(slow: usize, fast: usize, count_ratio: f64, speed_ratio: f64) -> Verdict {
+    if slow < MIN_STROKES_PER_GROUP || fast < MIN_STROKES_PER_GROUP {
+        Verdict::TooFewPasses
+    } else if speed_ratio < MIN_SPEED_RATIO {
+        Verdict::SpeedsTooSimilar
+    } else if count_ratio > 1.0 + ACCEL_TOLERANCE {
+        Verdict::Acceleration
+    } else if count_ratio < 1.0 - ACCEL_TOLERANCE {
+        Verdict::Deceleration
+    } else {
+        Verdict::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn key_releases_are_not_commands() {
+        let key = |kind| {
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+        assert_eq!(
+            pressed_key(&key(KeyEventKind::Press)),
+            Some(KeyCode::Char(' '))
+        );
+        assert_eq!(pressed_key(&key(KeyEventKind::Release)), None);
+        assert_eq!(pressed_key(&key(KeyEventKind::Repeat)), None);
+    }
+
+    #[test]
+    fn pass_duration_is_first_to_last_movement() {
+        let t0 = Instant::now();
+        let mut pass = Pass::default();
+        for i in 0..100u64 {
+            pass.add(t0 + Duration::from_millis(2 * i), 3, 4);
+        }
+        let s = pass.sample().unwrap();
+        assert!((s.counts - 500.0).abs() < 1e-9);
+        assert!((s.secs - 0.198).abs() < 1e-6);
+        assert!(Pass::default().sample().is_none());
+    }
+
+    #[test]
+    fn sliding_back_to_the_start_is_not_part_of_the_pass() {
+        // After the previous pass the mouse is slid back 800 counts quickly,
+        // rests on the start mark, then makes a slow 800-count pass (with a
+        // little wobble) and stops on the end mark.
+        let t0 = Instant::now();
+        let mut pass = Pass::default();
+        for i in 0..40u64 {
+            pass.add(t0 + Duration::from_millis(i), -20, 0);
+        }
+        let start = t0 + Duration::from_millis(600);
+        for i in 0..200u64 {
+            let dy = [1, 0, -1, 0][i as usize % 4];
+            pass.add(start + Duration::from_millis(5 * i), 4, dy);
+        }
+        let s = pass.sample().unwrap();
+        assert!((s.counts - 800.0).abs() < 25.0, "{}", s.counts);
+        assert!((s.secs - 0.995).abs() < 1e-6, "{}", s.secs);
+        // Counting everything would double the counts and add the return
+        // trip and the rest to the time
+        let all: f64 = pass
+            .reports
+            .iter()
+            .map(|&(_, dx, dy)| (dx as f64).hypot(dy as f64))
+            .sum();
+        assert!(all > 1500.0);
+    }
+
+    #[test]
+    fn verdict_needs_passes_and_speed_contrast() {
+        assert_eq!(verdict(1, 1, 1.5, 4.0), Verdict::TooFewPasses);
+        // Fast passes no faster than slow ones: equal counts prove nothing
+        assert_eq!(verdict(3, 3, 1.0, 1.1), Verdict::SpeedsTooSimilar);
+        assert_eq!(verdict(3, 3, 1.02, 3.0), Verdict::None);
+        assert_eq!(verdict(3, 3, 1.3, 3.0), Verdict::Acceleration);
+        assert_eq!(verdict(3, 3, 0.7, 3.0), Verdict::Deceleration);
+    }
 }

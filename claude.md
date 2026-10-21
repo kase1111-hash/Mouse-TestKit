@@ -21,7 +21,7 @@ cargo build --bin mouse-testkit-gui
 # Release build (GUI)
 cargo build --release --bin mouse-testkit-gui
 
-# CLI build (Linux only)
+# CLI build (Linux and Windows)
 cargo build --release --bin mouse-testkit
 
 # Ultra-compact build
@@ -57,7 +57,10 @@ src/
 │   ├── angle_snap.rs         # Stroke straightness / snapping detection
 │   ├── coalesce.rs           # Merges evdev REL_X/REL_Y into one report
 │   ├── diagnostics.rs        # Auto Diagnostics engine (phases, findings, report)
+│   ├── dpi.rs                # DPI accuracy rules shared by GUI and CLI
+│   ├── liftoff.rs            # Lift-off jump detection
 │   ├── polling.rs            # Polling rate statistics and median-based Hz estimate
+│   ├── scroll.rs             # Scroll wheel skip and dead-direction checks (WheelCheck)
 │   ├── strokes.rs            # Splits motion into strokes separated by pauses
 │   └── stutter.rs            # Stutter detection algorithm
 ├── gui/
@@ -76,14 +79,14 @@ src/
 │   │   ├── accel.rs          # Acceleration and angle snapping detection
 │   │   ├── double_click.rs   # Double-click detection
 │   │   ├── jitter.rs         # Sensor noise measurement
-│   │   └── scroll.rs         # Scroll wheel testing (GUI only)
+│   │   └── scroll.rs         # Scroll wheel skip/dead-direction test (GUI only)
 │   └── export/
 │       └── mod.rs            # JSON/CSV export
 ├── tests/                    # Test implementations (CLI)
 │   ├── mod.rs
 │   ├── polling.rs            # Real-time Hz measurement
 │   ├── stutter.rs            # Stutter detection
-│   ├── click_response.rs     # Button latency
+│   ├── click_response.rs     # Click reaction time
 │   ├── click_sticky.rs       # Stuck click detection
 │   ├── liftoff.rs            # Lift-off distance testing
 │   ├── dpi.rs                # DPI accuracy verification
@@ -138,6 +141,21 @@ the result. The Auto Diagnostics engine (`analysis::diagnostics::AutoTest`) is
 the reference example: both `gui/panels/auto_test.rs` and `tests/auto_test.rs`
 are thin front-ends over it.
 
+### Timing Uses Device Timestamps
+
+Anything that measures time between reports must use the time each report
+was produced, never the time the code got round to reading it: events read in
+one batch would share one timestamp, and the interval would measure the read
+loop instead of the mouse. CLI tests read input with
+`input::fetch_timed_events(&mut device)`, which returns `types::TimedEvent`
+(`time` + `event`): the kernel evdev timestamp on Linux, the `WM_INPUT`
+receive time on Windows (Raw Input carries no hardware timestamp). GUI panels
+use `RawInputEvent::timestamp` from the input bridge. Without raw input
+(framework input, always on macOS) events only carry the frame time (steps
+of about 16 ms), so a check that needs finer timing than that (polling rate,
+stutters, switch bounce, very short presses) must say it was not measured
+rather than show a number.
+
 ### Error Handling
 
 - Use `Option<T>` for optional values
@@ -156,7 +174,7 @@ are thin front-ends over it.
 | Platform | GUI | CLI |
 |----------|-----|-----|
 | Linux x64 | Yes | Yes |
-| Windows x64 | Yes | No |
+| Windows x64 | Yes | Yes |
 | macOS ARM64 | Yes | No |
 | macOS x64 | Yes | No |
 

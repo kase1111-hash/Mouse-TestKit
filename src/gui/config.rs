@@ -2,9 +2,27 @@
 //!
 //! Saves and loads user preferences to a config file
 
+use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
+
+// Ranges the settings widgets allow. Loaded values are clamped to these so a
+// hand-edited or stale config file cannot set a value the UI would never
+// offer, such as a 300 ms double-click threshold that would flag every
+// normal double click as switch bounce.
+
+/// Stutter panel sensitivity slider.
+pub const STUTTER_MULTIPLIER_RANGE: RangeInclusive<f64> = 1.5..=4.0;
+/// DPI panel target DPI field. Current sensors reach about 45,000 DPI; the
+/// upper bound leaves headroom.
+pub const DPI_TARGET_RANGE: RangeInclusive<u32> = 50..=64_000;
+/// DPI panel movement distance field (inches): up to about the width of a
+/// large pad.
+pub const DPI_DISTANCE_RANGE: RangeInclusive<f32> = 0.5..=24.0;
+/// Double-click panel threshold field (ms).
+pub const DOUBLE_CLICK_THRESHOLD_RANGE: RangeInclusive<f64> = 10.0..=100.0;
 
 /// User configuration that persists between sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,18 +46,59 @@ impl Default for Config {
             stutter_threshold_multiplier: 2.0,
             dpi_target: 800,
             dpi_distance_inches: 2.0,
-            double_click_threshold_ms: 50.0,
+            // Same press-to-press bounce threshold as Auto Diagnostics
+            double_click_threshold_ms: DiagConfig::default().bounce_threshold_ms,
         }
     }
 }
 
 impl Config {
+    /// Parse a config file, clamping every value to the range its widget
+    /// allows.
+    pub fn parse(contents: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<Self>(contents).map(Self::sanitized)
+    }
+
+    /// Clamp every value to the range its widget allows. A value that is not
+    /// a finite number falls back to the default.
+    pub fn sanitized(self) -> Self {
+        let defaults = Self::default();
+        let clamp = |v: f64, r: &RangeInclusive<f64>, d: f64| {
+            if v.is_finite() {
+                v.clamp(*r.start(), *r.end())
+            } else {
+                d
+            }
+        };
+        Self {
+            stutter_threshold_multiplier: clamp(
+                self.stutter_threshold_multiplier,
+                &STUTTER_MULTIPLIER_RANGE,
+                defaults.stutter_threshold_multiplier,
+            ),
+            dpi_target: self
+                .dpi_target
+                .clamp(*DPI_TARGET_RANGE.start(), *DPI_TARGET_RANGE.end()),
+            dpi_distance_inches: if self.dpi_distance_inches.is_finite() {
+                self.dpi_distance_inches
+                    .clamp(*DPI_DISTANCE_RANGE.start(), *DPI_DISTANCE_RANGE.end())
+            } else {
+                defaults.dpi_distance_inches
+            },
+            double_click_threshold_ms: clamp(
+                self.double_click_threshold_ms,
+                &DOUBLE_CLICK_THRESHOLD_RANGE,
+                defaults.double_click_threshold_ms,
+            ),
+        }
+    }
+
     /// Load config from disk, or return default if not found
     pub fn load() -> Self {
         let path = Self::config_path();
 
         match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(contents) => match Self::parse(&contents) {
                 Ok(config) => config,
                 Err(e) => {
                     eprintln!("Warning: Failed to parse config file: {}", e);
@@ -144,5 +203,75 @@ mod tests {
         assert_eq!(loaded.dpi_target, 1600);
         assert_eq!(loaded.dpi_distance_inches, 4.0);
         assert_eq!(loaded.double_click_threshold_ms, 75.0);
+    }
+
+    #[test]
+    fn test_loaded_values_are_clamped_to_widget_ranges() {
+        // A 300 ms threshold would call every normal double click bounce
+        let loaded = Config::parse(
+            r#"{"stutter_threshold_multiplier": 0.5, "dpi_target": 0,
+                "dpi_distance_inches": 40.0, "double_click_threshold_ms": 300.0}"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.stutter_threshold_multiplier, 1.5);
+        assert_eq!(loaded.dpi_target, *DPI_TARGET_RANGE.start());
+        assert_eq!(loaded.dpi_distance_inches, *DPI_DISTANCE_RANGE.end());
+        assert_eq!(loaded.double_click_threshold_ms, 100.0);
+
+        let loaded = Config::parse(
+            r#"{"stutter_threshold_multiplier": 9.0, "dpi_target": 99999,
+                "dpi_distance_inches": 0.0, "double_click_threshold_ms": -5.0}"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.stutter_threshold_multiplier, 4.0);
+        assert_eq!(loaded.dpi_target, *DPI_TARGET_RANGE.end());
+        assert_eq!(loaded.dpi_distance_inches, *DPI_DISTANCE_RANGE.start());
+        assert_eq!(loaded.double_click_threshold_ms, 10.0);
+    }
+
+    #[test]
+    fn test_widget_extremes_survive_save_and_load() {
+        // A 26000 DPI mouse marked over 14 in, and the widgets' own limits
+        for (dpi, inches) in [(26_000, 14.0), (64_000, 24.0), (50, 0.5)] {
+            let saved = Config {
+                dpi_target: dpi,
+                dpi_distance_inches: inches,
+                ..Config::default()
+            };
+            let loaded = Config::parse(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(loaded.dpi_target, dpi);
+            assert_eq!(loaded.dpi_distance_inches, inches);
+        }
+    }
+
+    #[test]
+    fn test_in_range_values_load_unchanged() {
+        let json = serde_json::to_string(&Config::default()).unwrap();
+        let loaded = Config::parse(&json).unwrap();
+        let d = Config::default();
+        assert_eq!(
+            loaded.stutter_threshold_multiplier,
+            d.stutter_threshold_multiplier
+        );
+        assert_eq!(loaded.dpi_target, d.dpi_target);
+        assert_eq!(loaded.dpi_distance_inches, d.dpi_distance_inches);
+        assert_eq!(
+            loaded.double_click_threshold_ms,
+            d.double_click_threshold_ms
+        );
+    }
+
+    #[test]
+    fn test_non_finite_values_fall_back_to_defaults() {
+        let c = Config {
+            stutter_threshold_multiplier: f64::NAN,
+            dpi_target: 800,
+            dpi_distance_inches: f32::INFINITY,
+            double_click_threshold_ms: f64::NAN,
+        }
+        .sanitized();
+        assert_eq!(c.stutter_threshold_multiplier, 2.0);
+        assert_eq!(c.dpi_distance_inches, 2.0);
+        assert_eq!(c.double_click_threshold_ms, 50.0);
     }
 }

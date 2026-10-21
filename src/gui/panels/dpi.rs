@@ -1,17 +1,67 @@
+//! DPI accuracy panel
+//!
+//! The user moves the mouse a measured physical distance; the measured DPI is
+//! the straight-line distance between where the movement started and where
+//! it ended, in raw counts, divided by that distance. Using net displacement
+//! (not the summed path) means wobble and an overshoot that is corrected
+//! back to the mark do not inflate the result. Needs raw counts: the
+//! window-system pointer is scaled by OS acceleration.
+
 use eframe::egui;
 
+use super::polling::raw_input_required_notice;
+use crate::config::{DPI_DISTANCE_RANGE, DPI_TARGET_RANGE};
 use crate::export::{DpiExport, DpiSampleExport};
 use crate::input_bridge::{RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::dpi::{is_setup_error, SETUP_ERROR_FRACTION};
+
+/// Selectable target DPI and distance (inches): the ranges saved settings
+/// are clamped to on load, so a value set here survives a restart.
+const MIN_TARGET_DPI: u32 = *DPI_TARGET_RANGE.start();
+const MAX_TARGET_DPI: u32 = *DPI_TARGET_RANGE.end();
+const CM_PER_INCH: f32 = 2.54;
+const MAX_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.end();
+const MIN_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.start();
+
+/// Measured DPI from the net displacement in counts over a known distance.
+fn measured_dpi(net_dx: i64, net_dy: i64, distance_inches: f32) -> f32 {
+    let net = ((net_dx as f64).powi(2) + (net_dy as f64).powi(2)).sqrt();
+    (net / distance_inches as f64) as f32
+}
+
+/// Accuracy score: 100% is exact, lower means deviation in either direction
+/// (110% of target scores 90%).
+fn accuracy_percent(measured: f32, target: u32) -> f32 {
+    let raw = measured / target as f32 * 100.0;
+    if raw > 100.0 { 200.0 - raw } else { raw }.max(0.0)
+}
+
+/// Rating label for one measurement.
+fn dpi_rating(measured: f32, target: u32) -> &'static str {
+    let accuracy = accuracy_percent(measured, target);
+    if is_setup_error(measured as f64, target as f64) {
+        "Check setup"
+    } else if accuracy >= 98.0 {
+        "Excellent"
+    } else if accuracy >= 95.0 {
+        "Good"
+    } else if accuracy >= 90.0 {
+        "Fair"
+    } else {
+        "Poor"
+    }
+}
 
 pub struct DpiPanel {
     is_running: bool,
     target_dpi: u32,
     target_distance_inches: f32,
-    accumulated_counts: f32,
+    /// Show and edit the distance in centimetres instead of inches.
+    use_cm: bool,
     measured_dpi: f32,
     accuracy_percent: f32,
-    start_pos: Option<(i32, i32)>,
-    current_pos: (i32, i32),
+    /// Net displacement since the measurement started, in raw counts.
+    current_pos: (i64, i64),
     samples: Vec<DpiSample>,
     last_saved_dpi: u32,
     last_saved_distance: f32,
@@ -29,10 +79,9 @@ impl DpiPanel {
             is_running: false,
             target_dpi: 800,
             target_distance_inches: 2.0,
-            accumulated_counts: 0.0,
+            use_cm: false,
             measured_dpi: 0.0,
             accuracy_percent: 0.0,
-            start_pos: None,
             current_pos: (0, 0),
             samples: Vec::new(),
             last_saved_dpi: 800,
@@ -51,13 +100,13 @@ impl DpiPanel {
         self.target_dpi
     }
 
-    /// Set target distance (from config)
+    /// Set target distance in inches (from config)
     pub fn set_target_distance(&mut self, value: f32) {
         self.target_distance_inches = value;
         self.last_saved_distance = value;
     }
 
-    /// Get target distance
+    /// Get target distance in inches
     pub fn get_target_distance(&self) -> f32 {
         self.target_distance_inches
     }
@@ -77,6 +126,14 @@ impl DpiPanel {
         self.is_running
     }
 
+    fn distance_label(&self) -> String {
+        if self.use_cm {
+            format!("{:.1} cm", self.target_distance_inches * CM_PER_INCH)
+        } else {
+            format!("{:.1} inches", self.target_distance_inches)
+        }
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -87,6 +144,11 @@ impl DpiPanel {
         ui.heading("DPI Accuracy Test");
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
+        if !has_bridge {
+            ui.add_space(5.0);
+            raw_input_required_notice(ui, "DPI (counts per inch)");
+            self.is_running = false;
+        }
         ui.add_space(15.0);
 
         // Configuration
@@ -94,19 +156,38 @@ impl DpiPanel {
             ui.label("Target DPI:");
             ui.add(
                 egui::DragValue::new(&mut self.target_dpi)
-                    .range(100..=16000)
+                    .range(MIN_TARGET_DPI..=MAX_TARGET_DPI)
                     .speed(50),
             );
 
             ui.add_space(20.0);
 
-            ui.label("Distance (inches):");
-            ui.add(
-                egui::DragValue::new(&mut self.target_distance_inches)
-                    .range(0.5..=12.0)
-                    .speed(0.1)
-                    .fixed_decimals(1),
-            );
+            ui.label("Distance:");
+            if self.use_cm {
+                let mut cm = self.target_distance_inches * CM_PER_INCH;
+                let response = ui.add(
+                    egui::DragValue::new(&mut cm)
+                        .range(
+                            MIN_DISTANCE_INCHES * CM_PER_INCH..=MAX_DISTANCE_INCHES * CM_PER_INCH,
+                        )
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" cm"),
+                );
+                if response.changed() {
+                    self.target_distance_inches = cm / CM_PER_INCH;
+                }
+            } else {
+                ui.add(
+                    egui::DragValue::new(&mut self.target_distance_inches)
+                        .range(MIN_DISTANCE_INCHES..=MAX_DISTANCE_INCHES)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" in"),
+                );
+            }
+            ui.selectable_value(&mut self.use_cm, false, "in");
+            ui.selectable_value(&mut self.use_cm, true, "cm");
         });
 
         ui.add_space(15.0);
@@ -121,9 +202,8 @@ impl DpiPanel {
             }
             if escape_pressed {
                 self.is_running = false;
-                self.start_pos = None;
             }
-        } else if space_pressed {
+        } else if space_pressed && has_bridge {
             self.start_measurement();
         }
 
@@ -135,7 +215,7 @@ impl DpiPanel {
                         .strong()
                         .color(egui::Color32::GREEN),
                 );
-            } else {
+            } else if has_bridge {
                 ui.label(egui::RichText::new("Press SPACE to start measurement").strong());
             }
 
@@ -162,14 +242,15 @@ impl DpiPanel {
                     );
                     ui.add_space(5.0);
                     ui.label(format!(
-                        "Move mouse exactly {} inches in a straight line.",
-                        self.target_distance_inches
+                        "Move the mouse exactly {} from the start mark to the end mark.",
+                        self.distance_label()
                     ));
-                    ui.label("Use a ruler or mousepad markings for accuracy.");
+                    ui.label("Use a ruler or mousepad markings. Wobble or overshooting and coming back to the mark is fine: only the start-to-end distance counts.");
                     ui.add_space(10.0);
+                    let (x, y) = self.current_pos;
                     ui.label(format!(
-                        "Accumulated counts: {:.1}",
-                        self.accumulated_counts
+                        "Start-to-end distance: {:.0} counts",
+                        ((x as f64).powi(2) + (y as f64).powi(2)).sqrt()
                     ));
                     ui.label(format!(
                         "Expected counts: {:.0}",
@@ -177,7 +258,7 @@ impl DpiPanel {
                     ));
                     ui.add_space(10.0);
                     ui.label(
-                        egui::RichText::new("Press SPACE when done moving")
+                        egui::RichText::new("Press SPACE when the mouse is on the end mark")
                             .color(egui::Color32::YELLOW),
                     );
                 });
@@ -190,9 +271,9 @@ impl DpiPanel {
                     ui.label(egui::RichText::new("Instructions").strong());
                     ui.label("1. Set your mouse's DPI in its software/hardware");
                     ui.label("2. Enter the target DPI above");
-                    ui.label("3. Measure a distance on your mousepad (use a ruler)");
-                    ui.label("4. Press SPACE to start");
-                    ui.label("5. Move the mouse that exact distance in a straight line");
+                    ui.label("3. Mark a distance on your mousepad with a ruler (inches or cm); longer is more accurate, e.g. 10 cm or more");
+                    ui.label("4. Put the mouse on the start mark and press SPACE");
+                    ui.label("5. Move the mouse to the end mark");
                     ui.label("6. Press SPACE to finish");
                 });
         }
@@ -221,34 +302,37 @@ impl DpiPanel {
                                 ui.label(format!("{}", sample.target_dpi));
                                 ui.label(format!("{:.0}", sample.measured_dpi));
 
-                                let accuracy_color = if sample.accuracy >= 98.0 {
-                                    egui::Color32::GREEN
-                                } else if sample.accuracy >= 95.0 {
-                                    egui::Color32::LIGHT_GREEN
-                                } else if sample.accuracy >= 90.0 {
-                                    egui::Color32::YELLOW
-                                } else {
-                                    egui::Color32::RED
+                                let rating = dpi_rating(sample.measured_dpi, sample.target_dpi);
+                                let accuracy_color = match rating {
+                                    "Excellent" => egui::Color32::GREEN,
+                                    "Good" => egui::Color32::LIGHT_GREEN,
+                                    "Fair" | "Check setup" => egui::Color32::YELLOW,
+                                    _ => egui::Color32::RED,
                                 };
                                 ui.label(
                                     egui::RichText::new(format!("{:.1}%", sample.accuracy))
                                         .color(accuracy_color),
                                 );
-
-                                let rating = if sample.accuracy >= 98.0 {
-                                    "Excellent"
-                                } else if sample.accuracy >= 95.0 {
-                                    "Good"
-                                } else if sample.accuracy >= 90.0 {
-                                    "Fair"
-                                } else {
-                                    "Poor"
-                                };
                                 ui.label(egui::RichText::new(rating).color(accuracy_color));
                                 ui.end_row();
                             }
                         });
                 });
+
+            if self
+                .samples
+                .iter()
+                .any(|s| dpi_rating(s.measured_dpi, s.target_dpi) == "Check setup")
+            {
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "\"Check setup\": more than {:.0}% off target. That is almost always a different DPI stage, a wrong distance, or the movement not covering the marks - not the sensor.",
+                        SETUP_ERROR_FRACTION * 100.0
+                    ))
+                    .color(egui::Color32::YELLOW),
+                );
+            }
 
             // Average
             if self.samples.len() > 1 {
@@ -259,71 +343,45 @@ impl DpiPanel {
             }
         }
 
-        // Capture mouse input while running
-        if self.is_running {
-            if has_bridge {
-                // Use raw input events — integer counts are exactly what DPI is
-                // defined against, so Euclidean distance from raw counts is the
-                // most accurate measurement.
-                for ev in raw_events {
-                    if let RawInputKind::Move { dx, dy } = ev.kind {
-                        let distance =
-                            (((dx as f64) * (dx as f64)) + ((dy as f64) * (dy as f64))).sqrt();
-                        self.accumulated_counts += distance as f32;
+        // Capture mouse input while running (raw counts only)
+        if self.is_running && has_bridge {
+            self.process_raw_events(raw_events);
+        }
+    }
 
-                        self.current_pos.0 += dx;
-                        self.current_pos.1 += dy;
-                    }
-                }
-            } else {
-                // Fallback: use egui's pointer delta when no raw input bridge
-                let delta = ctx.input(|i| i.pointer.delta());
-                if delta.x != 0.0 || delta.y != 0.0 {
-                    let distance = ((delta.x * delta.x + delta.y * delta.y) as f64).sqrt();
-                    self.accumulated_counts += distance as f32;
-
-                    self.current_pos.0 += delta.x as i32;
-                    self.current_pos.1 += delta.y as i32;
-                }
+    /// Track the net displacement in raw counts.
+    fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
+        for ev in raw_events {
+            if let RawInputKind::Move { dx, dy } = ev.kind {
+                self.current_pos.0 += dx as i64;
+                self.current_pos.1 += dy as i64;
             }
         }
     }
 
     fn start_measurement(&mut self) {
         self.is_running = true;
-        self.accumulated_counts = 0.0;
         self.current_pos = (0, 0);
-        self.start_pos = Some((0, 0));
     }
 
     fn finish_measurement(&mut self) {
-        if self.accumulated_counts == 0.0 {
-            self.is_running = false;
-            self.start_pos = None;
+        self.is_running = false;
+        if self.current_pos == (0, 0) || self.target_distance_inches <= 0.0 {
             return;
         }
 
-        self.measured_dpi = self.accumulated_counts / self.target_distance_inches;
-
-        // Calculate accuracy as percentage of target (can be over or under)
-        let raw_accuracy = self.measured_dpi / self.target_dpi as f32 * 100.0;
-
-        // Convert to accuracy score: 100% means perfect, lower means deviation in either direction
-        self.accuracy_percent = if raw_accuracy > 100.0 {
-            200.0 - raw_accuracy // e.g., 110% raw -> 90% accuracy
-        } else {
-            raw_accuracy
-        }
-        .max(0.0);
+        self.measured_dpi = measured_dpi(
+            self.current_pos.0,
+            self.current_pos.1,
+            self.target_distance_inches,
+        );
+        self.accuracy_percent = accuracy_percent(self.measured_dpi, self.target_dpi);
 
         self.samples.push(DpiSample {
             target_dpi: self.target_dpi,
             measured_dpi: self.measured_dpi,
             accuracy: self.accuracy_percent,
         });
-
-        self.is_running = false;
-        self.start_pos = None;
     }
 
     pub fn export(&self) -> Option<DpiExport> {
@@ -341,9 +399,127 @@ impl DpiPanel {
                     target_dpi: s.target_dpi,
                     measured_dpi: s.measured_dpi,
                     accuracy_percent: s.accuracy,
+                    rating: dpi_rating(s.measured_dpi, s.target_dpi).to_string(),
                 })
                 .collect(),
             avg_accuracy_percent: avg_accuracy,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn mv(dx: i32, dy: i32) -> RawInputEvent {
+        RawInputEvent {
+            kind: RawInputKind::Move { dx, dy },
+            timestamp: Instant::now(),
+        }
+    }
+
+    fn measure(panel: &mut DpiPanel, events: &[RawInputEvent]) -> f32 {
+        panel.start_measurement();
+        panel.process_raw_events(events);
+        panel.finish_measurement();
+        panel.samples.last().map(|s| s.measured_dpi).unwrap_or(0.0)
+    }
+
+    #[test]
+    fn wobble_and_overshoot_do_not_inflate_dpi() {
+        // An exact 800 DPI mouse moved 2 inches (1600 counts) by a real hand:
+        // a little vertical wobble, an 80-count overshoot and back to the mark.
+        let mut p = DpiPanel::new();
+        p.set_target_dpi(800);
+        p.set_target_distance(2.0);
+        let mut events = Vec::new();
+        for i in 0..800 {
+            let dy = match i % 8 {
+                0 => 1,
+                4 => -1,
+                _ => 0,
+            };
+            events.push(mv(2, dy));
+        }
+        events.extend((0..40).map(|_| mv(2, 0)));
+        events.extend((0..40).map(|_| mv(-2, 0)));
+        let dpi = measure(&mut p, &events);
+        assert!((dpi - 800.0).abs() < 1.0, "{}", dpi);
+        assert_eq!(dpi_rating(dpi, 800), "Excellent");
+    }
+
+    #[test]
+    fn a_sensor_that_overcounts_is_still_caught() {
+        // 8% high: 1728 counts over 2 inches at a nominal 800 DPI
+        let mut p = DpiPanel::new();
+        p.set_target_dpi(800);
+        p.set_target_distance(2.0);
+        let events: Vec<_> = (0..864).map(|_| mv(2, 0)).collect();
+        let dpi = measure(&mut p, &events);
+        assert!((dpi - 864.0).abs() < 0.5);
+        assert_eq!(dpi_rating(dpi, 800), "Fair");
+    }
+
+    #[test]
+    fn export_keeps_the_check_setup_rating() {
+        // A 1600 DPI stage measured against a target of 800: 0% accuracy
+        // in the export must not read as a dead sensor
+        let mut p = DpiPanel::new();
+        p.set_target_dpi(800);
+        p.set_target_distance(2.0);
+        let events: Vec<_> = (0..1600).map(|_| mv(2, 0)).collect();
+        measure(&mut p, &events);
+        let e = p.export().unwrap();
+        assert_eq!(e.samples[0].rating, "Check setup");
+    }
+
+    #[test]
+    fn diagonal_movement_uses_straight_line_distance() {
+        // 3-4-5 triangle: 1200 right, 1600 down = 2000 counts
+        assert!((measured_dpi(1200, 1600, 2.5) - 800.0).abs() < 1e-3);
+        assert!((measured_dpi(-1200, -1600, 2.5) - 800.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn far_off_results_point_at_the_setup_not_the_sensor() {
+        assert_eq!(dpi_rating(1600.0, 800), "Check setup");
+        assert_eq!(dpi_rating(400.0, 800), "Check setup");
+        assert_eq!(dpi_rating(700.0, 800), "Poor");
+        assert_eq!(dpi_rating(26_000.0, 26_000), "Excellent");
+        assert!((accuracy_percent(880.0, 800) - 90.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn no_movement_records_nothing() {
+        let mut p = DpiPanel::new();
+        assert_eq!(measure(&mut p, &[mv(5, 0), mv(-5, 0)]), 0.0);
+        assert!(p.export().is_none());
+    }
+
+    #[test]
+    fn centimetre_distance_converts_to_inches() {
+        let mut p = DpiPanel::new();
+        p.use_cm = true;
+        p.set_target_distance(10.0 / CM_PER_INCH);
+        assert_eq!(p.distance_label(), "10.0 cm");
+        p.set_target_dpi(1000);
+        // 10 cm = 3.937 in, at 1000 DPI = 3937 counts
+        let dpi = measure(&mut p, &[mv(3937, 0)]);
+        assert!((dpi - 1000.0).abs() < 2.0, "{}", dpi);
+    }
+
+    #[test]
+    fn fallback_does_not_measure() {
+        let ctx = egui::Context::default();
+        let mut p = DpiPanel::new();
+        p.start_measurement();
+        let events: Vec<_> = (0..100).map(|_| mv(4, 0)).collect();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            p.ui(ui, &c, &events, false);
+        });
+        assert!(!p.is_running());
+        assert_eq!(p.current_pos, (0, 0));
     }
 }

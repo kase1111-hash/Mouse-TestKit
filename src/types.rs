@@ -21,6 +21,18 @@ pub enum MouseEvent {
     },
 }
 
+/// A mouse event stamped with the time the device reported it.
+///
+/// On Linux the time is the kernel's event timestamp and on Windows the
+/// moment the raw-input thread received the report, so it does not depend on
+/// how often the caller drains the queue. Timing measurements (polling rate,
+/// stutter, lift-off) must use this rather than `Instant::now()` at read time.
+#[derive(Debug, Clone)]
+pub struct TimedEvent {
+    pub time: std::time::Instant,
+    pub event: MouseEvent,
+}
+
 /// Mouse button identifiers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MouseButton {

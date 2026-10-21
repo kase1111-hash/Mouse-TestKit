@@ -1,9 +1,20 @@
+//! Scroll wheel test panel
+//!
+//! Counts wheel notches and runs the checks in
+//! `mouse_testkit::analysis::scroll`: notches reported in the wrong direction
+//! (encoder skipping) and a direction that never registers. Scrolling speed
+//! is shown but not rated, since it describes the hand rather than the wheel.
+//! Without raw input, up and down are the window system's, which a "natural
+//! scrolling" setting swaps, so a dead direction is then not named.
+
 use eframe::egui;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use super::auto_test::WheelAccumulator;
 use crate::export::ScrollExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::scroll::{WheelCheck, WheelVerdict};
 
 pub struct ScrollPanel {
     is_running: bool,
@@ -13,7 +24,7 @@ pub struct ScrollPanel {
     total_up: f32,
     /// Total scroll down distance
     total_down: f32,
-    /// Total scroll steps (notches)
+    /// Total scroll steps (wheel reports)
     step_count: usize,
     /// Direction changes detected
     direction_changes: usize,
@@ -25,6 +36,20 @@ pub struct ScrollPanel {
     last_scroll_time: Option<Instant>,
     /// Current scroll speed (steps per second)
     current_speed: f64,
+    /// Skip and dead-direction checks over every wheel report
+    wheel: WheelCheck,
+    /// Time of the first wheel report, the origin for `wheel` timestamps
+    epoch: Option<Instant>,
+    /// Turns framework line scrolling into notches, as Auto Diagnostics does:
+    /// fractions of a line are summed, except on macOS where each line event
+    /// is one notch of accelerated size
+    line_wheel: WheelAccumulator,
+    /// Framework input delivered pixel (smooth) scrolling, which has no notches
+    saw_smooth_scroll: bool,
+    /// Some notches came from the window system, whose up and down follow
+    /// the system's scroll-direction setting ("natural scrolling", the macOS
+    /// default, swaps them), so the physical direction is unknown.
+    system_directions: bool,
 }
 
 struct ScrollEvent {
@@ -45,6 +70,11 @@ impl ScrollPanel {
             speed_samples: VecDeque::with_capacity(100),
             last_scroll_time: None,
             current_speed: 0.0,
+            wheel: WheelCheck::new(),
+            epoch: None,
+            line_wheel: WheelAccumulator::for_platform(),
+            saw_smooth_scroll: false,
+            system_directions: false,
         }
     }
 
@@ -61,7 +91,18 @@ impl ScrollPanel {
     ) {
         ui.heading("Scroll Wheel Test");
         ui.add_space(5.0);
-        ui.label("Tests scroll wheel functionality, consistency, and detects missed steps.");
+        ui.label(
+            "Counts wheel notches and checks for skipping (notches reported in the wrong direction) and a direction that does not register.",
+        );
+        if !has_bridge {
+            ui.label(
+                egui::RichText::new(
+                    "Note: Raw input unavailable — counting the scroll lines your system reports. System scroll acceleration can make these differ from physical notches, and up and down are as your system reports them: natural scrolling (the macOS default) swaps them.",
+                )
+                .color(egui::Color32::YELLOW)
+                .size(11.0),
+            );
+        }
         ui.add_space(15.0);
 
         // Controls
@@ -88,6 +129,12 @@ impl ScrollPanel {
             egui::vec2(ui.available_width(), 200.0),
             egui::Sense::hover(),
         );
+        // Keep the wheel from scrolling the page while testing. Otherwise a
+        // few notches move the test area out from under the pointer, and
+        // framework input (counted only while hovering it) loses notches.
+        if self.is_running && response.hovered() {
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
 
         // Visual scroll indicator
         let scroll_indicator = if let Some(event) = self.scroll_events.back() {
@@ -213,16 +260,23 @@ impl ScrollPanel {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label("Direction Changes");
-                        let color = if self.direction_changes > 20 {
-                            egui::Color32::YELLOW
-                        } else {
+                        ui.label("Skips");
+                        let color = if self.wheel.skips == 0 {
                             egui::Color32::WHITE
+                        } else {
+                            egui::Color32::YELLOW
                         };
                         ui.label(
-                            egui::RichText::new(format!("{}", self.direction_changes))
+                            egui::RichText::new(format!("{}", self.wheel.skips))
                                 .size(18.0)
                                 .color(color),
+                        );
+                    });
+                    ui.add_space(30.0);
+                    ui.vertical(|ui| {
+                        ui.label("Direction Changes");
+                        ui.label(
+                            egui::RichText::new(format!("{}", self.direction_changes)).size(18.0),
                         );
                     });
                     ui.add_space(30.0);
@@ -251,87 +305,59 @@ impl ScrollPanel {
 
         ui.add_space(20.0);
 
-        // Analysis (after enough samples)
-        if self.step_count >= 20 {
+        // Wheel checks
+        if self.step_count > 0 || self.saw_smooth_scroll {
             ui.heading("Analysis");
 
-            let avg_speed = if self.speed_samples.is_empty() {
-                0.0
-            } else {
-                self.speed_samples.iter().sum::<f64>() / self.speed_samples.len() as f64
-            };
-
-            let speed_variance = if self.speed_samples.len() >= 2 {
-                let mean = avg_speed;
-                self.speed_samples
-                    .iter()
-                    .map(|x| (x - mean).powi(2))
-                    .sum::<f64>()
-                    / self.speed_samples.len() as f64
-            } else {
-                0.0
-            };
-            let speed_std = speed_variance.sqrt();
-
-            let consistency = if avg_speed > 0.0 {
-                ((1.0 - (speed_std / avg_speed).min(1.0)) * 100.0) as u32
-            } else {
-                0
-            };
-
-            let (rating, color, message) = if consistency >= 80 {
-                (
-                    "Excellent",
-                    egui::Color32::GREEN,
-                    "Scroll wheel is very consistent",
-                )
-            } else if consistency >= 60 {
-                (
-                    "Good",
-                    egui::Color32::LIGHT_GREEN,
-                    "Scroll wheel is working well",
-                )
-            } else if consistency >= 40 {
-                (
-                    "Fair",
-                    egui::Color32::YELLOW,
-                    "Some scroll inconsistency detected",
-                )
-            } else {
-                ("Poor", egui::Color32::RED, "Scroll wheel may have issues")
-            };
+            let (title, color, message) = self.verdict_text();
 
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
                 .corner_radius(8.0)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Rating:");
-                        ui.label(egui::RichText::new(rating).size(18.0).strong().color(color));
-                    });
+                    ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
                     ui.add_space(5.0);
                     ui.label(message);
-                    ui.add_space(5.0);
-                    ui.label(format!("Consistency Score: {}%", consistency));
-                    ui.label(format!("Average Speed: {:.1} steps/sec", avg_speed));
+                    if self.saw_smooth_scroll {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Smooth (pixel) scrolling from a touchpad or touch-surface mouse was received and not counted: it has no notches to check.",
+                            )
+                            .weak(),
+                        );
+                    }
                 });
         }
 
         ui.add_space(20.0);
 
         // Instructions
+        let min_each = self.wheel.min_each();
+        let skip_ms = mouse_testkit::analysis::diagnostics::Config::default().scroll_reversal_ms;
         egui::Frame::new()
             .fill(ui.visuals().faint_bg_color)
             .inner_margin(15.0)
             .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Instructions").strong());
-                ui.label("1. Click Start to begin testing");
-                ui.label("2. Hover over the test area and scroll your mouse wheel");
-                ui.label("3. Test both directions for a complete analysis");
-                ui.label("4. Scroll at different speeds to test consistency");
+                ui.label("1. Click Start, then hover over the test area");
+                ui.label(format!(
+                    "2. Scroll steadily down at least {} notches, then up at least {}",
+                    min_each, min_each
+                ));
+                ui.label(format!(
+                    "3. A notch reported the opposite way within {:.0} ms of the previous one is a skip: a finger cannot turn the wheel back that fast",
+                    skip_ms
+                ));
+                ui.label("4. Lost notches are not detected automatically: roll the wheel slowly by 10 clicks you can feel and check the counter rose by exactly 10");
                 ui.add_space(5.0);
-                ui.label(egui::RichText::new("sps = steps per second").weak());
+                ui.label(
+                    egui::RichText::new(
+                        "sps = steps per second. Speed describes your hand, not the wheel, and is not rated.",
+                    )
+                    .weak(),
+                );
             });
 
         // Capture scroll input
@@ -340,125 +366,169 @@ impl ScrollPanel {
                 // Use raw input events from the input bridge (no hover check needed)
                 for event in raw_events {
                     if let RawInputKind::Scroll { delta } = &event.kind {
-                        let now = event.timestamp;
-                        let direction_up = *delta > 0;
-                        let abs_delta = (*delta).unsigned_abs() as f32;
-
-                        // Record event
-                        self.scroll_events.push_back(ScrollEvent {
-                            timestamp: now,
-                            direction_up,
-                        });
-
-                        // Keep only last 500 events
-                        while self.scroll_events.len() > 500 {
-                            self.scroll_events.pop_front();
-                        }
-
-                        // Update totals
-                        if direction_up {
-                            self.total_up += abs_delta;
-                        } else {
-                            self.total_down += abs_delta;
-                        }
-
-                        self.step_count += 1;
-
-                        // Check for direction change
-                        if let Some(last_dir) = self.last_direction {
-                            if last_dir != direction_up {
-                                self.direction_changes += 1;
-                            }
-                        }
-                        self.last_direction = Some(direction_up);
-
-                        // Calculate scroll speed
-                        if let Some(last_time) = self.last_scroll_time {
-                            let delta_secs = now.duration_since(last_time).as_secs_f64();
-                            if delta_secs > 0.0 && delta_secs < 1.0 {
-                                let speed = 1.0 / delta_secs;
-                                self.speed_samples.push_back(speed);
-                                if self.speed_samples.len() > 100 {
-                                    self.speed_samples.pop_front();
-                                }
-                            }
-                        }
-                        self.last_scroll_time = Some(now);
-
-                        // Update current speed (rolling average of last 10 samples)
-                        let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
-                        if !recent.is_empty() {
-                            self.current_speed =
-                                recent.iter().copied().sum::<f64>() / recent.len() as f64;
-                        }
+                        self.record(event.timestamp, *delta);
                     }
                 }
-            } else {
-                // Fallback: use egui scroll input (requires hover over test area)
-                let scroll_delta = ctx.input(|i| {
+            } else if response.hovered() {
+                // Fallback: egui scroll input (requires hover over test area).
+                // Each wheel event is handled on its own so a reversed notch
+                // is not cancelled out by a forward one in the same frame.
+                let now = Instant::now();
+                let wheel_events: Vec<(egui::MouseWheelUnit, f32)> = ctx.input(|i| {
                     i.raw
                         .events
                         .iter()
-                        .fold(egui::Vec2::ZERO, |acc, e| match e {
-                            egui::Event::MouseWheel { delta, .. } => acc + *delta,
-                            _ => acc,
+                        .filter_map(|e| match e {
+                            egui::Event::MouseWheel { unit, delta, .. } => Some((*unit, delta.y)),
+                            _ => None,
                         })
+                        .collect()
                 });
-                let in_test_area = response.hovered();
-
-                if in_test_area && scroll_delta.y != 0.0 {
-                    let now = Instant::now();
-                    let direction_up = scroll_delta.y > 0.0;
-
-                    // Record event
-                    self.scroll_events.push_back(ScrollEvent {
-                        timestamp: now,
-                        direction_up,
-                    });
-
-                    // Keep only last 500 events
-                    while self.scroll_events.len() > 500 {
-                        self.scroll_events.pop_front();
+                for (unit, lines) in wheel_events {
+                    if lines == 0.0 {
+                        continue;
                     }
-
-                    // Update totals
-                    if direction_up {
-                        self.total_up += scroll_delta.y.abs();
-                    } else {
-                        self.total_down += scroll_delta.y.abs();
-                    }
-
-                    self.step_count += 1;
-
-                    // Check for direction change
-                    if let Some(last_dir) = self.last_direction {
-                        if last_dir != direction_up {
-                            self.direction_changes += 1;
-                        }
-                    }
-                    self.last_direction = Some(direction_up);
-
-                    // Calculate scroll speed
-                    if let Some(last_time) = self.last_scroll_time {
-                        let delta_secs = now.duration_since(last_time).as_secs_f64();
-                        if delta_secs > 0.0 && delta_secs < 1.0 {
-                            let speed = 1.0 / delta_secs;
-                            self.speed_samples.push_back(speed);
-                            if self.speed_samples.len() > 100 {
-                                self.speed_samples.pop_front();
+                    match unit {
+                        egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                            let notches = self.line_wheel.add(unit, lines, 1.0);
+                            if notches != 0 {
+                                self.system_directions = true;
+                                self.record(now, notches);
                             }
                         }
-                    }
-                    self.last_scroll_time = Some(now);
-
-                    // Update current speed (rolling average of last 10 samples)
-                    let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
-                    if !recent.is_empty() {
-                        self.current_speed =
-                            recent.iter().copied().sum::<f64>() / recent.len() as f64;
+                        egui::MouseWheelUnit::Point => self.saw_smooth_scroll = true,
                     }
                 }
             }
+        }
+    }
+
+    /// Record one wheel report of `delta` notches (positive = up).
+    fn record(&mut self, now: Instant, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        let direction_up = delta > 0;
+        let abs_delta = delta.unsigned_abs() as f32;
+
+        // Record event
+        self.scroll_events.push_back(ScrollEvent {
+            timestamp: now,
+            direction_up,
+        });
+
+        // Keep only last 500 events
+        while self.scroll_events.len() > 500 {
+            self.scroll_events.pop_front();
+        }
+
+        // Update totals
+        if direction_up {
+            self.total_up += abs_delta;
+        } else {
+            self.total_down += abs_delta;
+        }
+
+        self.step_count += 1;
+
+        // Check for direction change
+        if let Some(last_dir) = self.last_direction {
+            if last_dir != direction_up {
+                self.direction_changes += 1;
+            }
+        }
+        self.last_direction = Some(direction_up);
+
+        // Skip and dead-direction checks, on seconds since the first report
+        let epoch = *self.epoch.get_or_insert(now);
+        let t = match now.checked_duration_since(epoch) {
+            Some(d) => d.as_secs_f64(),
+            None => -epoch.duration_since(now).as_secs_f64(),
+        };
+        self.wheel.feed(t, delta);
+
+        // Calculate scroll speed
+        if let Some(last_time) = self.last_scroll_time {
+            let delta_secs = now.duration_since(last_time).as_secs_f64();
+            if delta_secs > 0.0 && delta_secs < 1.0 {
+                let speed = 1.0 / delta_secs;
+                self.speed_samples.push_back(speed);
+                if self.speed_samples.len() > 100 {
+                    self.speed_samples.pop_front();
+                }
+            }
+        }
+        self.last_scroll_time = Some(now);
+
+        // Update current speed (rolling average of last 10 samples)
+        let recent: Vec<_> = self.speed_samples.iter().rev().take(10).collect();
+        if !recent.is_empty() {
+            self.current_speed = recent.iter().copied().sum::<f64>() / recent.len() as f64;
+        }
+    }
+
+    /// Title, colour and explanation for the current wheel verdict.
+    fn verdict_text(&self) -> (String, egui::Color32, String) {
+        let w = &self.wheel;
+        let skip_ms = mouse_testkit::analysis::diagnostics::Config::default().scroll_reversal_ms;
+        match w.verdict() {
+            WheelVerdict::Skipping => (
+                "Wheel is skipping".to_string(),
+                egui::Color32::from_rgb(255, 90, 90),
+                format!(
+                    "{} notches were reported in the opposite direction within {:.0} ms of the previous notch, faster than a finger can turn the wheel back. The encoder is worn or dirty: the page will jump back while scrolling.",
+                    w.skips, skip_ms
+                ),
+            ),
+            WheelVerdict::OneDirectionOnly { .. } if self.system_directions => (
+                "One direction does not register".to_string(),
+                egui::Color32::YELLOW,
+                format!(
+                    "{} notches registered one way and none the other. Turn the wheel the other way too: if nothing registers, that direction of the wheel encoder is dead. Up and down are not named because the system's scroll-direction setting may have swapped them.",
+                    w.total()
+                ),
+            ),
+            WheelVerdict::OneDirectionOnly { missing_up } => {
+                let (seen, missing, count) = if missing_up {
+                    ("down", "up", w.down)
+                } else {
+                    ("up", "down", w.up)
+                };
+                (
+                    format!("No {} notches registered", missing),
+                    egui::Color32::YELLOW,
+                    format!(
+                        "{} notches {} and none {}. Scroll {} too: if nothing registers, that direction of the wheel encoder is dead.",
+                        count, seen, missing, missing
+                    ),
+                )
+            }
+            WheelVerdict::PossibleSkip => (
+                "Possible skip".to_string(),
+                egui::Color32::YELLOW,
+                format!(
+                    "{} notch(es) reversed direction within {:.0} ms of the previous notch. This can be the hand flicking the wheel back; keep scrolling steadily one way, and if it repeats the encoder is failing.",
+                    w.skips, skip_ms
+                ),
+            ),
+            WheelVerdict::KeepScrolling => (
+                "Keep scrolling".to_string(),
+                egui::Color32::LIGHT_GRAY,
+                format!(
+                    "Scroll at least {} notches each way to check the wheel ({} down, {} up so far).",
+                    w.min_each(),
+                    w.down,
+                    w.up
+                ),
+            ),
+            WheelVerdict::NoFaultFound => (
+                "No skipping detected".to_string(),
+                egui::Color32::GREEN,
+                format!(
+                    "{} notches, both directions register and none were reversed.",
+                    w.total()
+                ),
+            ),
         }
     }
 
@@ -478,6 +548,11 @@ impl ScrollPanel {
         self.speed_samples.clear();
         self.last_scroll_time = None;
         self.current_speed = 0.0;
+        self.wheel = WheelCheck::new();
+        self.epoch = None;
+        self.line_wheel = WheelAccumulator::for_platform();
+        self.saw_smooth_scroll = false;
+        self.system_directions = false;
     }
 
     pub fn export(&self) -> Option<ScrollExport> {
@@ -490,23 +565,11 @@ impl ScrollPanel {
             self.speed_samples.iter().sum::<f64>() / self.speed_samples.len() as f64
         };
 
-        let speed_variance = if self.speed_samples.len() >= 2 {
-            let mean = avg_speed;
-            self.speed_samples
-                .iter()
-                .map(|x| (x - mean).powi(2))
-                .sum::<f64>()
-                / self.speed_samples.len() as f64
-        } else {
-            0.0
-        };
-        let speed_std = speed_variance.sqrt();
-
-        let consistency = if avg_speed > 0.0 {
-            ((1.0 - (speed_std / avg_speed).min(1.0)) * 100.0) as u32
-        } else {
-            0
-        };
+        // Share of wheel reports that went the way the wheel was being
+        // turned (100 = no skips). Scrolling speed is deliberately not part
+        // of it: speed variation measures the hand, not the wheel.
+        let consistency =
+            ((1.0 - self.wheel.skips as f64 / self.step_count as f64) * 100.0).round() as u32;
 
         Some(ScrollExport {
             total_steps: self.step_count,
@@ -515,6 +578,290 @@ impl ScrollPanel {
             direction_changes: self.direction_changes,
             avg_speed_sps: avg_speed,
             consistency_percent: consistency,
+            skips: self.wheel.skips,
+            skip_window_ms: mouse_testkit::analysis::diagnostics::Config::default()
+                .scroll_reversal_ms,
+            verdict: self.export_verdict(),
         })
+    }
+
+    /// The verdict in one line, for exports.
+    fn export_verdict(&self) -> String {
+        match self.wheel.verdict() {
+            WheelVerdict::KeepScrolling => format!(
+                "Inconclusive: fewer than {} notches each way",
+                self.wheel.min_each()
+            ),
+            _ => self.verdict_text().0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn run(panel: &mut ScrollPanel, notches: &[(u64, i32)]) {
+        let ctx = egui::Context::default();
+        let start = Instant::now();
+        let events: Vec<RawInputEvent> = notches
+            .iter()
+            .map(|&(ms, delta)| RawInputEvent {
+                kind: RawInputKind::Scroll { delta },
+                timestamp: start + Duration::from_millis(ms),
+            })
+            .collect();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui(ui, &ctx, &events, true);
+        });
+    }
+
+    /// Stroke-style scrolling: bursts of 5 notches 30 ms apart, with a
+    /// 200 ms pause to reposition the finger, 4 strokes down then 4 up.
+    /// Every other stroke is slow (120 ms per notch), as the old
+    /// instructions asked ("scroll at different speeds").
+    fn stroke_scrolling() -> Vec<(u64, i32)> {
+        let mut t = 0;
+        let mut out = Vec::new();
+        for dir in [-1, 1] {
+            for stroke in 0..4 {
+                for _ in 0..5 {
+                    t += if stroke % 2 == 0 { 30 } else { 120 };
+                    out.push((t, dir));
+                }
+                t += 200;
+            }
+            t += 500;
+        }
+        out
+    }
+
+    #[test]
+    fn healthy_wheel_with_stroke_scrolling_is_not_rated_poor() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        run(&mut panel, &stroke_scrolling());
+        let export = panel.export().unwrap();
+        assert_eq!(export.total_steps, 40);
+        assert_eq!(export.consistency_percent, 100);
+        assert_eq!(export.skips, 0);
+        assert_eq!(export.verdict, "No skipping detected");
+        assert_eq!(panel.wheel.verdict(), WheelVerdict::NoFaultFound);
+    }
+
+    #[test]
+    fn skipping_wheel_is_reported_from_raw_events() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        // Steady scrolling down, 25 ms per notch; every 5th report jumps up
+        let mut notches: Vec<(u64, i32)> = (1..=40)
+            .map(|i| (i * 25, if i % 5 == 0 { 1 } else { -1 }))
+            .collect();
+        notches.extend((1..=12).map(|i| (2000 + i * 25, 1)));
+        run(&mut panel, &notches);
+        assert_eq!(panel.wheel.skips, 8);
+        assert_eq!(panel.wheel.verdict(), WheelVerdict::Skipping);
+        let export = panel.export().unwrap();
+        assert_eq!(export.skips, 8);
+        assert_eq!(export.consistency_percent, 85);
+        assert_eq!(export.verdict, "Wheel is skipping");
+    }
+
+    #[test]
+    fn framework_input_counts_each_wheel_event_in_a_frame() {
+        let ctx = egui::Context::default();
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let screen = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 900.0),
+        ));
+        let wheel = |unit, y| egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, y),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let frames = [
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 200.0))],
+            vec![
+                wheel(egui::MouseWheelUnit::Line, -1.0),
+                wheel(egui::MouseWheelUnit::Line, -1.0),
+                // Encoder skip: one notch the wrong way within the frame
+                wheel(egui::MouseWheelUnit::Line, 1.0),
+                wheel(egui::MouseWheelUnit::Line, -1.0),
+                wheel(egui::MouseWheelUnit::Point, -12.0),
+            ],
+        ];
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: screen,
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                panel.ui(ui, &ctx, &[], false);
+            });
+        }
+        assert_eq!(panel.step_count, 4);
+        assert_eq!(panel.total_down, 3.0);
+        assert_eq!(panel.total_up, 1.0);
+        assert_eq!(panel.wheel.skips, 1);
+        assert!(panel.saw_smooth_scroll);
+    }
+
+    #[test]
+    fn framework_input_keeps_every_notch_when_the_page_could_scroll() {
+        // In the app the panel sits in a scrolling page taller than the
+        // default window. The wheel must not scroll the test area away
+        // from the pointer, or framework input stops counting notches and
+        // the "count 10 detents" check would wrongly suggest lost notches.
+        let ctx = egui::Context::default();
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                egui::ScrollArea::vertical().show(ui, |ui| panel.ui(ui, &ctx, &[], false));
+            });
+        };
+        frame(
+            &mut panel,
+            vec![egui::Event::PointerMoved(egui::pos2(300.0, 200.0))],
+        );
+        for dir in [-1.0, 1.0] {
+            for _ in 0..10 {
+                let notch = egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, dir),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame(&mut panel, vec![notch]);
+                // Let egui's smooth scrolling play out between notches
+                for _ in 0..10 {
+                    frame(&mut panel, Vec::new());
+                }
+            }
+        }
+        assert_eq!(panel.total_down, 10.0);
+        assert_eq!(panel.total_up, 10.0);
+    }
+
+    /// Frames of framework (window-system) wheel input over the test area.
+    fn run_framework(panel: &mut ScrollPanel, lines: &[f32]) {
+        let ctx = egui::Context::default();
+        let frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 900.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                panel.ui(ui, &ctx, &[], false);
+            });
+        };
+        frame(
+            panel,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 200.0))],
+        );
+        for &y in lines {
+            let notch = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, y),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(panel, vec![notch]);
+        }
+    }
+
+    #[test]
+    fn dead_direction_from_raw_input_is_named() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let notches: Vec<(u64, i32)> = (1..=15).map(|i| (i * 80, -1)).collect();
+        run(&mut panel, &notches);
+        let (title, _, message) = panel.verdict_text();
+        assert_eq!(title, "No up notches registered");
+        assert!(message.contains("15 notches down and none up"));
+        assert_eq!(panel.export().unwrap().verdict, "No up notches registered");
+    }
+
+    #[test]
+    fn dead_direction_from_system_input_is_not_named() {
+        // Without raw input the system's scroll direction applies: with
+        // natural scrolling (the macOS default) a dead physical "down"
+        // arrives as notches going up only. Naming "down" as the dead
+        // direction would send the user to check the wrong one.
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        run_framework(&mut panel, &[1.0; 15]);
+        assert_eq!(panel.total_up, 15.0);
+        let (title, _, message) = panel.verdict_text();
+        assert_eq!(title, "One direction does not register");
+        assert!(message.contains("15 notches registered one way and none the other"));
+        assert!(!message.contains("none down") && !message.contains("Scroll down"));
+    }
+
+    #[test]
+    fn export_carries_skips_and_verdict() {
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        run(&mut panel, &[(100, -1), (200, -1)]);
+        let export = panel.export().unwrap();
+        assert_eq!(export.skips, 0);
+        assert_eq!(export.skip_window_ms, 60.0);
+        assert_eq!(
+            export.verdict,
+            "Inconclusive: fewer than 10 notches each way"
+        );
+    }
+
+    #[test]
+    fn framework_line_deltas_make_whole_notches() {
+        // Windows, X11 and Wayland: one line per notch, fractions summed
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.line_wheel = WheelAccumulator::new(false);
+        // Classic wheel, then a high-resolution wheel at 1/8 notch per event
+        let mut lines = vec![-1.0, 1.0];
+        lines.extend([0.125; 16]);
+        run_framework(&mut panel, &lines);
+        assert_eq!((panel.total_down, panel.total_up), (1.0, 3.0));
+        // A reversed notch is not swallowed by a leftover fraction, and
+        // a multi-line event from fast scrolling counts every line
+        run_framework(&mut panel, &[0.5, -1.0, -3.0]);
+        assert_eq!((panel.total_down, panel.total_up), (5.0, 3.0));
+    }
+
+    #[test]
+    fn macos_slow_notches_are_not_lost() {
+        // macOS sends one line event per notch of a standard wheel, sized
+        // by its scroll acceleration: a slow notch is a fraction of a line.
+        // Summed, the "roll 10 slow clicks" check would show 1 and suggest
+        // a wheel that loses notches.
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.line_wheel = WheelAccumulator::new(true);
+        run_framework(&mut panel, &[-0.1; 10]);
+        assert_eq!(panel.total_down, 10.0);
+        run_framework(&mut panel, &[0.1, 0.3, 4.5]);
+        assert_eq!(panel.total_up, 3.0);
     }
 }

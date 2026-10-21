@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::export::{ExportInfo, TestResultsExport};
-use crate::input_bridge::InputBridge;
+use crate::input_bridge::{DeviceChoice, InputBridge};
 use crate::panels::{
     AccelPanel, AutoTestPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel,
     ScrollPanel, StutterPanel,
@@ -82,9 +82,18 @@ impl MouseTestKitApp {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         theme::setup_custom_style(&cc.egui_ctx);
 
-        // Load saved configuration
-        let config = Config::load();
+        // Start background raw input thread
+        let input_bridge = InputBridge::start();
+        if input_bridge.is_none() {
+            eprintln!("Note: Raw input not available. GUI tests will use framework input.");
+        }
 
+        Self::with_parts(Config::load(), input_bridge)
+    }
+
+    /// Build the app from a loaded configuration and an (optional) raw input
+    /// bridge.
+    fn with_parts(config: Config, input_bridge: Option<InputBridge>) -> Self {
         // Create panels with config values
         let mut stutter_panel = StutterPanel::new();
         stutter_panel.set_threshold_multiplier(config.stutter_threshold_multiplier);
@@ -95,12 +104,6 @@ impl MouseTestKitApp {
 
         let mut double_click_panel = DoubleClickPanel::new();
         double_click_panel.set_threshold_ms(config.double_click_threshold_ms);
-
-        // Start background raw input thread
-        let input_bridge = InputBridge::start();
-        if input_bridge.is_none() {
-            eprintln!("Note: Raw input not available. GUI tests will use framework input.");
-        }
 
         Self {
             active_test: ActiveTest::Dashboard,
@@ -119,6 +122,18 @@ impl MouseTestKitApp {
             config_dirty_since: None,
             input_bridge,
         }
+    }
+
+    fn any_test_running(&self) -> bool {
+        self.polling_panel.is_running()
+            || self.stutter_panel.is_running()
+            || self.click_panel.is_running()
+            || self.jitter_panel.is_running()
+            || self.dpi_panel.is_running()
+            || self.accel_panel.is_running()
+            || self.double_click_panel.is_running()
+            || self.scroll_panel.is_running()
+            || self.auto_test_panel.is_running()
     }
 
     /// Collect current settings and update config
@@ -341,7 +356,9 @@ impl MouseTestKitApp {
 
                     ui.add_space(8.0);
 
-                    // Export buttons row
+                    // Export buttons row. Disabled during Auto Diagnostics: the
+                    // file dialog blocks the window while the step timer runs.
+                    let export_enabled = !self.auto_test_panel.is_running();
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
 
@@ -356,8 +373,9 @@ impl MouseTestKitApp {
                         .min_size(egui::vec2(50.0, 28.0));
 
                         if ui
-                            .add(json_btn)
+                            .add_enabled(export_enabled, json_btn)
                             .on_hover_text("Export all results to JSON")
+                            .on_disabled_hover_text("Finish or abort Auto Diagnostics first")
                             .clicked()
                         {
                             self.export_json();
@@ -374,8 +392,9 @@ impl MouseTestKitApp {
                         .min_size(egui::vec2(50.0, 28.0));
 
                         if ui
-                            .add(csv_btn)
+                            .add_enabled(export_enabled, csv_btn)
                             .on_hover_text("Export all results to CSV")
+                            .on_disabled_hover_text("Finish or abort Auto Diagnostics first")
                             .clicked()
                         {
                             self.export_csv();
@@ -568,7 +587,7 @@ impl MouseTestKitApp {
                 self.test_card(
                     ui,
                     "Click Response",
-                    "Test reaction time and latency",
+                    "Measure hold time and clicks per second",
                     "🖱",
                     ActiveTest::ClickResponse,
                 );
@@ -604,6 +623,8 @@ impl MouseTestKitApp {
         ui.label(theme::subheading_style("SYSTEM INFO"));
         ui.add_space(12.0);
 
+        let status = input_source_status(self.input_bridge.as_ref());
+
         theme::glass_frame(ui).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -628,32 +649,36 @@ impl MouseTestKitApp {
                 ui.add_space(40.0);
                 ui.vertical(|ui| {
                     ui.label(theme::metric_label_style("INPUT SOURCE"));
-                    let (text, color) = if self.input_bridge.is_some() {
-                        ("RAW INPUT", ThemeColors::success())
-                    } else {
-                        ("FRAMEWORK (REDUCED ACCURACY)", egui::Color32::YELLOW)
-                    };
                     ui.label(
-                        egui::RichText::new(text)
+                        egui::RichText::new(status.headline)
                             .size(16.0)
                             .strong()
-                            .color(color),
+                            .color(if status.raw {
+                                ThemeColors::success()
+                            } else {
+                                egui::Color32::YELLOW
+                            }),
                     );
                 });
             });
-            if self.input_bridge.is_none() {
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(if cfg!(target_os = "linux") {
-                        "No readable mouse device was found. Add your user to the 'input' group (sudo usermod -aG input $USER) and log in again for precise timing."
-                    } else if cfg!(target_os = "windows") {
-                        "Raw Input registration failed; timing tests will use frame-rate-limited input."
-                    } else {
-                        "Raw input is not implemented on this platform; timing tests use frame-rate-limited input."
-                    })
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(&status.detail)
                     .size(11.0)
                     .color(ThemeColors::text_muted()),
+            );
+            if let Some(warning) = &status.warning {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{warning} If you are testing a different mouse, select it below."
+                    ))
+                    .size(11.0)
+                    .color(egui::Color32::YELLOW),
                 );
+            }
+            if let Some(bridge) = self.input_bridge.as_mut() {
+                ui.add_space(8.0);
+                device_picker(ui, bridge);
             }
         });
     }
@@ -794,7 +819,7 @@ impl MouseTestKitApp {
                             for feature in [
                                 "Polling rate monitoring",
                                 "Stutter detection with graphs",
-                                "Click latency testing",
+                                "Click hold time and rate",
                                 "DPI accuracy verification",
                                 "Sensor jitter analysis",
                             ] {
@@ -834,21 +859,162 @@ impl MouseTestKitApp {
     }
 }
 
+/// What the Dashboard says about where test input comes from.
+struct InputSourceStatus {
+    headline: &'static str,
+    /// Raw input from a device is in use.
+    raw: bool,
+    detail: String,
+    /// The measured device is not the one moving the pointer.
+    warning: Option<String>,
+}
+
+const FRAMEWORK_HEADLINE: &str = "FRAMEWORK (REDUCED ACCURACY)";
+const FRAMEWORK_EXPLAINED: &str =
+    "tests use framework input (frame-rate limited, after OS acceleration)";
+
+fn input_source_status(bridge: Option<&InputBridge>) -> InputSourceStatus {
+    let Some(bridge) = bridge else {
+        let detail = if cfg!(target_os = "linux") {
+            "No readable mouse device was found. Add your user to the 'input' group (sudo usermod -aG input $USER) and log in again for precise timing."
+        } else if cfg!(target_os = "windows") {
+            "Raw Input registration failed; timing tests will use frame-rate-limited input."
+        } else {
+            "Raw input is not implemented on this platform; timing tests use frame-rate-limited input."
+        };
+        return InputSourceStatus {
+            headline: FRAMEWORK_HEADLINE,
+            raw: false,
+            detail: detail.to_string(),
+            warning: None,
+        };
+    };
+    if let Some(device) = bridge.active_device() {
+        let detail = if bridge.choice() == DeviceChoice::Auto {
+            format!(
+                "Measuring {}: the mouse you last moved or clicked (kept while a test runs).",
+                device.label()
+            )
+        } else {
+            format!("Measuring {}, as selected below.", device.label())
+        };
+        return InputSourceStatus {
+            headline: "RAW INPUT",
+            raw: true,
+            detail,
+            warning: pointer_mismatch_warning(bridge),
+        };
+    }
+    let detail = if bridge.choice() == DeviceChoice::Pointer {
+        format!("Pointer input selected: {FRAMEWORK_EXPLAINED}.")
+    } else if bridge.devices().is_empty() {
+        format!(
+            "No mouse can be read directly, so {FRAMEWORK_EXPLAINED}. A mouse plugged in later is picked up automatically."
+        )
+    } else if bridge.pointer_mismatch() {
+        format!(
+            "The pointer is moving but no readable mouse is: the device in use (touchpad, tablet, remote session) cannot be read directly, so {FRAMEWORK_EXPLAINED}."
+        )
+    } else {
+        format!(
+            "Raw input is ready on {} device(s). Move or click the mouse you want to test to select it; until then {FRAMEWORK_EXPLAINED}.",
+            bridge.devices().len()
+        )
+    };
+    InputSourceStatus {
+        headline: FRAMEWORK_HEADLINE,
+        raw: false,
+        detail,
+        warning: None,
+    }
+}
+
+/// Warning shown while the pointer moves but the measured device does not.
+fn pointer_mismatch_warning(bridge: &InputBridge) -> Option<String> {
+    let device = bridge.active_device()?;
+    bridge.pointer_mismatch().then(|| {
+        format!(
+            "The pointer is moving but the measured device, {}, is not reporting it.",
+            device.label()
+        )
+    })
+}
+
+/// Combo box choosing which device the tests measure.
+fn device_picker(ui: &mut egui::Ui, bridge: &mut InputBridge) {
+    const AUTO: &str = "Auto (the mouse you move or click)";
+    const POINTER: &str = "Pointer (framework input)";
+    let mut choice = bridge.choice();
+    let selected = match choice {
+        DeviceChoice::Auto => AUTO.to_string(),
+        DeviceChoice::Device(id) => bridge
+            .devices()
+            .iter()
+            .find(|d| d.id == id)
+            .map_or_else(|| AUTO.to_string(), |d| d.label()),
+        DeviceChoice::Pointer => POINTER.to_string(),
+    };
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Measure:")
+                .size(12.0)
+                .color(ThemeColors::text_secondary()),
+        );
+        egui::ComboBox::from_id_salt("input_device_choice")
+            .selected_text(selected)
+            .width(320.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut choice, DeviceChoice::Auto, AUTO);
+                for device in bridge.devices() {
+                    ui.selectable_value(
+                        &mut choice,
+                        DeviceChoice::Device(device.id),
+                        device.label(),
+                    );
+                }
+                ui.selectable_value(&mut choice, DeviceChoice::Pointer, POINTER);
+            });
+    });
+    if choice != bridge.choice() {
+        bridge.set_choice(choice);
+    }
+}
+
 impl eframe::App for MouseTestKitApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         // Poll raw input events from the background thread (once per frame).
         // Use a local variable so the borrow checker doesn't conflict with &mut self in the closure.
-        let frame_events = match &self.input_bridge {
-            Some(bridge) => bridge.poll(),
+        let tests_running = self.any_test_running();
+        let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+        let frame_events = match &mut self.input_bridge {
+            Some(bridge) => {
+                // Auto device selection must not switch devices mid-test
+                bridge.set_selection_frozen(tests_running);
+                let events = bridge.poll();
+                bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
+                events
+            }
             None => Vec::new(),
         };
-        let has_bridge = self.input_bridge.is_some();
+        // Raw input is used only while a device is actually being measured;
+        // until then (and when pointer input is chosen) panels use framework
+        // input and say so.
+        let has_bridge = self
+            .input_bridge
+            .as_ref()
+            .is_some_and(InputBridge::is_delivering);
+        let mismatch_warning = self
+            .input_bridge
+            .as_ref()
+            .and_then(pointer_mismatch_warning);
 
-        // The auto diagnostics engine must see every frame's events even
-        // while another panel is displayed.
+        // The auto diagnostics engine and a jitter sample must see every
+        // frame's events even while another panel is displayed.
         self.auto_test_panel
+            .process_input(ctx, &frame_events, has_bridge);
+        self.jitter_panel
             .process_input(ctx, &frame_events, has_bridge);
 
         // Check if any panel settings changed and mark config dirty
@@ -866,6 +1032,11 @@ impl eframe::App for MouseTestKitApp {
         self.render_sidebar(ui);
 
         let raw_events = &frame_events;
+        // Lift-off checks measure in mm with the DPI from the DPI Accuracy
+        // page. That page starts at 800, so 800 counts as not set and the
+        // checks say they assumed it.
+        let lift_dpi = Some(f64::from(self.dpi_panel.get_target_dpi()))
+            .filter(|&d| d != mouse_testkit::analysis::liftoff::DEFAULT_DPI);
 
         // Render main content with styled central panel
         egui::CentralPanel::default()
@@ -875,9 +1046,26 @@ impl eframe::App for MouseTestKitApp {
                     .inner_margin(24),
             )
             .show(ui, |ui| {
+                // Test pages say when the measured device is not the one
+                // moving the pointer (the Dashboard has its own notice)
+                if let Some(warning) = &mismatch_warning {
+                    if self.active_test != ActiveTest::Dashboard {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{warning} Choose the mouse you are testing on the Dashboard."
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::YELLOW),
+                        );
+                        ui.add_space(8.0);
+                    }
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| match self.active_test {
                     ActiveTest::Dashboard => self.render_dashboard(ui),
-                    ActiveTest::AutoTest => self.auto_test_panel.ui(ui, ctx, has_bridge),
+                    ActiveTest::AutoTest => {
+                        self.auto_test_panel.set_dpi(lift_dpi);
+                        self.auto_test_panel.ui(ui, ctx, has_bridge)
+                    }
                     ActiveTest::PollingRate => {
                         self.polling_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
@@ -889,6 +1077,7 @@ impl eframe::App for MouseTestKitApp {
                         self.click_panel.ui_sticky(ui, ctx, raw_events, has_bridge)
                     }
                     ActiveTest::LiftOff => {
+                        self.click_panel.set_liftoff_dpi(lift_dpi);
                         self.click_panel.ui_liftoff(ui, ctx, raw_events, has_bridge)
                     }
                     ActiveTest::ScrollWheel => {
@@ -904,7 +1093,7 @@ impl eframe::App for MouseTestKitApp {
                     ActiveTest::DoubleClick => {
                         self.double_click_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
-                    ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
+                    ActiveTest::Jitter => self.jitter_panel.ui(ui, has_bridge),
                 });
             });
 
@@ -915,24 +1104,116 @@ impl eframe::App for MouseTestKitApp {
 
         // Only request continuous repaints when a test is actively running.
         // While idle, repaint occasionally so the raw-input channel is drained
-        // even when the pointer is outside the window.
-        let any_test_running = self.polling_panel.is_running()
-            || self.stutter_panel.is_running()
-            || self.click_panel.is_running()
-            || self.jitter_panel.is_running()
-            || self.dpi_panel.is_running()
-            || self.accel_panel.is_running()
-            || self.double_click_panel.is_running()
-            || self.scroll_panel.is_running()
-            || self.auto_test_panel.is_running();
-        if any_test_running {
+        // (and devices are picked up) even when the pointer is outside the
+        // window.
+        if self.any_test_running() {
             ctx.request_repaint();
-        } else if has_bridge {
+        } else if self.input_bridge.is_some() {
             ctx.request_repaint_after(IDLE_REPAINT_INTERVAL);
         }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_config_if_needed(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input_bridge::{BridgeMessage, InputDevice, RawButton, RawInputEvent, RawInputKind};
+
+    fn device(id: u64, name: &str, location: &str) -> BridgeMessage {
+        BridgeMessage::Added(InputDevice {
+            id,
+            name: name.to_string(),
+            location: location.to_string(),
+        })
+    }
+
+    fn press(id: u64) -> BridgeMessage {
+        BridgeMessage::Event(
+            id,
+            RawInputEvent {
+                kind: RawInputKind::ButtonPress(RawButton::Left),
+                timestamp: Instant::now(),
+            },
+        )
+    }
+
+    fn render_dashboard(app: &mut MouseTestKitApp) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| app.render_dashboard(ui));
+            });
+        }
+    }
+
+    #[test]
+    fn dashboard_claims_raw_input_only_while_a_device_delivers() {
+        let (mut bridge, sender) = InputBridge::for_test();
+        // A laptop: TrackPoint node plus an external mouse, neither used yet
+        sender
+            .send(device(1, "TPPS/2 TrackPoint", "event10"))
+            .unwrap();
+        sender.send(device(2, "Gaming Mouse", "event2")).unwrap();
+        bridge.poll();
+        let status = input_source_status(Some(&bridge));
+        assert!(!status.raw);
+        assert_eq!(status.headline, FRAMEWORK_HEADLINE);
+        assert!(status.detail.contains("Move or click"), "{}", status.detail);
+
+        // The user clicks with the external mouse
+        sender.send(press(2)).unwrap();
+        assert_eq!(bridge.poll().len(), 1);
+        let status = input_source_status(Some(&bridge));
+        assert!(status.raw);
+        assert!(status.detail.contains("Gaming Mouse (event2)"));
+        assert!(status.warning.is_none());
+
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        render_dashboard(&mut app);
+
+        // Pointer input chosen in the picker
+        let bridge = app.input_bridge.as_mut().unwrap();
+        bridge.set_choice(DeviceChoice::Pointer);
+        let status = input_source_status(Some(bridge));
+        assert!(!status.raw);
+        assert!(status.detail.starts_with("Pointer input selected"));
+        render_dashboard(&mut app);
+    }
+
+    #[test]
+    fn unplugging_the_measured_mouse_falls_back_to_framework_input() {
+        let (mut bridge, sender) = InputBridge::for_test();
+        sender.send(device(5, "USB Mouse", "event5")).unwrap();
+        sender.send(press(5)).unwrap();
+        bridge.poll();
+        assert!(input_source_status(Some(&bridge)).raw);
+
+        sender.send(BridgeMessage::Removed(5)).unwrap();
+        bridge.poll();
+        let status = input_source_status(Some(&bridge));
+        assert!(!status.raw);
+        assert!(
+            status.detail.contains("plugged in later"),
+            "{}",
+            status.detail
+        );
+    }
+
+    #[test]
+    fn dashboard_renders_without_raw_input() {
+        let mut app = MouseTestKitApp::with_parts(Config::default(), None);
+        render_dashboard(&mut app);
+        assert!(!input_source_status(None).raw);
     }
 }

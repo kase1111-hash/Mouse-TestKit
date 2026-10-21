@@ -12,11 +12,13 @@
 //! added to the 'input' group: `sudo usermod -aG input $USER`
 
 #[cfg(target_os = "linux")]
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode};
+use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode, SynchronizationCode};
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::time::{Instant, SystemTime};
 
 /// Represents a detected mouse device on Linux.
 #[cfg(target_os = "linux")]
@@ -176,7 +178,79 @@ pub fn select_mouse() -> Option<Device> {
 }
 
 // Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseButton, MouseEvent};
+pub use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
+
+/// Fetch pending events with one `Move` per hardware report.
+///
+/// evdev splits a report into separate REL_X and REL_Y events followed by
+/// SYN_REPORT; they are merged here so a diagonal report is one move, not two.
+/// Every event carries its kernel timestamp (converted to `Instant`) instead
+/// of the time it was read, so batches drained together keep their real
+/// spacing. Returns an empty list when nothing is pending.
+#[cfg(target_os = "linux")]
+pub fn fetch_timed_events(device: &mut Device) -> Vec<TimedEvent> {
+    let events: Vec<evdev::InputEvent> = match device.fetch_events() {
+        Ok(events) => events.collect(),
+        Err(_) => return Vec::new(),
+    };
+
+    // Map kernel (CLOCK_REALTIME) timestamps onto the monotonic clock using
+    // one reference pair for the whole batch, so intervals within it are exact.
+    let ref_system = SystemTime::now();
+    let ref_instant = Instant::now();
+    group_reports(&events, |ts| {
+        ref_system
+            .duration_since(ts)
+            .ok()
+            .and_then(|age| ref_instant.checked_sub(age))
+            .unwrap_or(ref_instant)
+    })
+}
+
+/// Merge the axis events of each SYN_REPORT-terminated report into one move
+/// and stamp every event via `to_instant(kernel timestamp)`.
+#[cfg(target_os = "linux")]
+fn group_reports(
+    events: &[evdev::InputEvent],
+    to_instant: impl Fn(SystemTime) -> Instant,
+) -> Vec<TimedEvent> {
+    let mut out = Vec::new();
+    let (mut dx, mut dy) = (0, 0);
+    let mut move_time = None;
+    let flush = |out: &mut Vec<TimedEvent>, dx: &mut i32, dy: &mut i32, time: Option<Instant>| {
+        if let Some(time) = time {
+            if *dx != 0 || *dy != 0 {
+                out.push(TimedEvent {
+                    time,
+                    event: MouseEvent::Move { dx: *dx, dy: *dy },
+                });
+            }
+        }
+        (*dx, *dy) = (0, 0);
+    };
+    for ev in events {
+        if let EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) =
+            ev.destructure()
+        {
+            flush(&mut out, &mut dx, &mut dy, move_time.take());
+            continue;
+        }
+        match parse_event(ev) {
+            Some(MouseEvent::Move { dx: x, dy: y }) => {
+                dx += x;
+                dy += y;
+                move_time.get_or_insert_with(|| to_instant(ev.timestamp()));
+            }
+            Some(event) => out.push(TimedEvent {
+                time: to_instant(ev.timestamp()),
+                event,
+            }),
+            None => {}
+        }
+    }
+    flush(&mut out, &mut dx, &mut dy, move_time);
+    out
+}
 
 /// Parse an evdev event into a MouseEvent
 #[cfg(target_os = "linux")]
@@ -203,5 +277,66 @@ pub fn parse_event(event: &evdev::InputEvent) -> Option<MouseEvent> {
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use evdev::{EventType, InputEvent};
+
+    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
+    }
+
+    fn syn() -> InputEvent {
+        InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_REPORT.0,
+            0,
+        )
+    }
+
+    fn moves(events: &[TimedEvent]) -> Vec<(i32, i32)> {
+        events
+            .iter()
+            .filter_map(|e| match e.event {
+                MouseEvent::Move { dx, dy } => Some((dx, dy)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn x_and_y_of_one_report_become_one_move() {
+        let now = Instant::now();
+        let events = [
+            rel(RelativeAxisCode::REL_X, 3),
+            rel(RelativeAxisCode::REL_Y, -2),
+            syn(),
+            rel(RelativeAxisCode::REL_Y, 5),
+            syn(),
+        ];
+        let out = group_reports(&events, |_| now);
+        assert_eq!(moves(&out), vec![(3, -2), (0, 5)]);
+    }
+
+    #[test]
+    fn buttons_and_wheel_pass_through_and_trailing_motion_is_kept() {
+        let now = Instant::now();
+        let events = [
+            InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1),
+            syn(),
+            rel(RelativeAxisCode::REL_WHEEL, -1),
+            syn(),
+            rel(RelativeAxisCode::REL_X, 7),
+        ];
+        let out = group_reports(&events, |_| now);
+        assert!(matches!(
+            out[0].event,
+            MouseEvent::ButtonPress(MouseButton::Left)
+        ));
+        assert!(matches!(out[1].event, MouseEvent::Scroll { delta: -1 }));
+        assert_eq!(moves(&out), vec![(7, 0)]);
     }
 }

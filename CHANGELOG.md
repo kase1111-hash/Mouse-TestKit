@@ -22,8 +22,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Polling panels show the nearest nominal rate (125/250/500/1000/... Hz)
 - Windows raw input now reports side/extra buttons
 - Comprehensive project documentation
+- **GUI device selection**: the raw-input bridge reads every mouse-like device,
+  locks onto the one you actually move (shown by name on the Dashboard, with a
+  picker to choose another) and picks a mouse up again after it is unplugged
+  and replugged; Windows filters raw input by device the same way
+- Shared, unit-tested analysis modules for lift-off jumps (`analysis::liftoff`,
+  used by the CLI test, the GUI Lift-Off test and Auto Diagnostics) and scroll
+  wheel faults (`analysis::scroll`)
+- `input::fetch_timed_events`: CLI tests get one event per hardware report with
+  its device timestamp (kernel time on Linux, raw-input thread time on Windows)
 
 ### Fixed
+- **Timing used read time, not report time**: CLI tests and the GUI bridge
+  stamped events when the queue was drained, so a batch of reports looked
+  simultaneous and 2-8 kHz mice read as millions of Hz (CLI polling) or as
+  ~476 Hz (CLI Auto Diagnostics). Kernel/raw-input timestamps are used now
+- **Healthy mice flagged for stutter**: mice only report when counts build up,
+  so slow movement, reversals and brief stops leave normal 2-20 ms gaps.
+  Polling and stutter (GUI, CLI, Auto Diagnostics) are now judged only between
+  reports fast enough to prove the mouse reported every poll, against the
+  median interval with a 2.5 ms floor; with too little fast movement the result
+  is "move faster" / inconclusive. Pairs of reports must point the same way, so
+  reversals and brief stops are not timed. The CLI stutter totals also
+  re-counted the same window several times a second, and the CLI polling
+  monitor timed slow movement, showing a fraction of the real rate
+- **Freezes were invisible**: a 0.1-1 s gap in the middle of fast movement (a
+  wireless dropout or the sensor losing tracking) was ignored by Auto
+  Diagnostics and the Stutter test. It is now reported when the held-back
+  movement arrives after the gap
+- **Auto Diagnostics verdicts**: a stuck button, a dead right button or a dead
+  wheel could still end "Healthy"; untested or skipped parts now make the
+  verdict Inconclusive and say what was not tested. One bump, or a hand that
+  lets go late, during the rest step no longer reads as sensor drift (movement
+  must recur in 3 separate seconds after a 2 s settle). Switch bounce uses one
+  rule everywhere (Auto Diagnostics, GUI and CLI double-click tests): 1-2
+  bounces mean re-test, 3 or more a failing switch, whatever the number of
+  clicks. Scroll skips are counted once, as in the Scroll test. Without raw
+  input the timing-based checks are skipped instead of being judged on frame
+  times, wheel deltas are summed into whole notches, a run keeps the input it
+  started with, and losing raw input mid-run makes the result inconclusive.
+  Checks that did not run show "not tested" instead of 0. Abort no longer sits
+  under the click target, and export is disabled mid-run
+- **Lift-off** (CLI, GUI and Auto Diagnostics) checked one axis of one report:
+  real jumps spread over several reports were missed and ordinary starts at
+  high DPI were flagged. Motion is now summed over 100 ms after a pause and
+  compared with a physical distance (2 mm) at the mouse's DPI; tests need real
+  lifts before saying "no jumps", and an assumed DPI is stated
+- **Sticky clicks**: a single normal 100-150 ms click was called sticky (CLI
+  and GUI). The Auto Diagnostics rule (250 ms, at least 2 long holds) is used
+  everywhere, a button still held at the end is reported, and clicks on the
+  panel's own Stop button are no longer recorded
+- **CLI double-click test** missed a bounce on release (press within 25 ms of
+  the previous release)
+- **CLI angle-snapping test** asked for diagonal lines (which snapping never
+  changes) and measured X and Y events separately, so it could never detect
+  snapping; it now uses the GUI's stroke analysis with near-axis lines
+- **DPI test**: the GUI summed path length (overshoot and wobble read high) and
+  the CLI counted only X and started counting before the mouse was on the
+  start mark. Both now use net displacement, distance in inches or cm, and a
+  wider DPI range (also kept when the settings are reloaded); the CLI uses the
+  median of samples, asks again when it cannot read the DPI you typed instead
+  of assuming 800, and reports a result more than 25% off as a setup problem
+- **Jitter** recorded the click on "Take Sample" (GUI) and the hand letting go,
+  and the CLI rated one bump as sensor noise; both now wait 2 s and set aside
+  disturbed samples. A GUI sample keeps recording when you switch pages
+- **CLI tests that saw no input** (jitter, lift-off) reported a clean result;
+  they now check that the selected mouse moves first. Input queued while
+  choosing the device is discarded instead of being read as a bounce or a
+  jump, and stickiness and double-click results list which buttons registered
+- **Click tests (GUI)** counted presses anywhere in the window, including the
+  sidebar and the panel's own buttons; without raw input they also missed
+  clicks shorter than a frame and judged bounce from frame times. Presses now
+  count only on the test target, and frame-timed results say so
+- **Scroll wheel (GUI)** graded the user's scrolling rhythm ("Poor") and
+  claimed missed-step detection it did not have. It now detects reversed
+  notches and a direction that never registers; high-resolution wheel deltas
+  add up on Windows instead of being dropped
+- **Acceleration tests** claimed to verify OS acceleration and "1:1" input,
+  although raw counts are read before OS acceleration; they now cover
+  sensor/firmware acceleration only. Passes are compared by their median, and
+  out-and-back strokes, the return trip and the move to the GUI's Stop button
+  are no longer counted as passes. Lost counts at speed are not called
+  acceleration, and the export says which verdict and input the run used. On
+  Windows the CLI no longer records a second pass on every SPACE release
+- **USB conflict scan** read only device-level classes, so mice were "Other"
+  and it could never report anything. It now reads interface classes, link
+  speed and hubs, and treats a shared bus as information, not a conflict
+- **CLI click reaction test** recorded clicks made before the cue as ~0 ms; it
+  now rejects false starts, randomises the delay and says it measures human
+  reaction time, not mouse latency (GUI text no longer claims latency either)
+- **CLI standard runner** reported every test as successful even when it was
+  quit or no mouse was found
+- **Without raw input** (macOS, Linux outside the `input` group) the polling,
+  stutter and DPI panels showed the display frame rate and OS-accelerated
+  pointer movement as mouse measurements; they now explain that raw input is
+  required
+- Windows CLI merged every mouse and touchpad into the selected device and
+  ignored side buttons; it now filters by device and ignores absolute reports,
+  and clicks on the console window no longer paste into the test
+- CLI screens drawn in raw mode no longer render as a staircase, and the batch
+  runner no longer counts a test without a mouse as run
+- The GUI Polling panel's Start now clears the previous run's Min/Max/Avg
+- Loaded GUI config values are clamped to the ranges the UI allows
+- CI: the retired `macos-13` runner left the Intel macOS job queued until it
+  was cancelled (it is now cross-compiled on `macos-latest`), and new clippy
+  lints are fixed
 - **Acceleration test (GUI)** reported acceleration on every mouse: it compared
   the size of individual reports, which grows with speed by definition. It now
   compares the counts produced by whole passes over the same distance at slow
@@ -57,6 +160,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented Rust requirement corrected to 1.92 (required by eframe 0.35)
 
 ### Changed
+- A measured polling rate of 60-110 Hz is noted as normal for Bluetooth
+  instead of flagged, and no USB nominal rate is shown for it (Auto
+  Diagnostics, Polling panel and CLI); only rates under 60 Hz are a warning
+- Exports keep their existing JSON keys and add fields that say what the
+  numbers are (units, long-hold threshold and verdicts, scroll skips, lift-off
+  distances in mm, DPI sample ratings, stutter rating and freezes); CSV labels
+  say counts instead of px, and "not tested" instead of 0
 - Updated `eframe`/`egui` from 0.29 to 0.35 and `egui_plot` from 0.29 to 0.36,
   migrating to the new `eframe::App::ui` entry point, `egui::Panel` API,
   `CornerRadius` styling, and named plot-item constructors

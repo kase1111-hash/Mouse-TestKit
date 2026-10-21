@@ -1,9 +1,15 @@
 //! Stutter Detection Test
 //! Detects mouse movement stutter and irregularities
+//!
+//! Only intervals during fast, steady movement are judged (see
+//! `mouse_testkit::analysis::stutter::StutterDetector`): slow movement,
+//! reversals and pauses legitimately leave gaps between reports.
 
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use mouse_testkit::analysis::stutter::{analyze_stutter, StutterEvent, StutterSeverity};
+use mouse_testkit::analysis::stutter::{
+    StutterDetector, StutterRating, DEFAULT_STUTTER_MULTIPLIER, MIN_JUDGED_SECS, MIN_STUTTER_GAP_MS,
+};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -12,11 +18,17 @@ use crate::input::{self, MouseEvent};
 #[cfg(target_os = "windows")]
 use crate::input_windows::{self as input, MouseEvent};
 
-const STUTTER_THRESHOLD_MS: f64 = 4.0;
+/// Judged intervals kept for the live graph.
+const GRAPH_SAMPLES: usize = 60;
 
-pub fn run() {
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
+pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
-    println!("Move your mouse in circles to detect stutter.");
+    println!("Move your mouse quickly and continuously in circles.");
+    println!("Only fast, steady movement is judged; slow movement, direction");
+    println!("reversals and pauses are ignored because a mouse legitimately");
+    println!("sends fewer reports then. At 4000-8000 Hz use 1600+ DPI or move faster.");
     println!("Press 'q' to quit.\n");
 
     let mut device = match input::select_mouse() {
@@ -24,17 +36,15 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
-    #[cfg(target_os = "linux")]
-    device.grab().ok();
-    // Windows doesn't require device grab - Raw Input works without exclusive access
+    terminal::grab_device(&mut device);
 
-    let mut timestamps: VecDeque<Instant> = VecDeque::new();
-    let mut deltas: VecDeque<f64> = VecDeque::new();
-    let mut stutter_events: Vec<StutterEvent> = Vec::new();
+    let mut detector = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+    let mut recent: VecDeque<f64> = VecDeque::with_capacity(GRAPH_SAMPLES + 1);
+    let epoch = Instant::now();
     let mut last_print = Instant::now();
 
     let _guard = terminal::TerminalGuard::new();
@@ -52,76 +62,26 @@ pub fn run() {
             }
         }
 
-        #[cfg(target_os = "linux")]
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                if let Some(MouseEvent::Move { .. }) = input::parse_event(&ev) {
-                    let now = Instant::now();
-                    if let Some(last) = timestamps.back() {
-                        let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
-                        deltas.push_back(delta);
-                        if deltas.len() > 100 {
-                            deltas.pop_front();
-                        }
-                    }
-                    timestamps.push_back(now);
-                    if timestamps.len() > 1000 {
-                        timestamps.pop_front();
+        // One Move per hardware report, stamped when the device sent it
+        for timed in input::fetch_timed_events(&mut device) {
+            if let MouseEvent::Move { dx, dy } = timed.event {
+                let t = timed.time.saturating_duration_since(epoch).as_secs_f64();
+                if let Some(interval) = detector.feed(t, dx, dy) {
+                    recent.push_back(interval);
+                    if recent.len() > GRAPH_SAMPLES {
+                        recent.pop_front();
                     }
                 }
             }
         }
 
-        #[cfg(target_os = "windows")]
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                if let MouseEvent::Move { .. } = ev {
-                    let now = Instant::now();
-                    if let Some(last) = timestamps.back() {
-                        let delta = now.duration_since(*last).as_secs_f64() * 1000.0;
-                        deltas.push_back(delta);
-                        if deltas.len() > 100 {
-                            deltas.pop_front();
-                        }
-                    }
-                    timestamps.push_back(now);
-                    if timestamps.len() > 1000 {
-                        timestamps.pop_front();
-                    }
-                }
-            }
-        }
-
-        if last_print.elapsed() >= Duration::from_millis(200) && deltas.len() >= 10 {
-            let deltas_slice = deltas.make_contiguous();
-            let new_stutters = analyze_stutter(deltas_slice);
-            stutter_events.extend(new_stutters.iter().cloned());
-
-            let avg_delta: f64 = deltas_slice.iter().sum::<f64>() / deltas_slice.len() as f64;
-            let max_delta = deltas_slice.iter().cloned().fold(f64::MIN, f64::max);
-            let min_delta = deltas_slice.iter().cloned().fold(f64::MAX, f64::min);
-
-            let stutter_count = deltas_slice
-                .iter()
-                .filter(|d| (**d - avg_delta).abs() > STUTTER_THRESHOLD_MS)
-                .count();
-
-            print!("\x1B[2J\x1B[1;1H");
-            println!("=== Stutter Detection ===\n");
-            println!(
-                "Avg interval: {:.2} ms | Min: {:.2} ms | Max: {:.2} ms",
-                avg_delta, min_delta, max_delta
+        if last_print.elapsed() >= Duration::from_millis(200) {
+            // Raw mode: every line must end in "\r\n" (see raw_lines)
+            let frame = format!(
+                "=== Stutter Detection ===\n\n{}\nPress 'q' to quit\n",
+                live_text(&detector, &recent)
             );
-            println!(
-                "Stutters detected: {} (threshold: {:.1}ms deviation)\n",
-                stutter_count, STUTTER_THRESHOLD_MS
-            );
-            println!("{}", render_stutter_graph(deltas_slice, avg_delta));
-            println!(
-                "\nTotal stutter events this session: {}",
-                stutter_events.len()
-            );
-            println!("\nPress 'q' to quit");
+            print!("\x1B[2J\x1B[1;1H{}", terminal::raw_lines(&frame));
 
             use std::io::Write;
             std::io::stdout().flush().ok();
@@ -132,95 +92,155 @@ pub fn run() {
     drop(_guard);
 
     println!("\n\n=== Stutter Test Complete ===");
-    println!("Total stutter events: {}", stutter_events.len());
-
-    if !stutter_events.is_empty() {
-        let severe = stutter_events
-            .iter()
-            .filter(|s| matches!(s.severity, StutterSeverity::Severe))
-            .count();
-        let moderate = stutter_events
-            .iter()
-            .filter(|s| matches!(s.severity, StutterSeverity::Moderate))
-            .count();
-        let minor = stutter_events
-            .iter()
-            .filter(|s| matches!(s.severity, StutterSeverity::Minor))
-            .count();
-        println!("  Severe (8ms+):    {}", severe);
-        println!("  Moderate (4-8ms): {}", moderate);
-        println!("  Minor (2-4ms):    {}", minor);
-    }
+    print_summary(&detector);
 
     terminal::wait_for_enter();
+    true
 }
 
-fn render_stutter_graph(deltas: &[f64], avg: f64) -> String {
-    let width = 60;
-    let height = 10;
-    let display_deltas: Vec<f64> = if deltas.len() > width {
-        deltas[deltas.len() - width..].to_vec()
-    } else {
-        deltas.to_vec()
-    };
+/// The live screen below the title.
+fn live_text(detector: &StutterDetector, recent: &VecDeque<f64>) -> String {
+    match (detector.median_interval_ms(), detector.threshold_ms()) {
+        (Some(median), Some(threshold)) => {
+            let samples: Vec<f64> = recent.iter().copied().collect();
+            format!(
+                "Median interval: {:.3} ms (~{:.0} Hz) | Stutter threshold: {:.2} ms\nFast movement judged: {:.1} s ({} intervals) | Stutters: {} | Worst: {:.1} ms\n\n{}\n",
+                median,
+                1000.0 / median,
+                threshold,
+                detector.judged_secs(),
+                detector.judged(),
+                detector.stutter_count(),
+                detector.worst_gap_ms(),
+                render_stutter_graph(&samples, median, threshold)
+            )
+        }
+        _ => format!(
+            "Waiting for fast movement... ({} reports seen, {} fast intervals collected)\nMove the mouse quickly in circles.\n",
+            detector.reports(),
+            detector.pending()
+        ),
+    }
+}
 
-    if display_deltas.is_empty() {
+fn print_summary(detector: &StutterDetector) {
+    let rating = detector.rating();
+    println!(
+        "Fast movement judged: {:.1} s ({} intervals)",
+        detector.judged_secs(),
+        detector.judged()
+    );
+    if let Some(hz) = detector.polling_hz() {
+        println!("Polling rate during fast movement: ~{:.0} Hz", hz);
+    }
+    println!("Total stutter events: {}", detector.stutter_count());
+
+    if detector.stutter_count() > 0 {
+        let (minor, moderate, severe) = detector.severity_counts();
+        println!("  Severe (8+ ms late):  {}", severe);
+        println!("  Moderate (4-8 ms):    {}", moderate);
+        println!("  Minor (under 4 ms):   {}", minor);
+        println!("  Worst gap: {:.1} ms", detector.worst_gap_ms());
+        if detector.freezes() > 0 {
+            println!(
+                "  Freezes (0.1-1 s while moving the same way): {}",
+                detector.freezes()
+            );
+        }
+    }
+
+    println!("\nRating: {} - {}", rating.label(), rating.message());
+    if rating == StutterRating::Inconclusive {
+        println!(
+            "Need at least {:.0} s of fast movement to rate (got {:.1} s).",
+            MIN_JUDGED_SECS,
+            detector.judged_secs()
+        );
+    }
+    println!(
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s after which the held-back movement arrives at once; two or more rate the session at least Fair.)",
+        DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
+    );
+}
+
+fn render_stutter_graph(deltas: &[f64], median: f64, threshold: f64) -> String {
+    let width = GRAPH_SAMPLES;
+    let height = 10;
+
+    if deltas.is_empty() {
         return String::from("No data yet...");
     }
 
-    let max = display_deltas.iter().cloned().fold(f64::MIN, f64::max);
-    let min = display_deltas.iter().cloned().fold(f64::MAX, f64::min);
-    let range = if (max - min).abs() < 0.001 {
-        1.0
-    } else {
-        max - min
-    };
+    let max = deltas.iter().cloned().fold(threshold, f64::max);
+    let min = 0.0;
+    let range = max - min;
 
     let mut output = String::new();
     output.push_str(&format!(
-        "Delta Time Graph (last {} samples)\n",
-        display_deltas.len()
+        "Interval graph, fast movement only (last {} samples)\n",
+        deltas.len()
     ));
-    output.push_str(&format!("{:.1}ms ┌", max));
+    output.push_str(&format!("{:5.1}ms ┌", max));
     output.push_str(&"─".repeat(width));
     output.push_str("┐\n");
 
     for row in (0..height).rev() {
-        let threshold = min + (range * row as f64 / height as f64);
-        if row == height / 2 {
-            output.push_str(&format!("{:.1}ms │", avg));
-        } else {
-            output.push_str("      │");
-        }
+        let level = min + (range * row as f64 / height as f64);
+        output.push_str("        │");
 
-        for val in &display_deltas {
-            if *val >= threshold {
-                let deviation = (*val - avg).abs();
-                if deviation > 8.0 {
-                    output.push('█');
-                } else if deviation > 4.0 {
-                    output.push('▓');
-                } else if deviation > 2.0 {
-                    output.push('▒');
-                } else {
+        for val in deltas {
+            if *val >= level {
+                let late = *val - median;
+                if *val <= threshold {
                     output.push('░');
+                } else if late >= 8.0 {
+                    output.push('█');
+                } else if late >= 4.0 {
+                    output.push('▓');
+                } else {
+                    output.push('▒');
                 }
             } else {
                 output.push(' ');
             }
         }
-        for _ in 0..(width.saturating_sub(display_deltas.len())) {
+        for _ in 0..(width.saturating_sub(deltas.len())) {
             output.push(' ');
         }
         output.push_str("│\n");
     }
 
-    output.push_str(&format!("{:.1}ms └", min));
+    output.push_str(&format!("{:5.1}ms └", min));
     output.push_str(&"─".repeat(width));
     output.push_str("┘\n");
     output.push_str("      Legend: ░ Normal  ▒ Minor  ▓ Moderate  █ Severe\n");
     output
 }
 
-// analyze_stutter, StutterEvent, StutterSeverity and their unit tests
-// now live in mouse_testkit::analysis::stutter
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_screen_has_no_bare_line_feeds() {
+        let mut d = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+        for i in 0..200 {
+            d.feed(i as f64 / 1000.0, 3, 1);
+        }
+        let recent: VecDeque<f64> = std::iter::repeat_n(1.0, 30).collect();
+        let screen = terminal::raw_lines(&live_text(&d, &recent));
+        assert!(screen.contains("Median interval"), "{}", screen);
+        assert!(!screen.replace("\r\n", "").contains('\n'), "{}", screen);
+    }
+
+    #[test]
+    fn graph_marks_only_intervals_over_the_threshold() {
+        let rendered = render_stutter_graph(&[1.0, 1.0, 1.1, 6.0, 12.0], 1.0, 2.5);
+        let graph = rendered.split("Legend").next().unwrap();
+        assert!(graph.contains('░'), "{}", graph);
+        assert!(graph.contains('▓'), "{}", graph);
+        assert!(graph.contains('█'), "{}", graph);
+        assert!(!graph.contains('▒'), "{}", graph);
+        assert_eq!(render_stutter_graph(&[], 1.0, 2.5), "No data yet...");
+    }
+}

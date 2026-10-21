@@ -3,6 +3,11 @@
 //! Guided one-minute check-up that looks for faults by itself. Drives the
 //! shared `mouse_testkit::analysis::diagnostics::AutoTest` engine with raw
 //! device events and prints the report at the end.
+//!
+//! Every event is fed with the time the device reported it (kernel timestamp
+//! on Linux, raw-input thread time on Windows), not the time the queue was
+//! drained: stamping a whole batch with one time would turn the loop period
+//! into the "polling rate" and squash the gaps the timing checks look at.
 
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
@@ -11,11 +16,18 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
-use crate::input::{self, MouseEvent};
+use crate::input;
 #[cfg(target_os = "windows")]
-use crate::input_windows::{self as input};
-#[cfg(target_os = "linux")]
-use mouse_testkit::analysis::coalesce::EventCoalescer;
+use crate::input_windows as input;
+
+/// Seconds from `epoch` to `t`; negative for events stamped before the run
+/// started (already queued when the loop began).
+fn secs_since(epoch: Instant, t: Instant) -> f64 {
+    match t.checked_duration_since(epoch) {
+        Some(d) => d.as_secs_f64(),
+        None => -epoch.duration_since(t).as_secs_f64(),
+    }
+}
 
 pub fn run() {
     println!("\n=== Auto Diagnostics ===");
@@ -41,13 +53,10 @@ pub fn run() {
     let _guard = terminal::TerminalGuard::new();
 
     let epoch = Instant::now();
-    let secs = |t: Instant| t.duration_since(epoch).as_secs_f64();
+    let secs = |t: Instant| secs_since(epoch, t);
 
     let mut engine = AutoTest::new(Config::default());
     engine.start(secs(Instant::now()));
-
-    #[cfg(target_os = "linux")]
-    let mut coalescer = EventCoalescer::new();
 
     let mut last_phase: Option<Phase> = None;
     let mut last_print = Instant::now();
@@ -65,31 +74,10 @@ pub fn run() {
             }
         }
 
-        #[cfg(target_os = "linux")]
-        if let Ok(events) = device.fetch_events() {
-            let now = secs(Instant::now());
-            for ev in events {
-                match input::parse_event(&ev) {
-                    Some(MouseEvent::Move { dx, dy }) => {
-                        if let Some((fdx, fdy)) = coalescer.accumulate(ev.timestamp(), dx, dy) {
-                            engine.feed(now, &MouseEvent::Move { dx: fdx, dy: fdy });
-                        }
-                    }
-                    Some(other) => engine.feed(now, &other),
-                    None => {}
-                }
-            }
-            if let Some((dx, dy)) = coalescer.flush() {
-                engine.feed(now, &MouseEvent::Move { dx, dy });
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        if let Ok(events) = device.fetch_events() {
-            let now = secs(Instant::now());
-            for ev in events {
-                engine.feed(now, &ev);
-            }
+        // One move per hardware report (X and Y merged), each with its own
+        // device timestamp.
+        for timed in input::fetch_timed_events(&mut device) {
+            engine.feed(secs(timed.time), &timed.event);
         }
 
         engine.tick(secs(Instant::now()));
@@ -102,14 +90,17 @@ pub fn run() {
         if phase != last_phase {
             if let Some(p) = phase {
                 let index = engine.phases().iter().position(|x| *x == p).unwrap_or(0);
-                print!("\r\x1B[K");
-                println!(
-                    "\n>>> Step {}/{}: {}",
-                    index + 1,
-                    engine.phases().len(),
-                    p.title()
+                // Raw mode: "\n" alone would not return to the line start
+                print!(
+                    "\r\x1B[K{}",
+                    terminal::raw_lines(&format!(
+                        "\n>>> Step {}/{}: {}\n    {}\n",
+                        index + 1,
+                        engine.phases().len(),
+                        p.title(),
+                        p.instruction()
+                    ))
                 );
-                println!("    {}", p.instruction());
             }
             last_phase = phase;
         }
@@ -119,8 +110,7 @@ pub fn run() {
         while announced < findings.len() {
             let f = &findings[announced];
             if f.severity != Severity::Info {
-                print!("\r\x1B[K");
-                println!("    [{}] {}", f.severity.label(), f.title);
+                print!("\r\x1B[K    [{}] {}\r\n", f.severity.label(), f.title);
             }
             announced += 1;
         }
@@ -209,20 +199,29 @@ fn print_report(report: &Report, total_phases: usize) {
     println!("Measurements");
     println!("─────────────────────────────────────────────");
     println!(
-        "  Rest: {} movement report(s), {:.1} counts, {} click(s), {} scroll event(s)",
-        m.rest_move_events, m.rest_distance_counts, m.rest_clicks, m.rest_scroll_events
+        "  Rest: {} movement report(s), {:.1} counts in {} separate second(s), {} click(s), {} scroll event(s)",
+        m.rest_move_events,
+        m.rest_distance_counts,
+        m.rest_motion_seconds,
+        m.rest_clicks,
+        m.rest_scroll_events
     );
     match m.polling_hz {
         Some(hz) => println!(
-            "  Movement: {} Hz (nominal {} Hz), {} intervals, {} stutter(s) ({:.2}%), worst gap {:.1} ms",
+            "  Movement: {} Hz{}, {} fast intervals, {} stutter(s) ({:.2}%), worst gap {:.1} ms",
             hz,
-            m.polling_nominal_hz.unwrap_or(hz),
+            m.polling_nominal_hz
+                .map(|n| format!(" (nominal {} Hz)", n))
+                .unwrap_or_default(),
             m.move_intervals,
             m.stutter_count,
             m.stutter_rate_percent,
             m.max_interval_ms
         ),
-        None => println!("  Movement: {} intervals (not enough for a rate)", m.move_intervals),
+        None => println!(
+            "  Movement: {} fast intervals (not enough fast movement for a rate)",
+            m.move_intervals
+        ),
     }
     println!(
         "  Clicks: left {}, right {}, other {}; bounces {}, micro-presses {}, sticky {}, stuck {}; hold avg {:.0} ms / max {:.0} ms",
@@ -238,17 +237,35 @@ fn print_report(report: &Report, total_phases: usize) {
     );
     println!(
         "  Scroll: {} down, {} up, {} reversal(s)",
-        m.scroll_down, m.scroll_up, m.scroll_reversals
+        m.scroll_down,
+        m.scroll_up,
+        report
+            .scroll_reversals()
+            .map_or("not tested".to_string(), |n| n.to_string())
     );
-    println!(
-        "  Lift: {} jump(s), largest {:.0} counts",
-        m.lift_jumps, m.lift_max_jump_counts
-    );
+    match report.lift_jumps() {
+        Some(jumps) => println!(
+            "  Lift: {} jump(s), largest {:.0} counts",
+            jumps, m.lift_max_jump_counts
+        ),
+        None => println!("  Lift: not tested"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_secs_since_handles_events_before_the_epoch() {
+        let epoch = Instant::now();
+        let later = epoch + Duration::from_micros(1_250);
+        assert!((secs_since(epoch, later) - 0.00125).abs() < 1e-9);
+        if let Some(earlier) = epoch.checked_sub(Duration::from_millis(5)) {
+            assert!((secs_since(epoch, earlier) + 0.005).abs() < 1e-9);
+        }
+        assert_eq!(secs_since(epoch, epoch), 0.0);
+    }
 
     #[test]
     fn test_progress_bar_widths() {

@@ -12,7 +12,7 @@
 //! - [`DpiPanel`] - DPI accuracy verification
 //! - [`AccelPanel`] - Acceleration and angle snapping detection
 //! - [`DoubleClickPanel`] - Switch health and double-click detection
-//! - [`ScrollPanel`] - Scroll wheel consistency testing
+//! - [`ScrollPanel`] - Scroll wheel skipping and dead-direction checks
 //! - [`AutoTestPanel`] - Guided automated diagnostics that look for faults
 
 mod accel;
@@ -69,6 +69,26 @@ mod smoke_tests {
         });
     }
 
+    /// One frame with the pointer at `pos`.
+    fn frame_at(
+        ctx: &egui::Context,
+        pos: egui::Pos2,
+        mut body: impl FnMut(&mut egui::Ui, &egui::Context),
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            events: vec![egui::Event::PointerMoved(pos)],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            body(ui, &ctx);
+        });
+    }
+
     fn moves(n: usize, dx: i32, dy: i32, interval: Duration, start: Instant) -> Vec<RawInputEvent> {
         (0..n)
             .map(|i| RawInputEvent {
@@ -111,7 +131,7 @@ mod smoke_tests {
                     click.ui_response(ui, ctx, &[], has_bridge);
                     click.ui_sticky(ui, ctx, &[], has_bridge);
                     click.ui_liftoff(ui, ctx, &[], has_bridge);
-                    jitter.ui(ui, ctx, &[], has_bridge);
+                    jitter.ui(ui, has_bridge);
                     dpi.ui(ui, ctx, &[], has_bridge);
                     accel.ui_accel(ui, ctx, &[], has_bridge);
                     accel.ui_angle(ui, ctx, &[], has_bridge);
@@ -133,7 +153,8 @@ mod smoke_tests {
         // use the internal start path through the public API instead.
         polling.start_for_test();
         let start = Instant::now() - Duration::from_millis(600);
-        let events = moves(500, 1, 0, Duration::from_millis(1), start);
+        // 3 counts per report: fast enough that every poll carries a report
+        let events = moves(500, 3, 0, Duration::from_millis(1), start);
         frame(&ctx, |ui, ctx| polling.ui(ui, ctx, &events, true));
         let export = polling.export().expect("a Hz sample after 500 reports");
         assert!(
@@ -155,15 +176,15 @@ mod smoke_tests {
         let epoch = auto.epoch_for_test();
         let at = |t: f64| epoch + Duration::from_secs_f64(t);
 
-        // Rest phase: nothing happens, wait it out
-        auto.tick_for_test(6.2);
+        // Rest phase (2 s settle + 5 s): nothing happens, wait it out
+        auto.tick_for_test(7.2);
         frame(&ctx, |ui, ctx| {
             auto.process_input(ctx, &[], true);
             auto.ui(ui, ctx, true);
         });
 
         // Movement: 1000 Hz with a stall every 25th report (4% stutters)
-        let mut t = 6.3;
+        let mut t = 7.3;
         let mut events = Vec::new();
         for i in 0..3100 {
             t += if i % 25 == 0 { 0.008 } else { 0.001 };
@@ -388,7 +409,10 @@ mod smoke_tests {
             t + Duration::from_millis(400),
             Duration::from_millis(60),
         ));
-        frame(&ctx, |ui, ctx| panel.ui(ui, ctx, &events, true));
+        // Raw presses count only with the pointer on the target
+        frame(&ctx, |ui, ctx| panel.ui(ui, ctx, &[], true));
+        let target = panel.target_center_for_test();
+        frame_at(&ctx, target, |ui, ctx| panel.ui(ui, ctx, &events, true));
         let export = panel.export().unwrap();
         assert_eq!(export.total_clicks, 3);
         assert_eq!(export.accidental_double_clicks, 1);
@@ -402,7 +426,7 @@ mod smoke_tests {
         scroll.start_for_test();
         stutter.start_for_test();
         let start = Instant::now() - Duration::from_millis(300);
-        let mut events = moves(200, 1, 1, Duration::from_millis(1), start);
+        let mut events = moves(200, 3, 1, Duration::from_millis(1), start);
         for i in 0..25 {
             events.push(RawInputEvent {
                 kind: RawInputKind::Scroll {
