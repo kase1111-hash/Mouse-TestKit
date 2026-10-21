@@ -144,8 +144,13 @@ pub struct GapEdges {
 /// surface, does exactly that (see [`is_freeze`] for a mouse that holds the
 /// movement back instead). A mouse lifted while moving fast and set down
 /// still moving looks the same.
+///
+/// "One poll apart" is at least half a poll: reports that stopped reaching
+/// the program while the computer was busy (Raw Input is stamped when the
+/// program receives it) arrive back to back once it catches up, carrying
+/// all their movement. That is a stall of the computer, not of the mouse.
 pub fn is_dropout(edges: &GapEdges, period_ms: f64, median_size: f64) -> bool {
-    let one_poll = |ms: f64| ms > 0.0 && ms < 2.0 * period_ms;
+    let one_poll = |ms: f64| ms >= 0.5 * period_ms && ms < 2.0 * period_ms;
     period_ms > 0.0
         && period_ms * RAMP_POLLS <= MIN_HAND_RAMP_MS
         && edges.gap_ms > MAX_POLL_INTERVAL_MS
@@ -1503,6 +1508,32 @@ mod detector_tests {
         let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
         assert_eq!((d.freezes(), d.dropouts()), (2, 0));
         assert_eq!(d.stutter_count(), 2);
+    }
+
+    #[test]
+    fn a_busy_computer_handing_over_held_up_reports_is_not_a_dropout() {
+        // Brisk circles at 1 and 8 kHz. Every 2 s the program does not get
+        // the reports for 150-400 ms (Raw Input is stamped on receipt), then
+        // takes them all at once, 5 us apart: nothing was lost
+        for (hz, radius) in [(1000.0, 600.0), (8000.0, 4800.0)] {
+            let reports = simulate(hz, vec![circles(12.0, radius, 1.0)], no_drops, 20e-6);
+            let mut held = 0.0;
+            let mut last: f64 = 0.0;
+            let delivered: Vec<(f64, i32, i32)> = reports
+                .iter()
+                .map(|&(t, dx, dy)| {
+                    if every_two_seconds(t) {
+                        let k = (t / 2.0).floor();
+                        held = k * 2.0 + 1.0 + 0.15 + 0.05 * (k % 6.0);
+                    }
+                    last = if t < held { held } else { t }.max(last + 5e-6);
+                    (last, dx, dy)
+                })
+                .collect();
+            let d = run(&delivered, DEFAULT_STUTTER_MULTIPLIER);
+            assert_eq!((d.freezes(), d.dropouts()), (0, 0), "{} Hz", hz);
+            assert_eq!(d.rating(), StutterRating::Excellent, "{} Hz", hz);
+        }
     }
 
     /// Reports of a Bluetooth mouse sampling every `sample_ms` and served

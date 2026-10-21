@@ -25,7 +25,7 @@ const GRAPH_SAMPLES: usize = 60;
 /// count the test as run.
 pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
-    println!("Move your mouse quickly and continuously in circles.");
+    println!("Move your mouse quickly and continuously in circles, without lifting it.");
     println!("Only fast, steady movement is judged; slow movement, direction");
     println!("reversals and pauses are ignored because a mouse legitimately");
     println!("sends fewer reports then. At 4000-8000 Hz use 1600+ DPI or move faster.");
