@@ -160,7 +160,16 @@ pub fn run() -> TestOutcome {
             "\n✓ No angle snapping detected ({:.0}% of near-axis lines were perfectly straight)",
             result.snap_strength * 100.0
         );
-        println!("  Your near-axis lines kept their natural hand wobble.");
+        if result.snapped_strokes == 0 {
+            println!("  Your near-axis lines kept their natural hand wobble.");
+        } else {
+            println!(
+                "  Most near-axis lines kept their natural hand wobble, but {} came out",
+                result.snapped_strokes
+            );
+            println!("  perfectly straight. If that happens again on another run, the mouse may");
+            println!("  be snapping some of your lines.");
+        }
         TestOutcome::NoIssues
     };
 
