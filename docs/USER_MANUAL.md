@@ -22,7 +22,7 @@ A one-minute guided check-up that looks for faults by itself. Available from the
    - **Continuous movement** (up to 12 s) - move in brisk, wide circles. A mouse only sends a report when it has moved, so only reports sent while it moves fast enough to report on every poll are timed. If your movement is too slow to time (common at 2-8 kHz or low DPI) the step shows "move faster" and the polling checks are inconclusive rather than flagged. Measures polling rate, stutters (judged by the share of movement time lost to late reports), unstable rate, dropouts
    - **Button clicks** (up to 20 s) - point at the box shown and click: about 20 normal left clicks, then a few right clicks. Looks for switch bounce (accidental double clicks: one is a warning, a repeat is a fault), presses too short for a finger, sticky releases, buttons that never release (reported however few clicks were made)
    - **Scroll wheel** (up to 12 s) - about 10 notches down, then 10 up. Looks for notches reported in the wrong direction (encoder skipping)
-   - **Lift-off** (10 s) - move, lift the mouse about 1 cm, set it down, move again, three times. Looks for cursor jumps when the sensor re-acquires the surface
+   - **Lift-off** (10 s) - lift the mouse straight up about 1 cm and set it straight back down without sliding it, keep it still for a second, then move it in a small circle and stop; three times. Uses the rules of the Lift-Off Jump test: motion after a pause that carries the cursor more than 2 mm within 100 ms and then stops is a jump (one is noted, two or more are a warning); longer movements are not judged. Distances use the DPI set on the DPI Accuracy page; otherwise (and in the CLI) 800 DPI is assumed and the finding says so. If the mouse never paused and then moved, lift-off is reported as not tested
 3. Read the verdict: **Healthy**, **Needs attention** (warnings), **Fault detected** (a critical finding), or **Inconclusive** (a step did not collect enough data, or a button or wheel direction registered nothing - if you did use it, it may be dead; if you skipped it, re-run and follow the instructions for the whole step). A run is only Healthy when every step completed
 4. Each finding explains what was measured and what it usually means. Tick **Show raw measurements** for the numbers behind it
 5. Press **Abort** (top right) or **Esc** to stop early (a partial report is still produced) or **Run Again** to repeat. During the click step only Esc stops the run, so stray clicks cannot end it, and the sidebar export buttons stay disabled until the run ends
@@ -82,12 +82,14 @@ Detects stuck or delayed button releases (common switch failure symptom).
 ---
 
 ### Lift-Off Jump
-Detects cursor jumps when lifting the mouse off the surface.
+Detects cursor jumps when the mouse is lifted or set down. Needs raw input: with the FRAMEWORK input source the test does not run, because accelerated per-frame pointer motion cannot be measured in mm.
 
-1. Click **Start**
-2. Move your mouse normally
-3. Slowly lift the mouse off the pad
-4. Large jumps during lift indicate high lift-off distance (LOD)
+1. Set your mouse's DPI on the **DPI Accuracy** page, so jumps can be measured in mm (otherwise 800 DPI is assumed and the page says so)
+2. Rest the mouse on the pad, click **Start** and keep the mouse still
+3. Lift it straight up about 1 cm, hold it a moment, then set it straight back down without sliding it, and press **SPACE** with your other hand
+4. Wait about a second and repeat at least 5 times, then click **Stop**
+
+Motion in the first 100 ms after the mouse was still is summed; if it carries the cursor more than 2 mm, it is a jump. A movement that keeps going for more than another 2 mm is treated as sliding and not judged. One jump may be a hand slip; two or more mean a high lift-off distance (LOD). A clean lift moves nothing, so with no jumps and fewer than 5 lifts recorded the result is inconclusive. The CLI test and the Auto Diagnostics lift step use the same rules.
 
 ---
 

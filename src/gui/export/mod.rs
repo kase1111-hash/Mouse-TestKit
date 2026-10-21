@@ -113,13 +113,33 @@ pub struct StickyButtonExport {
     pub hold_times: Vec<f64>,
 }
 
-/// Lift-off distance test results (cursor jump when lifting mouse).
+/// Lift-off jump test results (cursor jump when lifting the mouse or
+/// setting it down), judged by `analysis::liftoff`.
 #[derive(Serialize)]
 pub struct LiftOffExport {
     pub jump_count: usize,
+    /// Average jump in raw sensor counts (the name is kept for existing
+    /// readers of the export; these were never screen pixels).
     pub avg_distance_px: f64,
+    /// Largest jump in raw sensor counts (see `avg_distance_px`).
     pub max_distance_px: f64,
+    /// Each jump in raw sensor counts.
     pub jump_distances: Vec<f64>,
+    /// Each jump in mm, converted with `dpi`.
+    pub jump_distances_mm: Vec<f64>,
+    pub max_distance_mm: f64,
+    /// SPACE presses: lifts the user reported making.
+    pub lifts_recorded: usize,
+    /// Sliding movements, which are not judged.
+    pub slides_ignored: usize,
+    /// DPI used to convert counts to mm...
+    pub dpi: f64,
+    /// ... and whether it was assumed (not set on the DPI Accuracy page).
+    pub dpi_assumed: bool,
+    pub jump_threshold_mm: f64,
+    /// "Cursor jumps on lift", "One jump - repeat the test",
+    /// "Inconclusive - too few lifts" or "No jumps".
+    pub verdict: String,
 }
 
 /// Jitter test results (sensor noise when mouse is stationary).
@@ -321,14 +341,26 @@ impl TestResultsExport {
 
         // Lift-off
         if let Some(ref l) = self.liftoff {
+            csv.push_str(&format!("Lift-Off,Verdict,{}\n", csv_escape(&l.verdict)));
+            csv.push_str(&format!("Lift-Off,Lifts Recorded,{}\n", l.lifts_recorded));
             csv.push_str(&format!("Lift-Off,Jump Count,{}\n", l.jump_count));
             csv.push_str(&format!(
-                "Lift-Off,Avg Distance (px),{:.1}\n",
+                "Lift-Off,Max Jump (mm),{:.1}\n",
+                l.max_distance_mm
+            ));
+            csv.push_str(&format!(
+                "Lift-Off,Avg Jump (counts),{:.1}\n",
                 l.avg_distance_px
             ));
             csv.push_str(&format!(
-                "Lift-Off,Max Distance (px),{:.1}\n",
+                "Lift-Off,Max Jump (counts),{:.1}\n",
                 l.max_distance_px
+            ));
+            csv.push_str(&format!("Lift-Off,Slides Ignored,{}\n", l.slides_ignored));
+            csv.push_str(&format!(
+                "Lift-Off,DPI Used,{:.0}{}\n",
+                l.dpi,
+                if l.dpi_assumed { " (assumed)" } else { "" }
             ));
         }
 

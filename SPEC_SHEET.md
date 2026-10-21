@@ -14,7 +14,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Guided one-minute check-up that looks for faults automatically |
 | Steps | Rest (2 s settle + 5 s), Movement (up to 12 s), Clicks (up to 20 s), Scroll (up to 12 s), Lift (10 s); each ends on its own once enough data is collected or its time is up |
-| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable or very low polling rate, dropouts, timed only between reports with 2+ counts on an axis (fast enough to report every poll); switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1 = warning, 2+ = fault), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms (1-2 = warning, 3+ = fault); cursor jumps over 50 counts after an 80 ms pause |
+| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable or very low polling rate, dropouts, timed only between reports with 2+ counts on an axis (fast enough to report every poll); switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1 = warning, 2+ = fault), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms (1-2 = warning, 3+ = fault); lift-off jumps as in test 6 (1 = info, 2+ = warning) |
 | Output | Verdict (Healthy / Needs attention / Fault detected / Inconclusive), findings with severity and explanation, raw measurements; included in JSON/CSV export. A button or scroll direction that registered nothing, too little fast movement, or an aborted run gives Inconclusive, never Healthy |
 | Availability | GUI panel and CLI menu option 13 (device timestamps per report). Without raw input (macOS) the Movement and Lift steps are left out and bounce, short-press and scroll-skip checks are not judged |
 
@@ -65,7 +65,9 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Tests for cursor jump during mouse lift |
-| Detection | Identifies unwanted cursor movement when lifting mouse |
+| Detection | Motion that starts after the mouse has been still for 100 ms is summed over its first 100 ms; carrying the cursor more than 2 mm is a jump. Counts are converted with the mouse's DPI (800 assumed, and reported as assumed, when not given). Movement that continues more than 2 mm after that window is sliding and is not judged |
+| Verdict | 2+ jumps = problem, 1 = possible problem (repeat); "no jumps" needs 5 lifts reported with SPACE, otherwise inconclusive. The Auto Diagnostics lift step uses the same rules |
+| Availability | CLI menu option 6 and GUI panel; needs raw input |
 | Use Case | Evaluating sensor lift-off behavior and calibration |
 
 ### 7. DPI Accuracy Test

@@ -7,11 +7,10 @@ use crate::export::{
 };
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
 use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
-
-/// Jump threshold in pixels - movements larger than this after idle are considered jumps
-const JUMP_THRESHOLD_PX: f64 = 15.0;
-/// Time in milliseconds without movement to consider mouse "idle" (potential lift)
-const IDLE_THRESHOLD_MS: u64 = 80;
+use mouse_testkit::analysis::liftoff::{
+    self, counts_to_mm, mm_to_counts, Burst, LiftDetector, LiftTally, LiftVerdict,
+    JUMP_THRESHOLD_MM, JUMP_WINDOW_MS, MIN_LIFTS,
+};
 
 /// Smallest value in the iterator, or 0.0 when it is empty (so an export
 /// never contains `f64::MAX`).
@@ -114,16 +113,21 @@ pub struct ClickPanel {
     sticky_is_pressed: bool,
     sticky_right_is_pressed: bool,
 
-    // Lift Off
+    // Lift Off (judged by `analysis::liftoff`, like the CLI test and Auto
+    // Diagnostics)
     liftoff_running: bool,
-    liftoff_jumps: usize,
-    liftoff_position: (i64, i64),
-    /// Time of last mouse movement
-    liftoff_last_move: Instant,
-    /// Whether mouse is currently considered idle (lifted)
-    liftoff_is_idle: bool,
-    /// Jump events with their distances
-    liftoff_jump_events: Vec<f64>,
+    /// The mouse's DPI from the DPI Accuracy page, if set there.
+    liftoff_dpi_setting: Option<f64>,
+    /// DPI the current or last run judges with, and whether it was assumed.
+    liftoff_dpi: (f64, bool),
+    liftoff_detector: LiftDetector,
+    liftoff_tally: LiftTally,
+    /// SPACE presses: the lifts the user says they made. A clean lift
+    /// produces no motion, so only these show that lifting was tested.
+    liftoff_lifts: usize,
+    /// Start of the current run; event times are seconds after it, and
+    /// events from before it are ignored.
+    liftoff_epoch: Instant,
 }
 
 impl ClickPanel {
@@ -156,11 +160,12 @@ impl ClickPanel {
             sticky_right_is_pressed: false,
 
             liftoff_running: false,
-            liftoff_jumps: 0,
-            liftoff_position: (0, 0),
-            liftoff_last_move: Instant::now(),
-            liftoff_is_idle: false,
-            liftoff_jump_events: Vec::new(),
+            liftoff_dpi_setting: None,
+            liftoff_dpi: liftoff::dpi_or_default(None),
+            liftoff_detector: LiftDetector::new(liftoff::DEFAULT_DPI),
+            liftoff_tally: LiftTally::default(),
+            liftoff_lifts: 0,
+            liftoff_epoch: Instant::now(),
         }
     }
 
@@ -886,6 +891,70 @@ impl ClickPanel {
         }
     }
 
+    /// Set the mouse's DPI for the lift-off test: the value from the DPI
+    /// Accuracy page, or `None` when it was not set there (800 is then
+    /// assumed and the panel says so). Takes effect at the next Start.
+    pub fn set_liftoff_dpi(&mut self, dpi: Option<f64>) {
+        self.liftoff_dpi_setting = dpi;
+    }
+
+    fn start_liftoff(&mut self) {
+        self.liftoff_dpi = liftoff::dpi_or_default(self.liftoff_dpi_setting);
+        // The hand has just clicked Start: motion is judged only once the
+        // mouse has been seen still.
+        self.liftoff_detector = LiftDetector::new(self.liftoff_dpi.0).watching_from(0.0);
+        self.liftoff_tally = LiftTally::default();
+        self.liftoff_lifts = 0;
+        self.liftoff_epoch = Instant::now();
+        self.liftoff_running = true;
+    }
+
+    /// End the run; motion still under way is judged as it stands, as in
+    /// the CLI test.
+    fn stop_liftoff(&mut self) {
+        let burst = self.liftoff_detector.flush();
+        self.record_liftoff(burst);
+        self.liftoff_running = false;
+    }
+
+    fn reset_liftoff(&mut self) {
+        self.liftoff_running = false;
+        self.liftoff_detector = LiftDetector::new(self.liftoff_dpi.0);
+        self.liftoff_tally = LiftTally::default();
+        self.liftoff_lifts = 0;
+    }
+
+    fn record_liftoff(&mut self, burst: Option<Burst>) {
+        if let Some(burst) = burst {
+            self.liftoff_tally.record(&burst, self.liftoff_dpi.0);
+        }
+    }
+
+    /// Feed raw motion reports (from the bridge) and advance to `now`.
+    fn feed_liftoff(&mut self, raw_events: &[RawInputEvent], now: Instant) {
+        let epoch = self.liftoff_epoch;
+        let secs = |t: Instant| t.duration_since(epoch).as_secs_f64();
+        for event in raw_events {
+            if let RawInputKind::Move { dx, dy } = event.kind {
+                if event.timestamp < epoch {
+                    continue;
+                }
+                let burst = self.liftoff_detector.feed(secs(event.timestamp), dx, dy);
+                self.record_liftoff(burst);
+            }
+        }
+        let burst = self.liftoff_detector.tick(secs(now.max(epoch)));
+        self.record_liftoff(burst);
+    }
+
+    fn liftoff_verdict(&self) -> LiftVerdict {
+        liftoff::verdict(
+            self.liftoff_tally.jumps.len(),
+            self.liftoff_lifts,
+            MIN_LIFTS,
+        )
+    }
+
     pub fn ui_liftoff(
         &mut self,
         ui: &mut egui::Ui,
@@ -893,112 +962,224 @@ impl ClickPanel {
         raw_events: &[RawInputEvent],
         has_bridge: bool,
     ) {
+        // Input first, before any button is drawn: SPACE is consumed so it
+        // cannot "click" a focused button such as Stop.
+        if self.liftoff_running {
+            if has_bridge {
+                self.liftoff_lifts += take_space_presses(ctx);
+                self.feed_liftoff(raw_events, Instant::now());
+            } else {
+                // The measured mouse went away: keep what was measured.
+                self.stop_liftoff();
+            }
+        }
+
+        let (dpi, dpi_assumed) = if self.liftoff_running || self.has_liftoff_data() {
+            self.liftoff_dpi
+        } else {
+            liftoff::dpi_or_default(self.liftoff_dpi_setting)
+        };
+
         ui.heading("Lift-Off Jump Test");
         ui.add_space(5.0);
-        ui.label("Detects cursor jumps when lifting the mouse.");
-        ui.add_space(15.0);
+        ui.label("Detects cursor jumps when the mouse is lifted or set down.");
+        if !has_bridge {
+            ui.add_space(5.0);
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(70, 50, 20))
+                .inner_margin(12.0)
+                .corner_radius(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Raw input unavailable - lift-off jumps cannot be measured",
+                        )
+                        .strong()
+                        .color(egui::Color32::YELLOW),
+                    );
+                    ui.label("Without raw input only the window-system pointer is visible: movement in screen points after OS acceleration, once per frame. A jump is judged in sensor counts over the first 100 ms of motion, which that cannot provide, so this test does not run.");
+                });
+        }
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new(if dpi_assumed {
+                format!(
+                    "Distances assume {:.0} DPI. Set your mouse's DPI on the DPI Accuracy page if it differs: otherwise they are off by the same factor.",
+                    dpi
+                )
+            } else {
+                format!("Distances use {:.0} DPI (set on the DPI Accuracy page).", dpi)
+            })
+            .weak(),
+        );
+        ui.add_space(10.0);
 
         // Controls
         ui.horizontal(|ui| {
             if self.liftoff_running {
                 if ui.button("Stop").clicked() {
-                    self.liftoff_running = false;
+                    self.stop_liftoff();
                 }
-            } else if ui.button("Start").clicked() {
-                self.liftoff_running = true;
-                self.liftoff_jumps = 0;
-                self.liftoff_position = (0, 0);
-                self.liftoff_jump_events.clear();
-                self.liftoff_is_idle = false;
-                self.liftoff_last_move = Instant::now();
+            } else if ui
+                .add_enabled(has_bridge, egui::Button::new("Start"))
+                .clicked()
+            {
+                self.start_liftoff();
             }
 
             if ui.button("Reset").clicked() {
-                self.liftoff_running = false;
-                self.liftoff_jumps = 0;
-                self.liftoff_position = (0, 0);
-                self.liftoff_jump_events.clear();
-                self.liftoff_is_idle = false;
+                self.reset_liftoff();
             }
         });
 
         ui.add_space(20.0);
 
         // Stats
+        let tally = &self.liftoff_tally;
+        let jumps = tally.jumps.len();
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
             .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label("Position");
+                        ui.label("Lifts (SPACE)");
                         ui.label(
-                            egui::RichText::new(format!(
-                                "({}, {})",
-                                self.liftoff_position.0, self.liftoff_position.1
-                            ))
-                            .size(20.0),
+                            egui::RichText::new(format!("{} / {}", self.liftoff_lifts, MIN_LIFTS))
+                                .size(20.0),
                         );
                     });
-                    ui.add_space(50.0);
+                    ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Jumps Detected");
-                        let color = if self.liftoff_jumps == 0 {
-                            egui::Color32::GREEN
-                        } else {
-                            egui::Color32::RED
+                        let color = match jumps {
+                            0 => egui::Color32::WHITE,
+                            1 => egui::Color32::YELLOW,
+                            _ => egui::Color32::RED,
                         };
                         ui.label(
-                            egui::RichText::new(format!("{}", self.liftoff_jumps))
+                            egui::RichText::new(format!("{}", jumps))
                                 .size(24.0)
                                 .color(color),
                         );
                     });
-                    ui.add_space(50.0);
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("Largest lift/set-down");
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{:.1} mm",
+                                counts_to_mm(tally.largest_counts, dpi)
+                            ))
+                            .size(20.0),
+                        );
+                    });
+                    ui.add_space(40.0);
+                    ui.vertical(|ui| {
+                        ui.label("Slides ignored");
+                        ui.label(egui::RichText::new(format!("{}", tally.slides)).size(20.0));
+                    });
+                    ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Status");
                         let status = if !self.liftoff_running {
                             "Stopped"
-                        } else if self.liftoff_is_idle {
-                            "IDLE (mouse lifted?)"
+                        } else if self.liftoff_detector.in_burst() {
+                            "Moving"
                         } else {
-                            "Moving..."
+                            "Still"
                         };
-                        let color = if self.liftoff_is_idle {
-                            egui::Color32::YELLOW
-                        } else {
-                            egui::Color32::WHITE
-                        };
-                        ui.label(egui::RichText::new(status).size(20.0).color(color));
+                        ui.label(egui::RichText::new(status).size(20.0));
                     });
                 });
             });
 
-        ui.add_space(20.0);
+        ui.add_space(10.0);
+
+        // Verdict: the same rule as the CLI test
+        if self.liftoff_running || self.has_liftoff_data() {
+            let (title, color, message) = match self.liftoff_verdict() {
+                LiftVerdict::Jumps => (
+                    "Cursor jumps on lift",
+                    egui::Color32::RED,
+                    "The cursor jumps when the mouse is lifted or set down. Lower the lift-off distance (LOD) in the mouse software, or try a plainer surface.".to_string(),
+                ),
+                LiftVerdict::OneJump => (
+                    "One jump",
+                    egui::Color32::YELLOW,
+                    "A single jump is often the hand sliding the mouse on set-down. Repeat the test: a second jump points to a high lift-off distance.".to_string(),
+                ),
+                LiftVerdict::TooFewLifts => (
+                    "Not enough lifts yet",
+                    egui::Color32::LIGHT_GRAY,
+                    format!(
+                        "No jumps so far, but only {} lift(s) recorded. Lift and set down the mouse at least {} times, pressing SPACE after each: a clean lift moves nothing, so the lifts must be counted.",
+                        self.liftoff_lifts, MIN_LIFTS
+                    ),
+                ),
+                LiftVerdict::Clean => (
+                    "No jumps",
+                    egui::Color32::GREEN,
+                    format!(
+                        "No jumps in {} lifts. Lift-off behaviour appears normal.",
+                        self.liftoff_lifts
+                    ),
+                ),
+            };
+            egui::Frame::dark_canvas(ui.style())
+                .inner_margin(15.0)
+                .corner_radius(8.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
+                    ui.add_space(5.0);
+                    ui.label(message);
+                    if tally.slides > 0 {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} longer movement(s) were treated as sliding and not judged. If the mouse was in the air at those moments, the sensor is tracking while lifted (lift-off distance too high).",
+                                tally.slides
+                            ))
+                            .weak(),
+                        );
+                    }
+                });
+            ui.add_space(10.0);
+        }
 
         // Jump history
-        if !self.liftoff_jump_events.is_empty() {
+        if !tally.jumps.is_empty() {
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
                 .corner_radius(8.0)
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new("Jump History").strong());
-                    let avg: f64 = self.liftoff_jump_events.iter().sum::<f64>()
-                        / self.liftoff_jump_events.len() as f64;
-                    let max = self.liftoff_jump_events.iter().cloned().fold(0.0, f64::max);
                     ui.horizontal(|ui| {
-                        ui.label(format!("Average: {:.1} px", avg));
+                        ui.label(format!(
+                            "Average: {:.1} mm",
+                            counts_to_mm(tally.avg_jump_counts(), dpi)
+                        ));
                         ui.add_space(20.0);
-                        ui.label(format!("Max: {:.1} px", max));
+                        ui.label(format!(
+                            "Max: {:.1} mm",
+                            counts_to_mm(tally.max_jump_counts(), dpi)
+                        ));
                     });
                     ui.collapsing("All jumps", |ui| {
-                        for (i, dist) in self.liftoff_jump_events.iter().enumerate() {
-                            ui.label(format!("#{}: {:.1} px", i + 1, dist));
+                        for (i, jump) in tally.jumps.iter().enumerate() {
+                            ui.label(format!(
+                                "#{}: {:.1} mm (dx {:+}, dy {:+} counts) within {:.0} ms",
+                                i + 1,
+                                counts_to_mm(jump.peak_counts, dpi),
+                                jump.peak_dx,
+                                jump.peak_dy,
+                                jump.peak_ms
+                            ));
                         }
                     });
                 });
 
-            ui.add_space(20.0);
+            ui.add_space(10.0);
         }
 
         // Instructions
@@ -1008,89 +1189,29 @@ impl ClickPanel {
             .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Instructions").strong());
-                ui.label("1. Start the test");
-                ui.label("2. Move your mouse around");
-                ui.label("3. Slowly lift the mouse off the surface");
-                ui.label("4. Large cursor jumps during lift indicate high LOD");
+                ui.label("1. Rest the mouse on the pad and click Start, then keep it still");
+                ui.label("2. Lift it straight up about 1 cm, hold it there a moment, then set it straight back down - try not to slide it");
+                ui.label("3. Press SPACE (with your other hand) after each lift and set-down, so the test knows how many lifts you made");
+                ui.label(format!(
+                    "4. Wait about a second and repeat - at least {} times - then click Stop",
+                    MIN_LIFTS
+                ));
                 ui.add_space(5.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "Jump threshold: {} px | Idle threshold: {} ms",
-                        JUMP_THRESHOLD_PX, IDLE_THRESHOLD_MS
+                        "A jump: motion that starts from stillness and carries the cursor more than {:.1} mm ({:.0} counts at {:.0} DPI) within {:.0} ms. Longer sliding movements are not judged.",
+                        JUMP_THRESHOLD_MM,
+                        mm_to_counts(JUMP_THRESHOLD_MM, dpi),
+                        dpi,
+                        JUMP_WINDOW_MS
                     ))
                     .weak(),
                 );
             });
+    }
 
-        // Capture real mouse input and detect jumps
-        if self.liftoff_running {
-            let now = Instant::now();
-
-            if has_bridge {
-                // Raw input path: use Move events with their timestamps for idle detection
-                for event in raw_events {
-                    if let RawInputKind::Move { dx, dy } = &event.kind {
-                        let distance = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
-
-                        // Check time gap since last movement for idle detection
-                        let gap_ms = event
-                            .timestamp
-                            .duration_since(self.liftoff_last_move)
-                            .as_millis() as u64;
-                        let was_idle = gap_ms > IDLE_THRESHOLD_MS;
-
-                        // Check for jump: large movement after being idle
-                        if was_idle && distance > JUMP_THRESHOLD_PX {
-                            self.liftoff_jumps += 1;
-                            self.liftoff_jump_events.push(distance);
-                        }
-
-                        // Update position
-                        self.liftoff_position.0 += *dx as i64;
-                        self.liftoff_position.1 += *dy as i64;
-
-                        // Reset idle state
-                        self.liftoff_is_idle = false;
-                        self.liftoff_last_move = event.timestamp;
-                    }
-                }
-
-                // Check if currently idle (no move events recently)
-                let time_since_move = now.duration_since(self.liftoff_last_move).as_millis() as u64;
-                if time_since_move > IDLE_THRESHOLD_MS {
-                    self.liftoff_is_idle = true;
-                }
-            } else {
-                // Fallback: egui pointer delta
-                let delta = ctx.input(|i| i.pointer.delta());
-
-                if delta.x != 0.0 || delta.y != 0.0 {
-                    // Mouse is moving
-                    let distance = ((delta.x as f64).powi(2) + (delta.y as f64).powi(2)).sqrt();
-
-                    // Check for jump: large movement after being idle
-                    if self.liftoff_is_idle && distance > JUMP_THRESHOLD_PX {
-                        self.liftoff_jumps += 1;
-                        self.liftoff_jump_events.push(distance);
-                    }
-
-                    // Update position
-                    self.liftoff_position.0 += delta.x as i64;
-                    self.liftoff_position.1 += delta.y as i64;
-
-                    // Reset idle state
-                    self.liftoff_is_idle = false;
-                    self.liftoff_last_move = now;
-                } else {
-                    // No movement - check if we've been idle long enough
-                    let time_since_move =
-                        now.duration_since(self.liftoff_last_move).as_millis() as u64;
-                    if time_since_move > IDLE_THRESHOLD_MS {
-                        self.liftoff_is_idle = true;
-                    }
-                }
-            }
-        }
+    fn has_liftoff_data(&self) -> bool {
+        self.liftoff_lifts > 0 || self.liftoff_tally.bursts() > 0
     }
 
     pub fn export_response(&self) -> Option<ClickResponseExport> {
@@ -1163,22 +1284,48 @@ impl ClickPanel {
     }
 
     pub fn export_liftoff(&self) -> Option<LiftOffExport> {
-        if self.liftoff_jump_events.is_empty() && self.liftoff_jumps == 0 {
+        if !self.has_liftoff_data() {
             return None;
         }
-        let avg = if self.liftoff_jump_events.is_empty() {
-            0.0
-        } else {
-            self.liftoff_jump_events.iter().sum::<f64>() / self.liftoff_jump_events.len() as f64
-        };
-        let max = self.liftoff_jump_events.iter().cloned().fold(0.0, f64::max);
+        let (dpi, dpi_assumed) = self.liftoff_dpi;
+        let tally = &self.liftoff_tally;
+        let counts: Vec<f64> = tally.jumps.iter().map(|j| j.peak_counts).collect();
         Some(LiftOffExport {
-            jump_count: self.liftoff_jumps,
-            avg_distance_px: avg,
-            max_distance_px: max,
-            jump_distances: self.liftoff_jump_events.clone(),
+            jump_count: tally.jumps.len(),
+            avg_distance_px: tally.avg_jump_counts(),
+            max_distance_px: tally.max_jump_counts(),
+            jump_distances_mm: counts.iter().map(|&c| counts_to_mm(c, dpi)).collect(),
+            jump_distances: counts,
+            max_distance_mm: counts_to_mm(tally.max_jump_counts(), dpi),
+            lifts_recorded: self.liftoff_lifts,
+            slides_ignored: tally.slides,
+            dpi,
+            dpi_assumed,
+            jump_threshold_mm: JUMP_THRESHOLD_MM,
+            verdict: self.liftoff_verdict().label().to_string(),
         })
     }
+}
+
+/// SPACE presses this frame (key repeat ignored). Every SPACE event is
+/// consumed, so it cannot activate a focused button.
+fn take_space_presses(ctx: &egui::Context) -> usize {
+    ctx.input_mut(|i| {
+        let mut presses = 0;
+        i.events.retain(|e| match e {
+            egui::Event::Key {
+                key: egui::Key::Space,
+                pressed,
+                repeat,
+                ..
+            } => {
+                presses += usize::from(*pressed && !*repeat);
+                false
+            }
+            _ => true,
+        });
+        presses
+    })
 }
 
 #[cfg(test)]
@@ -1319,6 +1466,156 @@ mod tests {
             sticky_verdict(&holds, Some(400.0), &cfg),
             StickyVerdict::NoSlowReleases
         );
+    }
+
+    /// One frame of the lift-off panel with raw `events`. With `space`,
+    /// SPACE is pressed, held long enough to auto-repeat, and released.
+    fn liftoff_frame(
+        panel: &mut ClickPanel,
+        events: &[RawInputEvent],
+        space: bool,
+        has_bridge: bool,
+    ) {
+        let ctx = egui::Context::default();
+        let key = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let keys = if space {
+            vec![key(true, false), key(true, true), key(false, false)]
+        } else {
+            Vec::new()
+        };
+        let input = egui::RawInput {
+            events: keys,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_liftoff(ui, &ctx, events, has_bridge);
+        });
+    }
+
+    /// `n` raw motion reports of `(dx, dy)`, `every_ms` apart, starting
+    /// `at_ms` after `start`.
+    fn reports(
+        start: Instant,
+        at_ms: u64,
+        n: usize,
+        every_ms: u64,
+        dx: i32,
+        dy: i32,
+    ) -> Vec<RawInputEvent> {
+        (0..n as u64)
+            .map(|i| RawInputEvent {
+                kind: RawInputKind::Move { dx, dy },
+                timestamp: start + Duration::from_millis(at_ms + i * every_ms),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn liftoff_finds_jumps_spread_over_many_reports() {
+        // Two set-down jumps of 200 counts (6.4 mm at 800 DPI), each sent
+        // at 1000 Hz as 10 counts per report: no single report is large.
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut events = reports(t0, 500, 20, 1, 10, 0);
+        events.extend(reports(t0, 1500, 20, 1, 0, -10));
+        liftoff_frame(&mut panel, &events, true, true);
+        panel.stop_liftoff();
+        assert_eq!(panel.liftoff_tally.jumps.len(), 2);
+        assert_eq!(panel.liftoff_verdict(), LiftVerdict::Jumps);
+        let export = panel.export_liftoff().unwrap();
+        assert_eq!(export.jump_count, 2);
+        assert!((export.max_distance_mm - 6.35).abs() < 0.01);
+        assert!(export.dpi_assumed);
+        assert_eq!(export.verdict, "Cursor jumps on lift");
+    }
+
+    #[test]
+    fn liftoff_normal_starts_at_125hz_and_high_dpi_are_not_jumps() {
+        // 1600 DPI (set on the DPI page), 125 Hz: an ordinary movement after
+        // a pause starts with a 60-count report. Five lifts were made and
+        // set down cleanly in between.
+        let mut panel = ClickPanel::new();
+        panel.set_liftoff_dpi(Some(1600.0));
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut events = Vec::new();
+        for k in 0..3 {
+            events.extend(reports(t0, 500 + k * 1500, 60, 8, 60, 5));
+        }
+        for k in 0..5 {
+            // A set-down shifts the mouse 0.3 mm
+            events.extend(reports(t0, 5000 + k * 1000, 4, 2, 5, 0));
+        }
+        for _ in 0..MIN_LIFTS {
+            liftoff_frame(&mut panel, &[], true, true);
+        }
+        liftoff_frame(&mut panel, &events, false, true);
+        panel.stop_liftoff();
+        let tally = &panel.liftoff_tally;
+        assert_eq!((tally.jumps.len(), tally.slides, tally.quiet), (0, 3, 5));
+        assert_eq!(panel.liftoff_verdict(), LiftVerdict::Clean);
+        let export = panel.export_liftoff().unwrap();
+        assert_eq!((export.dpi, export.dpi_assumed), (1600.0, false));
+        assert_eq!(export.lifts_recorded, MIN_LIFTS);
+    }
+
+    #[test]
+    fn liftoff_without_lifts_is_not_called_clean() {
+        // Started and stopped without lifting: nothing measured.
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        liftoff_frame(&mut panel, &[], false, true);
+        panel.stop_liftoff();
+        assert_eq!(panel.liftoff_verdict(), LiftVerdict::TooFewLifts);
+        assert!(panel.export_liftoff().is_none());
+
+        // Quiet set-downs but SPACE never pressed: still not a clean result.
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut events = reports(t0, 500, 4, 2, 5, 0);
+        events.extend(reports(t0, 1500, 4, 2, -5, 0));
+        liftoff_frame(&mut panel, &events, false, true);
+        panel.stop_liftoff();
+        assert_eq!(panel.liftoff_tally.quiet, 2);
+        assert_eq!(panel.liftoff_verdict(), LiftVerdict::TooFewLifts);
+        let export = panel.export_liftoff().unwrap();
+        assert_eq!(export.verdict, "Inconclusive - too few lifts");
+    }
+
+    #[test]
+    fn space_counts_lifts_without_key_repeat_or_stopping_the_test() {
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        for _ in 0..3 {
+            liftoff_frame(&mut panel, &[], true, true);
+        }
+        assert_eq!(panel.liftoff_lifts, 3);
+        assert!(panel.liftoff_running);
+        // Not counted while stopped
+        panel.stop_liftoff();
+        liftoff_frame(&mut panel, &[], true, true);
+        assert_eq!(panel.liftoff_lifts, 3);
+    }
+
+    #[test]
+    fn liftoff_needs_raw_input() {
+        // Without raw input the run stops instead of judging accelerated,
+        // per-frame pointer motion; what was measured is kept.
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        liftoff_frame(&mut panel, &[], true, true);
+        liftoff_frame(&mut panel, &[], true, false);
+        assert!(!panel.liftoff_running);
+        assert_eq!(panel.liftoff_lifts, 1);
     }
 
     #[test]

@@ -14,8 +14,9 @@
 //!    that never release.
 //! 4. **Scroll** - scrolling both ways. Looks for encoder skipping (a notch
 //!    reported in the wrong direction) and a wheel that only works one way.
-//! 5. **Lift** - lifting and replacing the mouse. Looks for cursor jumps when
-//!    the sensor re-acquires the surface.
+//! 5. **Lift** - lifting and replacing the mouse. Looks for cursor jumps on
+//!    lift and set-down with the rules of the Lift-Off Jump test
+//!    (`analysis::liftoff`), using `Config::dpi` to measure them in mm.
 //!
 //! The engine is pure: it is driven by `feed(time, event)` and `tick(time)`
 //! with timestamps in seconds, so it can be exercised with synthetic input
@@ -29,6 +30,10 @@
 
 use serde::Serialize;
 
+use crate::analysis::liftoff::{
+    self, counts_to_mm, mm_to_counts, LiftDetector, LiftTally, LiftVerdict, JUMP_THRESHOLD_MM,
+    JUMP_WINDOW_MS,
+};
 use crate::analysis::polling::{estimate_hz, median_in_place, nominal_rate, MAX_POLL_INTERVAL_MS};
 use crate::types::{MouseButton, MouseEvent};
 
@@ -64,7 +69,7 @@ impl Phase {
             }
             Phase::Scroll => "Scroll the wheel down about 10 notches, then up about 10 notches.",
             Phase::Lift => {
-                "Move the mouse a little, lift it about 1 cm off the pad, set it back down, then move again. Repeat 3 times."
+                "Lift the mouse straight up about 1 cm and set it straight back down without sliding it. Keep it still for a second, then move it in a small circle and stop. Repeat 3 times."
             }
         }
     }
@@ -160,6 +165,12 @@ pub struct Metrics {
     // Lift
     pub lift_jumps: usize,
     pub lift_max_jump_counts: f64,
+    /// Largest jump converted with `lift_dpi`.
+    pub lift_max_jump_mm: f64,
+    /// DPI the lift distances were measured with...
+    pub lift_dpi: f64,
+    /// ... and whether it was assumed because `Config::dpi` was not given.
+    pub lift_dpi_assumed: bool,
 }
 
 /// Final report.
@@ -254,12 +265,19 @@ pub struct Config {
     pub rest_spread_windows: usize,
     /// A direction change within this many ms of the previous notch is a skip.
     pub scroll_reversal_ms: f64,
-    /// Idle gap (ms) after which the next report is checked for a jump.
+    /// No longer used: lift-off jumps are found with the rules in
+    /// `analysis::liftoff`. Kept so existing code that sets it compiles.
     pub lift_idle_ms: f64,
-    /// A single report moving this far after idle is a jump.
+    /// No longer used (see `lift_idle_ms`): a fixed count limit on one
+    /// report missed jumps spread over many reports and flagged ordinary
+    /// starts at high DPI or 125 Hz.
     pub lift_jump_counts: f64,
     /// Whether to run the lift-off phase at all.
     pub include_lift: bool,
+    /// The mouse's DPI, used to turn lift-off motion into mm. `None` when
+    /// unknown: `liftoff::DEFAULT_DPI` (800) is assumed and the findings
+    /// say so.
+    pub dpi: Option<f64>,
 }
 
 impl Default for Config {
@@ -296,6 +314,7 @@ impl Default for Config {
             lift_idle_ms: 80.0,
             lift_jump_counts: 50.0,
             include_lift: true,
+            dpi: None,
         }
     }
 }
@@ -392,9 +411,9 @@ pub struct AutoTest {
     // Scroll
     last_scroll: Option<(f64, i32)>,
     // Lift
-    lift_last_move_t: Option<f64>,
-    lift_resumes: usize,
-    lift_jumps: Vec<f64>,
+    /// Created when the lift step first sees input or time pass.
+    lift: Option<LiftDetector>,
+    lift_tally: LiftTally,
 }
 
 impl AutoTest {
@@ -405,9 +424,9 @@ impl AutoTest {
         }
         phases.push(Phase::Clicks);
         phases.push(Phase::Scroll);
-        // Lift-off compares the size of single reports with a threshold in
-        // sensor counts; per-frame, OS-accelerated pointer deltas cannot be
-        // judged that way.
+        // Lift-off sums raw sensor counts over the first 100 ms of motion and
+        // converts them to mm with the DPI; per-frame, OS-accelerated pointer
+        // deltas cannot be judged that way.
         if cfg.include_lift && cfg.timing_reliable {
             phases.push(Phase::Lift);
         }
@@ -433,9 +452,8 @@ impl AutoTest {
             holds_ms: Vec::new(),
             min_press_interval_ms: None,
             last_scroll: None,
-            lift_last_move_t: None,
-            lift_resumes: 0,
-            lift_jumps: Vec::new(),
+            lift: None,
+            lift_tally: LiftTally::default(),
         }
     }
 
@@ -504,7 +522,7 @@ impl AutoTest {
             Phase::Movement => self.feed_movement(t, event),
             Phase::Clicks => self.feed_clicks(t, event),
             Phase::Scroll => self.feed_scroll(t, event),
-            Phase::Lift => self.feed_lift(t, event),
+            Phase::Lift => self.feed_lift(phase_start, t, event),
         }
         self.advance_if_done(index, phase_start);
     }
@@ -513,6 +531,9 @@ impl AutoTest {
     pub fn tick(&mut self, now: f64) {
         self.now = self.now.max(now);
         if let State::Running { index, phase_start } = self.state {
+            if self.phases[index] == Phase::Lift {
+                self.tick_lift(phase_start, self.now);
+            }
             self.advance_if_done(index, phase_start);
         }
     }
@@ -606,7 +627,10 @@ impl AutoTest {
                     ),
                 )
             }
-            Phase::Lift => (0.0, format!("{} jump(s) detected", self.lift_jumps.len())),
+            Phase::Lift => (
+                0.0,
+                format!("{} jump(s) detected", self.lift_tally.jumps.len()),
+            ),
         }
     }
 
@@ -1338,67 +1362,122 @@ impl AutoTest {
 
     // ── Lift ───────────────────────────────────────────────────────────
 
-    fn feed_lift(&mut self, t: f64, event: &MouseEvent) {
-        if let MouseEvent::Move { dx, dy } = event {
-            if *dx == 0 && *dy == 0 {
-                return;
-            }
-            let distance = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
-            if let Some(last) = self.lift_last_move_t {
-                let gap_ms = (t - last) * 1000.0;
-                if gap_ms > self.cfg.lift_idle_ms {
-                    self.lift_resumes += 1;
-                    if distance > self.cfg.lift_jump_counts {
-                        self.lift_jumps.push(distance);
-                    }
-                }
-            }
-            self.lift_last_move_t = Some(t);
+    /// DPI for lift-off distances, and whether it was assumed.
+    fn lift_dpi(&self) -> (f64, bool) {
+        liftoff::dpi_or_default(self.cfg.dpi)
+    }
+
+    /// The step's detector. It starts watching when the step does, without
+    /// assuming the mouse was still then (the user may still be moving it).
+    fn lift_detector(&mut self, phase_start: f64) -> &mut LiftDetector {
+        let (dpi, _) = self.lift_dpi();
+        self.lift
+            .get_or_insert_with(|| LiftDetector::new(dpi).watching_from(phase_start))
+    }
+
+    fn record_lift_burst(&mut self, burst: Option<liftoff::Burst>) {
+        if let Some(burst) = burst {
+            let (dpi, _) = self.lift_dpi();
+            self.lift_tally.record(&burst, dpi);
         }
     }
 
+    fn feed_lift(&mut self, phase_start: f64, t: f64, event: &MouseEvent) {
+        if let MouseEvent::Move { dx, dy } = *event {
+            let burst = self.lift_detector(phase_start).feed(t, dx, dy);
+            self.record_lift_burst(burst);
+        }
+    }
+
+    fn tick_lift(&mut self, phase_start: f64, now: f64) {
+        let burst = self.lift_detector(phase_start).tick(now);
+        self.record_lift_burst(burst);
+    }
+
     fn finalize_lift(&mut self) {
-        let n = self.lift_jumps.len();
-        let max = self.lift_jumps.iter().copied().fold(0.0, f64::max);
+        let now = self.now;
+        let burst = self.lift.as_mut().and_then(|d| d.tick(now));
+        self.record_lift_burst(burst);
+        // Motion still under way when the step ends may be the start of a
+        // slide, so it is not judged; it still shows the user paused and
+        // then moved the mouse.
+        let unfinished = self.lift.as_ref().is_some_and(LiftDetector::in_burst);
+        let resumes = self.lift_tally.bursts() + usize::from(unfinished);
+        let n = self.lift_tally.jumps.len();
+        let max_counts = self.lift_tally.max_jump_counts();
+        let (dpi, assumed) = self.lift_dpi();
+        let max_mm = counts_to_mm(max_counts, dpi);
         self.metrics.lift_jumps = n;
-        self.metrics.lift_max_jump_counts = max;
-        if self.lift_resumes == 0 {
-            // Without a pause followed by movement there was no set-down to
-            // check, so "no jumps" would claim something never measured.
-            self.untested.push(Phase::Lift);
-            self.push(
-                Severity::Info,
-                Phase::Lift,
-                "Lift-off not tested",
-                "No movement after a pause was recorded, so cursor jumps on set-down could not be checked. Lift the mouse, set it down and move it again during this step.".to_string(),
-            );
-        } else if n == 0 {
-            self.push(
-                Severity::Info,
-                Phase::Lift,
-                "No cursor jumps on lift",
-                "The cursor did not jump when the mouse was lifted or set down.".to_string(),
-            );
-        } else if n == 1 {
-            self.push(
+        self.metrics.lift_max_jump_counts = max_counts;
+        self.metrics.lift_max_jump_mm = max_mm;
+        self.metrics.lift_dpi = dpi;
+        self.metrics.lift_dpi_assumed = assumed;
+        let threshold = format!(
+            "{:.1} mm within {:.0} ms ({:.0} counts at {:.0} DPI{})",
+            JUMP_THRESHOLD_MM,
+            JUMP_WINDOW_MS,
+            mm_to_counts(JUMP_THRESHOLD_MM, dpi),
+            dpi,
+            if assumed { ", assumed" } else { "" }
+        );
+        let dpi_note = if assumed {
+            format!(
+                " The mouse's DPI was not given, so {:.0} DPI is assumed; if it is set differently, the distances are off by the same factor.",
+                liftoff::DEFAULT_DPI
+            )
+        } else {
+            String::new()
+        };
+        // Without a way to count lifts, one movement after a pause is the
+        // least sign that the step was done at all.
+        match liftoff::verdict(n, resumes, 1) {
+            LiftVerdict::TooFewLifts => {
+                // Without a pause followed by movement there was no lift or
+                // set-down to check, so "no jumps" would claim something
+                // never measured.
+                self.untested.push(Phase::Lift);
+                self.push(
+                    Severity::Info,
+                    Phase::Lift,
+                    "Lift-off not tested",
+                    "No movement after a pause was recorded, so cursor jumps on lift or set-down could not be checked. Lift the mouse, set it down, keep it still for a moment and then move it during this step.".to_string(),
+                );
+            }
+            LiftVerdict::Clean => {
+                // Sliding the mouse is no lift; say when nothing that looked
+                // like a lift or set-down was seen at all.
+                let seen = match self.lift_tally.quiet {
+                    0 => "no small lift or set-down movement was seen, so either every lift was perfectly clean or the mouse was not lifted (the Lift-Off Jump test counts lifts for a definite result)".to_string(),
+                    quiet => format!("{} lift or set-down movement(s) checked", quiet),
+                };
+                self.push(
+                    Severity::Info,
+                    Phase::Lift,
+                    "No cursor jumps on lift",
+                    format!(
+                        "No movement after a pause carried the cursor more than {} and then stopped; {}. Sliding movements are not judged.{}",
+                        threshold, seen, dpi_note
+                    ),
+                );
+            }
+            LiftVerdict::OneJump => self.push(
                 Severity::Info,
                 Phase::Lift,
                 "One cursor jump after a pause",
                 format!(
-                    "A single report moved {:.0} counts right after a pause. One jump is often just the set-down; several indicate a high lift-off distance.",
-                    max
+                    "One movement after a pause carried the cursor {:.1} mm and then stopped; the jump limit is {}. One jump is often the hand shifting the mouse on set-down; several indicate a high lift-off distance.{}",
+                    max_mm, threshold, dpi_note
                 ),
-            );
-        } else {
-            self.push(
+            ),
+            LiftVerdict::Jumps => self.push(
                 Severity::Warning,
                 Phase::Lift,
                 "Cursor jumps on lift",
                 format!(
-                    "{} reports moved more than {:.0} counts immediately after a pause (largest {:.0}). The sensor keeps tracking while lifted; lower the lift-off distance or use a plainer surface.",
-                    n, self.cfg.lift_jump_counts, max
+                    "{} movements after a pause carried the cursor more than {} and then stopped (largest {:.1} mm). The sensor keeps tracking while lifted; lower the lift-off distance or use a plainer surface.{}",
+                    n, threshold, max_mm, dpi_note
                 ),
-            );
+            ),
         }
     }
 
@@ -1500,15 +1579,26 @@ mod tests {
             }
         }
 
+        /// Lifts and sets the mouse down three times; it shifts a fraction
+        /// of a millimetre on landing. Each time it is then held still and
+        /// moved in a small circle, as the instruction asks.
         fn good_lift(&mut self) {
             assert_eq!(self.phase(), Some(Phase::Lift));
             for _ in 0..3 {
-                self.move_for(0.5, 1.0);
-                self.idle(0.6);
-                self.at.feed(self.t, &MouseEvent::Move { dx: 2, dy: 1 });
-                self.move_for(0.3, 1.0);
+                self.idle(0.8);
+                self.set_down(&[(3, 1), (4, 0), (3, -1), (2, 0)], 2.0);
+                self.idle(1.0);
+                self.move_for(0.6, 1.0);
             }
             self.idle(10.5);
+        }
+
+        /// Reports `moves`, `interval_ms` apart, starting now.
+        fn set_down(&mut self, moves: &[(i32, i32)], interval_ms: f64) {
+            for &(dx, dy) in moves {
+                self.t += interval_ms / 1000.0;
+                self.at.feed(self.t, &MouseEvent::Move { dx, dy });
+            }
         }
     }
 
@@ -1602,6 +1692,8 @@ mod tests {
             ..cfg()
         });
         assert!(!at.phases().contains(&Phase::Movement));
+        // Lift-off needs raw sensor counts, not accelerated pointer deltas
+        assert!(!at.phases().contains(&Phase::Lift));
     }
 
     #[test]
@@ -1906,19 +1998,163 @@ mod tests {
         sim.good_scroll();
         assert_eq!(sim.phase(), Some(Phase::Lift));
         for _ in 0..3 {
-            sim.move_for(0.3, 1.0);
+            // The cursor jumps 100 counts (3.2 mm at 800 DPI) on set-down,
+            // then the mouse is held still and moved in a circle.
             sim.idle(0.5);
             sim.at.feed(sim.t, &MouseEvent::Move { dx: 80, dy: -60 });
+            sim.idle(1.0);
+            sim.move_for(0.3, 1.0);
         }
         sim.idle(10.5);
         let r = sim.at.report().unwrap();
-        assert_eq!(r.metrics.lift_jumps, 3);
+        assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
         assert!((r.metrics.lift_max_jump_counts - 100.0).abs() < 1e-9);
+        assert!((r.metrics.lift_max_jump_mm - 3.175).abs() < 1e-9);
+        assert!(r.metrics.lift_dpi_assumed);
         assert!(r
             .findings
             .iter()
             .any(|f| f.title == "Cursor jumps on lift" && f.severity == Severity::Warning));
         assert_eq!(r.verdict, Verdict::Attention);
+    }
+
+    #[test]
+    fn test_lift_jump_spread_over_many_reports_is_flagged() {
+        // A set-down jump of 200 counts (6.4 mm at 800 DPI) delivered at
+        // 1000 Hz as 10 counts per report. No single report is large.
+        let mut sim = sim_at_lift(cfg());
+        for _ in 0..3 {
+            sim.idle(0.6);
+            sim.set_down(&[(10, 0); 20], 1.0);
+            sim.idle(1.0);
+            sim.move_for(0.5, 1.0);
+        }
+        sim.idle(10.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.title == "Cursor jumps on lift" && f.severity == Severity::Warning));
+    }
+
+    #[test]
+    fn test_lift_normal_starts_at_125hz_are_not_jumps() {
+        // A 125 Hz mouse: the first report of an ordinary movement after a
+        // pause already carries 60 counts. Starting to move is not a jump.
+        let mut sim = sim_at_lift(cfg());
+        for _ in 0..3 {
+            sim.idle(0.6);
+            sim.set_down(&[(60, 5); 60], 8.0);
+        }
+        sim.idle(10.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 0, "{:?}", titles(r));
+        assert_eq!(r.count(Severity::Warning), 0, "{:?}", titles(r));
+        // Only sliding was seen: the finding does not claim lifts were clean
+        assert!(lift_finding(r)
+            .detail
+            .contains("or the mouse was not lifted"));
+    }
+
+    /// A run that reaches the lift step with healthy earlier steps.
+    fn sim_at_lift(cfg: Config) -> Sim {
+        let mut sim = Sim::new(cfg);
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        sim.good_scroll();
+        assert_eq!(sim.phase(), Some(Phase::Lift));
+        sim
+    }
+
+    fn lift_finding(r: &Report) -> &Finding {
+        r.findings
+            .iter()
+            .find(|f| f.phase == Phase::Lift)
+            .expect("a lift finding")
+    }
+
+    #[test]
+    fn test_lift_threshold_uses_configured_dpi() {
+        // Three 100-count set-down shifts: 3.2 mm at 800 DPI (jumps), but
+        // only 1.6 mm at 1600 DPI (a normal set-down).
+        let lifts = |sim: &mut Sim| {
+            for _ in 0..3 {
+                sim.idle(0.5);
+                sim.set_down(&[(20, 0); 5], 1.0);
+                sim.idle(1.0);
+                sim.move_for(0.3, 1.0);
+            }
+            sim.idle(10.5);
+        };
+        let mut sim = sim_at_lift(cfg());
+        lifts(&mut sim);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 3);
+        assert_eq!(lift_finding(r).title, "Cursor jumps on lift");
+        assert!(lift_finding(r).detail.contains("800 DPI is assumed"));
+
+        let mut sim = sim_at_lift(Config {
+            dpi: Some(1600.0),
+            ..cfg()
+        });
+        lifts(&mut sim);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 0);
+        assert_eq!(r.verdict, Verdict::Healthy, "{:?}", titles(r));
+        assert_eq!(lift_finding(r).title, "No cursor jumps on lift");
+        assert!(lift_finding(r)
+            .detail
+            .contains("3 lift or set-down movement(s) checked"));
+        assert!(!lift_finding(r).detail.contains("assumed"));
+        assert!(!r.metrics.lift_dpi_assumed);
+        assert_eq!(r.metrics.lift_dpi, 1600.0);
+    }
+
+    #[test]
+    fn test_one_lift_jump_is_only_noted() {
+        let mut sim = sim_at_lift(cfg());
+        sim.idle(0.5);
+        sim.set_down(&[(10, 0); 20], 1.0);
+        sim.idle(1.0);
+        sim.move_for(0.5, 1.0);
+        sim.idle(10.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 1);
+        let f = lift_finding(r);
+        assert_eq!(
+            (f.severity, f.title.as_str()),
+            (Severity::Info, "One cursor jump after a pause")
+        );
+        assert_eq!(r.verdict, Verdict::Healthy, "{:?}", titles(r));
+    }
+
+    #[test]
+    fn test_moving_through_the_whole_lift_step_is_not_tested() {
+        // Never paused: there was no lift or set-down to check.
+        let mut sim = sim_at_lift(cfg());
+        sim.move_for(10.5, 1.0);
+        sim.idle(0.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(lift_finding(r).title, "Lift-off not tested");
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn test_motion_cut_off_by_the_step_end_is_not_judged() {
+        // A 3 mm movement starts 30 ms before the step ends: it may be the
+        // start of a slide, so it is not called a jump, but it does show
+        // the user paused and then moved.
+        let mut sim = sim_at_lift(cfg());
+        let remaining = sim.at.status().unwrap().remaining_secs;
+        sim.t += remaining - 0.03;
+        sim.at.tick(sim.t);
+        sim.set_down(&[(20, 0); 5], 1.0);
+        sim.idle(0.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.metrics.lift_jumps, 0);
+        assert_eq!(lift_finding(r).title, "No cursor jumps on lift");
     }
 
     #[test]

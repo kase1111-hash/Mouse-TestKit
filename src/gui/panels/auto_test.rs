@@ -29,6 +29,8 @@ pub struct AutoTestPanel {
     show_metrics: bool,
     /// Framework input: partial wheel movement not yet worth a notch.
     wheel: WheelAccumulator,
+    /// The mouse's DPI for the lift step, if the user set it (`Config::dpi`).
+    dpi: Option<f64>,
 }
 
 /// Turns window-system wheel deltas into whole notches.
@@ -132,7 +134,14 @@ impl AutoTestPanel {
             last_run_raw: true,
             show_metrics: false,
             wheel: WheelAccumulator::for_platform(),
+            dpi: None,
         }
+    }
+
+    /// The mouse's DPI for measuring lift-off jumps in mm, or `None` to
+    /// assume 800 (the report then says so). Used from the next run on.
+    pub fn set_dpi(&mut self, dpi: Option<f64>) {
+        self.dpi = dpi;
     }
 
     pub fn is_running(&self) -> bool {
@@ -213,6 +222,7 @@ impl AutoTestPanel {
     fn start(&mut self, has_bridge: bool) {
         self.engine = AutoTest::new(Config {
             timing_reliable: has_bridge,
+            dpi: self.dpi,
             ..Config::default()
         });
         self.last_run_raw = has_bridge;
