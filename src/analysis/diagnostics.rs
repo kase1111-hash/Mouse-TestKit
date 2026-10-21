@@ -37,7 +37,8 @@ use crate::analysis::liftoff::{
     JUMP_WINDOW_MS,
 };
 use crate::analysis::polling::{
-    estimate_hz, is_saturated_pair, median_in_place, nominal_rate, MAX_POLL_INTERVAL_MS,
+    estimate_hz, is_saturated_pair, median_in_place, usb_nominal_rate, MAX_POLL_INTERVAL_MS,
+    USB_MIN_POLLING_HZ,
 };
 use crate::analysis::scroll::{WheelCheck, SKIP_FAULT_COUNT};
 use crate::analysis::stutter::{
@@ -360,11 +361,6 @@ fn button_name(i: usize) -> &'static str {
     ["left", "right", "middle", "side", "extra", "unknown"][i.min(5)]
 }
 
-/// The slowest rate a USB mouse runs at is 125 Hz; this leaves room for
-/// timing error. Below it a mouse is on Bluetooth, where one report per
-/// 7.5-15 ms connection interval (67-133 Hz) is normal, or is a USB mouse
-/// set to a low rate.
-const USB_MIN_POLLING_HZ: u32 = 110;
 /// Fewer reports than a 60 Hz screen shows frames: the pointer moves in
 /// visible steps whatever the connection. A healthy Bluetooth link (15 ms at
 /// most, 67 Hz) stays above it.
@@ -1071,9 +1067,7 @@ impl AutoTest {
         let mut sorted = usable.clone();
         let period = median_in_place(&mut sorted).unwrap_or(0.0);
         let hz = estimate_hz(&usable, self.cfg.movement_min_intervals);
-        let nominal = hz
-            .filter(|&h| h >= USB_MIN_POLLING_HZ)
-            .map(|h| nominal_rate(h as f64));
+        let nominal = hz.and_then(|h| usb_nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
         self.metrics.max_interval_ms = usable.iter().copied().fold(0.0, f64::max);
