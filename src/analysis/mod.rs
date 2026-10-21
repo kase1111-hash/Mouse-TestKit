@@ -8,5 +8,6 @@ pub mod angle_snap;
 pub mod coalesce;
 pub mod diagnostics;
 pub mod polling;
+pub mod scroll;
 pub mod strokes;
 pub mod stutter;

@@ -62,7 +62,7 @@ Only intervals during fast, steady movement are judged against the median interv
 ---
 
 ### Click Response
-Tests button registration and measures hold duration.
+Counts clicks and measures hold duration. Click latency (the delay inside the mouse) is not measured; that needs external hardware.
 
 1. Select **Left Click** or **Right Click**
 2. Click **Start**
@@ -77,7 +77,7 @@ Detects stuck or delayed button releases (common switch failure symptom).
 1. Select **Left Click** or **Right Click**
 2. Click **Start**
 3. Click rapidly in the test area
-4. Holds >100ms are flagged as potentially sticky
+4. Clicks held longer than 250 ms (the Auto Diagnostics threshold) are counted as long holds. After at least 5 clicks, two or more long holds are reported as slow or sticky releases; a single one is treated as the hand, not the switch. A button held down for over a second is reported as possibly stuck
 
 ---
 
@@ -92,21 +92,24 @@ Detects cursor jumps when lifting the mouse off the surface.
 ---
 
 ### USB Conflict Detection (CLI, Linux only)
-Shows other devices connected to the same USB controller/hub that may cause bandwidth conflicts.
+Shows how each mouse is connected: its USB bus, the hubs in between, its link speed, and what else shares the bus.
 
-1. Select **USB Conflict Detection** from the CLI menu
-2. The scanner reads `/sys/bus/usb/devices` to enumerate connected devices
-3. Review results for potential bandwidth contention
+1. Select **USB Conflict Scanner** from the CLI menu
+2. The scanner reads `/sys/bus/usb/devices`; a mouse is recognised by its HID boot-mouse interface (Bluetooth, PS/2 and the few USB mice without the boot protocol are not listed)
+3. Sharing a bus or controller with other devices is normal and is shown as information. Low speed (1.5 Mbit/s) is noted because it limits polling to about 125 Hz. A mouse behind a 12 Mbit/s (USB 1.1) hub together with an audio, video or storage device is shown as a possible issue: if the stutter test shows problems, plug the mouse straight into the computer and compare
 
 ---
 
 ### Scroll Wheel (GUI only)
-Tests scroll wheel functionality and consistency. This test is only available in the GUI application.
+Counts wheel notches and checks for encoder faults. This test is only available in the GUI application.
 
 1. Click **Start**
 2. Hover over the test area
-3. Scroll up and down
-4. View step count, speed, and direction changes
+3. Scroll steadily down at least 10 notches, then up at least 10
+4. A notch reported in the opposite direction within 60 ms of the previous one is a skip (a finger cannot turn the wheel back that fast). One or two are reported as a possible skip, three or more as a skipping wheel. Many notches one way and none the other means that direction may be dead
+5. Lost notches are not detected automatically: roll the wheel slowly by 10 clicks you can feel and check the counter rose by exactly 10
+
+Scrolling speed is shown but not rated: it describes your hand, not the wheel.
 
 ---
 
