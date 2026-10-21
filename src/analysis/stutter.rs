@@ -11,8 +11,8 @@
 //! small reports of a hand slowing to a brief stop (see
 //! [`MIN_RELATIVE_REPORT_SIZE`]), compares them against the median of such
 //! intervals, and counts each interval exactly once. The same rule finds
-//! freezes: gaps longer than a poll between two such reports, which a hand
-//! that slows down to stop never leaves (see [`is_freeze`]).
+//! freezes: gaps longer than a poll between two such reports after which
+//! the held-back movement arrives at once (see [`is_freeze`]).
 //!
 //! [`analyze_stutter`] is the older deviation-from-mean classifier for a plain
 //! list of intervals. It knows nothing about pauses or slow movement and is
@@ -54,25 +54,34 @@ pub const MIN_RELATIVE_REPORT_SIZE: f64 = 0.25;
 /// without a test, and Auto Diagnostics notes such pauses separately.
 pub const MAX_FREEZE_MS: f64 = 1000.0;
 
+/// The report after a freeze carries at least this many median reports'
+/// worth of counts (see [`is_freeze`]).
+pub const FREEZE_CARRY_REPORTS: f64 = 3.0;
+
 /// Whether a gap between two reports of a saturated pair, longer than
 /// [`MAX_POLL_INTERVAL_MS`] and at most [`MAX_FREEZE_MS`], is a freeze: the
 /// reports stopped while the hand kept moving the same way, as when a
-/// wireless link or a cable drops out.
+/// wireless link, a hub or a cable drops out.
 ///
-/// `smaller` is the size (counts) of the smaller of the two reports and
-/// `median_size` the median report size of fast movement. A hand that stops
-/// slows down first and starts again from rest, so the reports either side
-/// of its pause are small (see [`MIN_RELATIVE_REPORT_SIZE`]). Lifting the
-/// mouse while moving and setting it down still moving the same way looks
-/// the same, so a single freeze is not proof of a fault.
-pub fn is_freeze(interval_ms: f64, smaller: f64, median_size: f64) -> bool {
+/// `smaller` is the size (counts) of the smaller of the two reports, `after`
+/// the size of the report after the gap, and `median_size` the median report
+/// size of fast movement. The mouse keeps counting while its reports cannot
+/// get through and sends the held-back movement once they can, so the
+/// report after a freeze carries the movement of the missed polls (at least
+/// [`FREEZE_CARRY_REPORTS`] median reports; the cursor freezes, then jumps).
+/// A hand that stops and starts again sends nothing for the pause and then
+/// an ordinary report, even when it stops within a poll or two, as a slow
+/// hand often does at 125-250 Hz; a mouse lifted while moving does not count
+/// at all while it is in the air. Neither is a freeze.
+pub fn is_freeze(interval_ms: f64, smaller: f64, after: f64, median_size: f64) -> bool {
     interval_ms > MAX_POLL_INTERVAL_MS
         && interval_ms <= MAX_FREEZE_MS
         && smaller >= MIN_RELATIVE_REPORT_SIZE * median_size
+        && after >= FREEZE_CARRY_REPORTS * median_size
 }
 
 /// This many freezes in a session are a fault whatever the stutter rate: a
-/// lift while moving can explain one, not a repeat.
+/// moment of radio interference can explain one, not a repeat.
 pub const CONFIRMED_FREEZES: usize = 2;
 
 /// Judged intervals collected before the median baseline is trusted.
@@ -191,8 +200,9 @@ pub fn rate_stutters(judged_secs: f64, stutters: usize) -> StutterRating {
 /// report of such movement (see [`MIN_RELATIVE_REPORT_SIZE`]). A judged
 /// interval longer than [`stutter_threshold_ms`]`(median, multiplier)` is a
 /// stutter. Only intervals up to [`MAX_POLL_INTERVAL_MS`] shape the median;
-/// a judged interval longer than that is also a freeze (see [`is_freeze`]),
-/// and intervals over [`MAX_FREEZE_MS`] are not judged.
+/// a longer interval is judged only when it is a freeze (see [`is_freeze`]):
+/// otherwise it is the hand stopping or the mouse being lifted. Intervals
+/// over [`MAX_FREEZE_MS`] are not judged.
 #[derive(Debug, Clone)]
 pub struct StutterDetector {
     multiplier: f64,
@@ -208,8 +218,8 @@ pub struct StutterDetector {
     median_size: Option<f64>,
     since_refresh: usize,
     /// Intervals seen before the baseline existed: (report index, ms, size
-    /// of the smaller of its two reports).
-    pending: Vec<(usize, f64, f64)>,
+    /// of the smaller of its two reports, size of the later one).
+    pending: Vec<(usize, f64, f64, f64)>,
     judged: usize,
     judged_sum_ms: f64,
     judged_min_ms: f64,
@@ -258,7 +268,8 @@ impl StutterDetector {
     /// counts. Reports must arrive in time order.
     ///
     /// Returns the interval (ms) since the previous report when it is judged,
-    /// or held back to be judged once the baseline exists; `None` otherwise.
+    /// or held back to be judged once the baseline exists (a gap longer than
+    /// a poll only once it is judged a freeze); `None` otherwise.
     pub fn feed(&mut self, t: f64, dx: i32, dy: i32) -> Option<f64> {
         if dx == 0 && dy == 0 {
             return None;
@@ -288,19 +299,20 @@ impl StutterDetector {
         }
 
         if self.median_ms.is_none() {
-            self.pending.push((index, interval, smaller));
+            self.pending.push((index, interval, smaller, size));
             if self.pending.len() >= BASELINE_MIN_INTERVALS {
                 self.refresh_baseline();
-                for (i, ms, smaller) in std::mem::take(&mut self.pending) {
-                    self.judge(i, ms, smaller);
+                for (i, ms, smaller, after) in std::mem::take(&mut self.pending) {
+                    self.judge(i, ms, smaller, after);
                 }
             }
-            Some(interval)
+            (interval <= MAX_POLL_INTERVAL_MS).then_some(interval)
         } else {
             if self.since_refresh >= BASELINE_REFRESH {
                 self.refresh_baseline();
             }
-            self.judge(index, interval, smaller).then_some(interval)
+            self.judge(index, interval, smaller, size)
+                .then_some(interval)
         }
     }
 
@@ -312,17 +324,21 @@ impl StutterDetector {
         self.since_refresh = 0;
     }
 
-    /// Judge one interval whose smaller report holds `smaller` counts.
-    /// Returns whether it was judged (it is skipped when that report is one
-    /// of the small reports around a brief stop).
-    fn judge(&mut self, index: usize, interval: f64, smaller: f64) -> bool {
+    /// Judge one interval whose smaller report holds `smaller` counts and
+    /// whose later report holds `after`. Returns whether it was judged (it
+    /// is skipped when that report is one of the small reports around a
+    /// brief stop, or when a gap longer than a poll is no freeze).
+    fn judge(&mut self, index: usize, interval: f64, smaller: f64, after: f64) -> bool {
         let (Some(median), Some(median_size)) = (self.median_ms, self.median_size) else {
             return false;
         };
         if smaller < MIN_RELATIVE_REPORT_SIZE * median_size {
             return false;
         }
-        if is_freeze(interval, smaller, median_size) {
+        if interval > MAX_POLL_INTERVAL_MS {
+            if !is_freeze(interval, smaller, after, median_size) {
+                return false;
+            }
             self.freezes += 1;
         }
         self.judged += 1;
@@ -416,7 +432,8 @@ impl StutterDetector {
         }
     }
 
-    /// Stutters longer than [`MAX_POLL_INTERVAL_MS`] (see [`is_freeze`]).
+    /// Freezes: stutters longer than [`MAX_POLL_INTERVAL_MS`] (see
+    /// [`is_freeze`]).
     pub fn freezes(&self) -> usize {
         self.freezes
     }
@@ -919,7 +936,12 @@ mod detector_tests {
 
     /// Like [`stop_and_go`], with stops of `rest(i)` seconds.
     fn stop_and_go_with(v: f64, rest: impl Fn(usize) -> f64) -> Vec<Seg> {
-        let ramp = STOP_GO_RAMP;
+        stop_and_go_ramp(v, STOP_GO_RAMP, rest)
+    }
+
+    /// Like [`stop_and_go_with`], slowing down and speeding up over `ramp`
+    /// seconds.
+    fn stop_and_go_ramp(v: f64, ramp: f64, rest: impl Fn(usize) -> f64) -> Vec<Seg> {
         let mut segs = Vec::new();
         for i in 0..20 {
             segs.push(seg(STOP_GO_CRUISE, move |t| (v * t, 0.0)));
@@ -979,7 +1001,7 @@ mod detector_tests {
             assert!(d.worst_gap_ms() > 300.0, "{}", d.worst_gap_ms());
             assert_eq!(d.rating(), StutterRating::Fair, "{} Hz", hz);
         }
-        // One freeze (a lift while moving looks the same) is not a fault
+        // One freeze (a moment of interference) is not a fault
         let one = |t: f64| (5.0..5.3).contains(&t);
         let d = run(
             &simulate(1000.0, vec![circles(12.0, 600.0, 1.0)], one, 30e-6),
@@ -987,6 +1009,54 @@ mod detector_tests {
         );
         assert_eq!(d.freezes(), 1);
         assert_eq!(d.rating(), StutterRating::Good);
+    }
+
+    #[test]
+    fn abrupt_stops_of_a_slow_hand_are_not_freezes() {
+        // A slow hand at 125-250 Hz stops within a poll or two (friction
+        // stops a slowly pushed mouse in milliseconds) and starts again the
+        // same way: the reports either side of each 0.12-0.88 s stop are
+        // still a good part of the median report, but nothing is held back.
+        let rest = |i: usize| 0.12 + 0.04 * i as f64;
+        for hz in [125.0, 250.0] {
+            for v in [300.0, 650.0, 1500.0] {
+                for ramp in [0.008, 0.012, 0.016] {
+                    let reports = simulate(hz, stop_and_go_ramp(v, ramp, rest), no_drops, 30e-6);
+                    let d = run(&reports, 2.0);
+                    assert_eq!(d.freezes(), 0, "{} Hz, {} counts/s, {} s", hz, v, ramp);
+                    assert_eq!(d.stutter_count(), 0, "{} Hz, {} counts/s", hz, v);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lifting_the_mouse_while_moving_is_not_a_freeze() {
+        // Circling, the mouse is lifted for 150-400 ms every 2 s and set
+        // down still moving: the sensor counts nothing in the air.
+        let lifted = |t: f64| {
+            let k = (t / 2.0).floor();
+            let start = k * 2.0 + 1.0;
+            t > 0.5 && (start..start + 0.15 + 0.05 * (k % 6.0)).contains(&t)
+        };
+        let (_, pos) = path(vec![circles(12.0, 600.0, 1.0)]);
+        let hz = 1000.0;
+        let mut reports = Vec::new();
+        let (mut rx, mut ry) = (0i64, 0i64);
+        for k in 1..(12.0 * hz) as usize {
+            let t = k as f64 / hz;
+            let (x, y) = pos(t);
+            let dx = (x - rx as f64).trunc() as i64;
+            let dy = (y - ry as f64).trunc() as i64;
+            rx += dx;
+            ry += dy;
+            if !lifted(t) && (dx != 0 || dy != 0) {
+                reports.push((t, dx as i32, dy as i32));
+            }
+        }
+        let d = run(&reports, 2.0);
+        assert_eq!(d.freezes(), 0);
+        assert_eq!(d.stutter_count(), 0);
     }
 
     #[test]

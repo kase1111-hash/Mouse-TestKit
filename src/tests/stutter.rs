@@ -158,7 +158,7 @@ fn print_summary(detector: &StutterDetector) {
         );
     }
     println!(
-        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s; two or more rate the session at least Fair.)",
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s after which the held-back movement arrives at once; two or more rate the session at least Fair.)",
         DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
     );
 }
