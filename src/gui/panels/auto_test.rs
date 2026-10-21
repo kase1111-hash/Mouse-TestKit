@@ -33,6 +33,28 @@ pub struct AutoTestPanel {
     dpi: Option<f64>,
 }
 
+/// Which input feeds the engine this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputPath {
+    Raw,
+    Framework,
+    /// Nothing: a raw-input run whose device is gone. Frame-stamped pointer
+    /// input would be judged with device-timing rules (16 ms frames read as
+    /// stutters, a press and release in one frame as bounce).
+    Neither,
+}
+
+/// The input path for a run that started with (`run_raw`) or without raw
+/// input, when raw input is `has_bridge` now. A run keeps the kind of input
+/// it started with.
+fn input_path(run_raw: bool, has_bridge: bool) -> InputPath {
+    match (run_raw, has_bridge) {
+        (true, true) => InputPath::Raw,
+        (true, false) => InputPath::Neither,
+        (false, _) => InputPath::Framework,
+    }
+}
+
 /// Turns window-system wheel deltas into whole notches.
 ///
 /// Framework input reports wheel movement in lines, points or pages, and
@@ -167,12 +189,18 @@ impl AutoTestPanel {
         if !self.engine.is_running() {
             return;
         }
-        if has_bridge {
+        let path = input_path(self.last_run_raw, has_bridge);
+        if path == InputPath::Neither {
+            // The step in progress did not see everything: the engine says
+            // so instead of judging it on what it saw.
+            self.engine.input_lost();
+        }
+        if path == InputPath::Raw {
             for ev in raw_events {
                 let t = self.secs(ev.timestamp);
                 self.engine.feed(t, &to_lib_event(&ev.kind));
             }
-        } else {
+        } else if path == InputPath::Framework {
             // Framework fallback: frame-quantised timing, no per-report data.
             let now = self.secs(Instant::now());
             let (delta, events) = ctx.input(|i| (i.pointer.delta(), i.raw.events.clone()));
@@ -583,11 +611,15 @@ impl AutoTestPanel {
                         .num_columns(2)
                         .spacing([24.0, 4.0])
                         .show(ui, |ui| {
+                            // A check that was not run or had too little
+                            // data shows "not tested", not a 0
+                            let or_not_tested =
+                                |v: Option<String>| v.unwrap_or_else(|| "not tested".to_string());
                             let rows: Vec<(&str, String)> = vec![
                                 ("Rest: movement reports", m.rest_move_events.to_string()),
                                 (
                                     "Rest: movement distance",
-                                    format!("{:.1} counts", m.rest_distance_counts),
+                                    format!("{:.1} {}", m.rest_distance_counts, report.rest_unit()),
                                 ),
                                 ("Rest: clicks", m.rest_clicks.to_string()),
                                 ("Rest: scroll events", m.rest_scroll_events.to_string()),
@@ -611,17 +643,40 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Movement: stutters",
-                                    format!("{} ({:.2}%)", m.stutter_count, m.stutter_rate_percent),
+                                    or_not_tested(
+                                        report.stutter_rate_percent().map(|rate| {
+                                            format!("{} ({:.2}%)", m.stutter_count, rate)
+                                        }),
+                                    ),
                                 ),
                                 (
                                     "Movement: unstable intervals",
-                                    format!("{:.1}%", m.unstable_interval_percent),
+                                    or_not_tested(
+                                        report.stutter_rate_percent().map(|_| {
+                                            format!("{:.1}%", m.unstable_interval_percent)
+                                        }),
+                                    ),
                                 ),
                                 (
                                     "Movement: worst interval",
-                                    format!("{:.1} ms", m.max_interval_ms),
+                                    or_not_tested(
+                                        report
+                                            .stutter_rate_percent()
+                                            .map(|_| format!("{:.1} ms", m.max_interval_ms)),
+                                    ),
                                 ),
-                                ("Movement: pauses > 1 s", m.movement_pauses.to_string()),
+                                (
+                                    "Movement: freezes (0.1-1 s)",
+                                    or_not_tested(report.movement_freezes().map(|v| v.to_string())),
+                                ),
+                                (
+                                    "Movement: pauses > 1 s",
+                                    or_not_tested(
+                                        report
+                                            .movement_freezes()
+                                            .map(|_| m.movement_pauses.to_string()),
+                                    ),
+                                ),
                                 (
                                     "Clicks: left / right / other",
                                     format!(
@@ -629,8 +684,14 @@ impl AutoTestPanel {
                                         m.left_clicks, m.right_clicks, m.other_clicks
                                     ),
                                 ),
-                                ("Clicks: bounce events", m.bounce_events.to_string()),
-                                ("Clicks: micro presses", m.micro_presses.to_string()),
+                                (
+                                    "Clicks: bounce events",
+                                    or_not_tested(report.bounce_events().map(|v| v.to_string())),
+                                ),
+                                (
+                                    "Clicks: micro presses",
+                                    or_not_tested(report.micro_presses().map(|v| v.to_string())),
+                                ),
                                 ("Clicks: sticky releases", m.sticky_releases.to_string()),
                                 ("Clicks: stuck buttons", m.stuck_buttons.to_string()),
                                 (
@@ -647,11 +708,21 @@ impl AutoTestPanel {
                                     "Scroll: down / up",
                                     format!("{} / {}", m.scroll_down, m.scroll_up),
                                 ),
-                                ("Scroll: reversals", m.scroll_reversals.to_string()),
-                                ("Lift: jumps", m.lift_jumps.to_string()),
+                                (
+                                    "Scroll: reversals",
+                                    or_not_tested(report.scroll_reversals().map(|v| v.to_string())),
+                                ),
+                                (
+                                    "Lift: jumps",
+                                    or_not_tested(report.lift_jumps().map(|v| v.to_string())),
+                                ),
                                 (
                                     "Lift: largest jump",
-                                    format!("{:.0} counts", m.lift_max_jump_counts),
+                                    or_not_tested(
+                                        report.lift_jumps().map(|_| {
+                                            format!("{:.0} counts", m.lift_max_jump_counts)
+                                        }),
+                                    ),
                                 ),
                             ];
                             for (k, v) in rows {
@@ -692,6 +763,54 @@ impl AutoTestPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_keeps_the_input_it_started_with() {
+        assert_eq!(input_path(true, true), InputPath::Raw);
+        // The mouse reconnecting mid-run: frame-timed pointer input must not
+        // reach an engine that judges device timing
+        assert_eq!(input_path(true, false), InputPath::Neither);
+        // A device claimed during a framework run: its counts are not the
+        // pointer units the run measures
+        assert_eq!(input_path(false, true), InputPath::Framework);
+        assert_eq!(input_path(false, false), InputPath::Framework);
+    }
+
+    #[test]
+    fn losing_raw_input_mid_run_is_noted_and_feeds_nothing() {
+        // The mouse is unplugged during the rest step; the pointer still
+        // reports a frame-timed click from another input
+        let ctx = egui::Context::default();
+        let mut panel = AutoTestPanel::new();
+        panel.start_for_test(true);
+        let input = egui::RawInput {
+            events: vec![egui::Event::PointerButton {
+                pos: egui::pos2(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                let c = ui.ctx().clone();
+                panel.process_input(&c, &[], false);
+            });
+        }
+        // Noted once for the step, which is then not judged
+        let findings = panel.engine.findings_so_far();
+        assert_eq!(findings.len(), 1, "{:?}", findings);
+        assert_eq!(findings[0].title, "Input lost during the step");
+        assert_eq!(findings[0].phase, Phase::Rest);
+        panel.engine.abort();
+        assert!(panel
+            .engine
+            .report()
+            .unwrap()
+            .untested
+            .contains(&Phase::Rest));
+    }
     use egui::MouseWheelUnit::{Line, Page, Point};
 
     fn run_frame(

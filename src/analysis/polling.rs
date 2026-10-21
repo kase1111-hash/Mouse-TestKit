@@ -16,6 +16,18 @@ pub const NOMINAL_RATES_HZ: [u32; 8] = [125, 250, 500, 1000, 2000, 4000, 8000, 1
 /// Intervals longer than this are treated as the user pausing, not as a poll.
 pub const MAX_POLL_INTERVAL_MS: f64 = 100.0;
 
+/// Fast-movement intervals needed in a window of reports before a rate is
+/// published from it ([`window_hz`]). Their median is not moved by a few late
+/// reports, and even at 125 Hz this is only 160 ms of fast movement.
+pub const MIN_FAST_INTERVALS: usize = 20;
+
+/// The slowest rate a USB mouse runs at is 125 Hz; this leaves room for
+/// timing error. Below it a mouse is on Bluetooth, where one report per
+/// 7.5-15 ms connection interval (67-133 Hz) is normal, or is a USB mouse
+/// set to a low rate. No USB rate is named for such a reading (see
+/// [`usb_nominal_rate`]).
+pub const USB_MIN_POLLING_HZ: u32 = 110;
+
 /// Counts a report must carry on its larger axis to prove the mouse had a
 /// report ready at every poll.
 ///
@@ -145,6 +157,21 @@ pub fn estimate_hz(intervals_ms: &[f64], min_samples: usize) -> Option<u32> {
         return None;
     }
     Some((1000.0 / median).round() as u32)
+}
+
+/// Polling rate (Hz) of a window of motion reports `(time_ms, dx, dy)`, from
+/// its fast-movement intervals only (see [`saturated_intervals_ms`]), or
+/// `None` when it holds fewer than [`MIN_FAST_INTERVALS`] of them: the hand
+/// moved too slowly to show the rate.
+pub fn window_hz(reports: &[(f64, i32, i32)]) -> Option<u32> {
+    estimate_hz(&saturated_intervals_ms(reports), MIN_FAST_INTERVALS)
+}
+
+/// The standard USB rate nearest a measurement, or `None` below
+/// [`USB_MIN_POLLING_HZ`]: there "nominal 125 Hz" would read as a USB mouse
+/// running slow, while the rate is normal for Bluetooth.
+pub fn usb_nominal_rate(hz: f64) -> Option<u32> {
+    (hz >= USB_MIN_POLLING_HZ as f64).then(|| nominal_rate(hz))
 }
 
 /// Nearest standard report rate for a measured value (e.g. 986 Hz -> 1000).
@@ -376,6 +403,26 @@ mod tests {
         ];
         assert_eq!(saturated_intervals_ms(&reports), vec![1.0, 1.0, 1.0]);
         assert!(saturated_intervals_ms(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_usb_nominal_rate_is_not_named_for_bluetooth_rates() {
+        assert_eq!(usb_nominal_rate(89.0), None);
+        assert_eq!(usb_nominal_rate(109.9), None);
+        assert_eq!(usb_nominal_rate(110.0), Some(125));
+        assert_eq!(usb_nominal_rate(986.0), Some(1000));
+    }
+
+    #[test]
+    fn test_window_hz_ignores_slow_movement() {
+        // 1 kHz mouse moved slowly: a 1-count report every 3-8 ms
+        let slow: Vec<(f64, i32, i32)> = (0..200)
+            .map(|i| (i as f64 * (3.0 + (i % 6) as f64), 1, 0))
+            .collect();
+        assert_eq!(window_hz(&slow), None);
+        // ... and briskly: a report every poll
+        let fast: Vec<(f64, i32, i32)> = (0..200).map(|i| (i as f64, 3, 1)).collect();
+        assert_eq!(window_hz(&fast), Some(1000));
     }
 
     #[test]

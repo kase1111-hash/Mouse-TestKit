@@ -15,12 +15,7 @@ use std::time::Instant;
 
 use crate::export::PollingRateExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
-use mouse_testkit::analysis::polling::{estimate_hz, nominal_rate, saturated_intervals_ms};
-
-/// Fast-movement intervals needed inside the one-second window before a Hz
-/// value is published. Their median is not moved by a few late reports, and
-/// even at 125 Hz this is only 160 ms of fast movement.
-const MIN_FAST_INTERVALS: usize = 20;
+use mouse_testkit::analysis::polling::{usb_nominal_rate, window_hz, USB_MIN_POLLING_HZ};
 
 /// Tell the user plainly that a measurement needs raw input.
 ///
@@ -177,10 +172,9 @@ impl PollingPanel {
                     self.stat_box(
                         ui,
                         "Nominal",
-                        &if self.samples > 0 {
-                            format!("{} Hz", nominal_rate(self.avg_hz))
-                        } else {
-                            "-".to_string()
+                        &match usb_nominal_rate(self.avg_hz) {
+                            Some(n) if self.samples > 0 => format!("{} Hz", n),
+                            _ => "-".to_string(),
                         },
                         egui::Color32::LIGHT_GRAY,
                     );
@@ -193,6 +187,14 @@ impl PollingPanel {
                     );
                 });
             });
+
+        if self.samples > 0 && usb_nominal_rate(self.avg_hz).is_none() {
+            ui.add_space(8.0);
+            ui.label(format!(
+                "Under {} Hz no USB rate fits. That is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: check its polling rate setting.",
+                USB_MIN_POLLING_HZ
+            ));
+        }
 
         if self.is_running && !self.live {
             ui.add_space(8.0);
@@ -307,8 +309,7 @@ impl PollingPanel {
                 )
             })
             .collect();
-        let fast = saturated_intervals_ms(&reports);
-        match estimate_hz(&fast, MIN_FAST_INTERVALS) {
+        match window_hz(&reports) {
             Some(hz) => {
                 self.live = true;
                 self.current_hz = hz;
@@ -333,11 +334,12 @@ impl PollingPanel {
         });
     }
 
+    /// Start a new measurement. The previous one's statistics are cleared:
+    /// a new run is usually another polling-rate setting or another mouse,
+    /// and blending them would show a rate neither has.
     fn start(&mut self) {
+        self.reset();
         self.is_running = true;
-        self.live = false;
-        self.reports.clear();
-        self.last_hz_calc = None;
     }
 
     #[cfg(test)]
@@ -380,6 +382,7 @@ impl PollingPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mouse_testkit::analysis::polling::nominal_rate;
     use std::time::Duration;
 
     fn mv(t: Instant, dx: i32, dy: i32) -> RawInputEvent {
@@ -460,6 +463,44 @@ mod tests {
         let e = p.export().unwrap();
         assert!((7900..=8100).contains(&e.min_hz), "{}", e.min_hz);
         assert_eq!(nominal_rate(e.avg_hz), 8000);
+    }
+
+    #[test]
+    fn a_new_run_does_not_blend_with_the_last_one() {
+        // 1000 Hz for a second, Stop, switch the mouse to 4000 Hz, Start
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let first: Vec<_> = (0..1000)
+            .map(|i| mv(t0 + Duration::from_millis(i), 3, 0))
+            .collect();
+        drive(&mut p, &first);
+        assert_eq!(nominal_rate(p.export().unwrap().avg_hz), 1000);
+        p.is_running = false;
+        p.start();
+        let t1 = t0 + Duration::from_secs(5);
+        let second: Vec<_> = (0..4000u64)
+            .map(|i| mv(t1 + Duration::from_micros(250 * i), 3, 0))
+            .collect();
+        drive(&mut p, &second);
+        let e = p.export().unwrap();
+        assert!((3900..=4100).contains(&e.min_hz), "{}", e.min_hz);
+        assert_eq!(nominal_rate(e.avg_hz), 4000);
+    }
+
+    #[test]
+    fn bluetooth_rate_gets_no_usb_nominal() {
+        // A healthy Bluetooth mouse: one report per 11.25 ms connection interval
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let events: Vec<_> = (0..300u64)
+            .map(|i| mv(t0 + Duration::from_micros(11_250 * i), 8, 2))
+            .collect();
+        drive(&mut p, &events);
+        let avg = p.export().unwrap().avg_hz;
+        assert!((avg - 89.0).abs() < 1.0, "{}", avg);
+        assert_eq!(usb_nominal_rate(avg), None);
     }
 
     #[test]

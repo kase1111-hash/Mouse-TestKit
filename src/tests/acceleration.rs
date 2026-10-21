@@ -5,10 +5,11 @@
 //! so this test covers sensor/firmware acceleration only and says so.
 
 use crate::terminal;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mouse_testkit::analysis::acceleration::{
     ACCEL_TOLERANCE, MIN_SPEED_RATIO, MIN_STROKES_PER_GROUP,
 };
+use mouse_testkit::analysis::polling::median_in_place;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,9 @@ use crate::input_windows::{self as input, MouseEvent};
 /// A recorded pass needs at least this many counts to be a deliberate movement.
 const MIN_PASS_COUNTS: f64 = 100.0;
 
-pub fn run() {
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
+pub fn run() -> bool {
     println!("\n=== Acceleration Detection ===");
     println!("This test detects acceleration in the mouse's sensor or firmware.");
     println!("It reads raw counts, before the OS applies pointer acceleration, so OS");
@@ -41,7 +44,7 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
@@ -61,8 +64,8 @@ pub fn run() {
 
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
+            if let Some(code) = event::read().ok().and_then(|e| pressed_key(&e)) {
+                match code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('s') => {
                         recording_slow = true;
@@ -132,28 +135,27 @@ pub fn run() {
     println!("\n\n=== Acceleration Detection Complete ===\n");
 
     if !slow_samples.is_empty() && !fast_samples.is_empty() {
-        let avg_slow_counts: f64 =
-            slow_samples.iter().map(|s| s.counts).sum::<f64>() / slow_samples.len() as f64;
-        let avg_fast_counts: f64 =
-            fast_samples.iter().map(|s| s.counts).sum::<f64>() / fast_samples.len() as f64;
-
-        let avg_slow_speed: f64 =
-            slow_samples.iter().map(|s| s.speed).sum::<f64>() / slow_samples.len() as f64;
-        let avg_fast_speed: f64 =
-            fast_samples.iter().map(|s| s.speed).sum::<f64>() / fast_samples.len() as f64;
+        // Medians, as in the GUI: one pass that went wrong cannot decide it
+        let median = |samples: &[AccelSample], f: fn(&AccelSample) -> f64| {
+            median_in_place(&mut samples.iter().map(f).collect::<Vec<_>>()).unwrap_or(0.0)
+        };
+        let slow_counts = median(&slow_samples, |s| s.counts);
+        let fast_counts = median(&fast_samples, |s| s.counts);
+        let slow_speed = median(&slow_samples, |s| s.speed);
+        let fast_speed = median(&fast_samples, |s| s.speed);
 
         // If acceleration exists, fast counts will be higher than slow counts
         // for the same physical distance
-        let count_ratio = avg_fast_counts / avg_slow_counts;
-        let speed_ratio = avg_fast_speed / avg_slow_speed.max(f64::MIN_POSITIVE);
+        let count_ratio = fast_counts / slow_counts;
+        let speed_ratio = fast_speed / slow_speed.max(f64::MIN_POSITIVE);
 
         println!("Slow movements: {} samples", slow_samples.len());
-        println!("  Average counts: {:.0}", avg_slow_counts);
-        println!("  Average speed: {:.0} counts/s\n", avg_slow_speed);
+        println!("  Typical (median) counts: {:.0}", slow_counts);
+        println!("  Typical (median) speed: {:.0} counts/s\n", slow_speed);
 
         println!("Fast movements: {} samples", fast_samples.len());
-        println!("  Average counts: {:.0}", avg_fast_counts);
-        println!("  Average speed: {:.0} counts/s\n", avg_fast_speed);
+        println!("  Typical (median) counts: {:.0}", fast_counts);
+        println!("  Typical (median) speed: {:.0} counts/s\n", fast_speed);
 
         println!("Analysis:");
         println!("  Count ratio (fast/slow): {:.2}", count_ratio);
@@ -211,6 +213,20 @@ pub fn run() {
     }
 
     terminal::wait_for_enter();
+    true
+}
+
+/// The key of a key press. Windows also reports key releases, and a SPACE
+/// release would record the movement since the press as another pass.
+fn pressed_key(event: &Event) -> Option<KeyCode> {
+    match event {
+        Event::Key(KeyEvent {
+            code,
+            kind: KeyEventKind::Press,
+            ..
+        }) => Some(*code),
+        _ => None,
+    }
 }
 
 /// Movement since the last SPACE press.
@@ -315,6 +331,24 @@ fn verdict(slow: usize, fast: usize, count_ratio: f64, speed_ratio: f64) -> Verd
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn key_releases_are_not_commands() {
+        let key = |kind| {
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+        assert_eq!(
+            pressed_key(&key(KeyEventKind::Press)),
+            Some(KeyCode::Char(' '))
+        );
+        assert_eq!(pressed_key(&key(KeyEventKind::Release)), None);
+        assert_eq!(pressed_key(&key(KeyEventKind::Repeat)), None);
+    }
 
     #[test]
     fn pass_duration_is_first_to_last_movement() {

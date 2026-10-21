@@ -1,8 +1,14 @@
 //! Jitter Test
 //! Measures micro-movements when mouse is stationary
+//!
+//! As in the GUI panel, recording starts a moment after SPACE so the hand
+//! and the key press do not count. As in Auto Diagnostics, movement confined
+//! to one or two seconds of a sample (a bump of the desk, the hand leaving
+//! late) is not sensor noise: such a sample is set aside and taken again.
 
 use crate::terminal;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use mouse_testkit::analysis::diagnostics::Config;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -12,8 +18,33 @@ use crate::input::{self, MouseEvent};
 use crate::input_windows::{self as input, MouseEvent};
 
 const SAMPLE_DURATION_SECS: u64 = 5;
+/// Movement (counts) a sample may hold anywhere before it is judged at all:
+/// ordinary sensor noise.
+const NOISE_COUNTS: f64 = 3.0;
 
-pub fn run() {
+/// Seconds after SPACE before recording starts (Auto Diagnostics' settle
+/// time): pressing the key and the hand leaving the desk do not count.
+fn settle() -> Duration {
+    Duration::from_secs_f64(Config::default().rest_settle_secs)
+}
+
+/// Whether a sample's movement is a disturbance rather than sensor noise:
+/// more than noise, but confined to fewer separate seconds than a noisy or
+/// drifting sensor fills (`Config::rest_spread_windows`). `moves` are
+/// (seconds into the sample, dx, dy).
+fn disturbed(moves: &[(f64, i32, i32)]) -> bool {
+    let total: f64 = moves
+        .iter()
+        .map(|&(_, dx, dy)| (dx as f64).hypot(dy as f64))
+        .sum();
+    let mut seconds: Vec<u64> = moves.iter().map(|&(t, ..)| t.max(0.0) as u64).collect();
+    seconds.dedup();
+    total >= NOISE_COUNTS && seconds.len() < Config::default().rest_spread_windows
+}
+
+/// Returns false when no mouse was measured (none selected, or it sent
+/// nothing), so the test suite does not count the test as run.
+pub fn run() -> bool {
     println!("\n=== Jitter Test ===");
     println!("This test measures sensor noise when the mouse is stationary.");
     println!("\nInstructions:");
@@ -30,15 +61,28 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
-    #[cfg(target_os = "linux")]
-    device.grab().ok();
+    terminal::grab_device(&mut device);
+
+    // A healthy sensor at rest sends nothing, so "no jitter" needs proof
+    // that this device is the mouse and is connected.
+    if !terminal::confirm_device_moves(
+        "\nMove the mouse a little to confirm it is the one being tested...",
+        || input::fetch_timed_events(&mut device),
+    ) {
+        println!("No movement came from the selected device: it may be the wrong one of");
+        println!("several entries, in use by another program, or disconnected.");
+        terminal::wait_for_enter();
+        return false;
+    }
+    println!("Now let go of the mouse and leave it still.");
 
     let mut samples: Vec<JitterSample> = Vec::new();
-    let mut current_movements: Vec<(i32, i32)> = Vec::new();
+    let mut disturbed_samples = 0usize;
+    let mut current_movements: Vec<(f64, i32, i32)> = Vec::new();
     let mut sampling = false;
     let mut sample_start: Option<Instant> = None;
     let mut last_print = Instant::now();
@@ -51,12 +95,14 @@ pub fn run() {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
+                    _ if key.kind != KeyEventKind::Press => {}
                     KeyCode::Char('q') => break,
                     KeyCode::Char(' ') if !sampling => {
                         sampling = true;
-                        sample_start = Some(Instant::now());
+                        // Recording starts once the hand has left
+                        sample_start = Some(Instant::now() + settle());
                         current_movements.clear();
-                        println!("\r\x1B[KSampling... DO NOT TOUCH THE MOUSE!");
+                        println!("\r\x1B[KSampling... DO NOT TOUCH THE MOUSE OR THE DESK!");
                     }
                     _ => {}
                 }
@@ -66,9 +112,10 @@ pub fn run() {
         // One Move per hardware report (evdev's separate REL_X/REL_Y events
         // merged), so a diagonal twitch counts as one event, not two.
         for timed in input::fetch_timed_events(&mut device) {
-            if let MouseEvent::Move { dx, dy } = timed.event {
-                if sampling {
-                    current_movements.push((dx, dy));
+            if let (MouseEvent::Move { dx, dy }, Some(start)) = (timed.event, sample_start) {
+                if sampling && timed.time >= start {
+                    let t = timed.time.duration_since(start).as_secs_f64();
+                    current_movements.push((t, dx, dy));
                 }
             }
         }
@@ -77,15 +124,26 @@ pub fn run() {
         if sampling {
             if let Some(start) = sample_start {
                 if start.elapsed() >= Duration::from_secs(SAMPLE_DURATION_SECS) {
-                    let sample = analyze_jitter(&current_movements);
-                    samples.push(sample.clone());
-
-                    println!("\r\x1B[KSample {}: {} events, {:.2} counts total jitter, {:.3} avg magnitude",
-                        samples.len(),
-                        sample.event_count,
-                        sample.total_distance,
-                        sample.avg_magnitude
-                    );
+                    let moves: Vec<(i32, i32)> = current_movements
+                        .iter()
+                        .map(|&(_, dx, dy)| (dx, dy))
+                        .collect();
+                    let sample = analyze_jitter(&moves);
+                    if disturbed(&current_movements) {
+                        disturbed_samples += 1;
+                        println!(
+                            "\r\x1B[KSample set aside: {:.0} counts of movement in one burst (a bump or the hand), not steady sensor noise. Press SPACE to take it again.",
+                            sample.total_distance
+                        );
+                    } else {
+                        samples.push(sample.clone());
+                        println!("\r\x1B[KSample {}: {} events, {:.2} counts total jitter, {:.3} avg magnitude",
+                            samples.len(),
+                            sample.event_count,
+                            sample.total_distance,
+                            sample.avg_magnitude
+                        );
+                    }
 
                     sampling = false;
                     sample_start = None;
@@ -96,8 +154,13 @@ pub fn run() {
 
         if last_print.elapsed() >= Duration::from_millis(200) {
             print!("\r\x1B[K");
-            if sampling {
-                let elapsed = sample_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+            let now = Instant::now();
+            if sampling && sample_start.is_some_and(|s| now < s) {
+                print!("Letting the hand leave - recording starts in a moment | ");
+            } else if sampling {
+                let elapsed = sample_start
+                    .map(|s| now.saturating_duration_since(s).as_secs())
+                    .unwrap_or(0);
                 print!(
                     "Sampling: {}s / {}s | Events: {} | ",
                     elapsed,
@@ -117,8 +180,25 @@ pub fn run() {
     drop(_guard);
 
     println!("\n\n=== Jitter Test Complete ===\n");
+    if disturbed_samples > 0 {
+        println!(
+            "{} sample(s) set aside as disturbed (one burst of movement).\n",
+            disturbed_samples
+        );
+    }
 
-    if !samples.is_empty() {
+    // Not a single report in any sample: a still sensor, or a mouse that
+    // stopped sending input (unplugged, link lost). Only the mouse can say.
+    let silent = !samples.is_empty() && samples.iter().all(|s| s.event_count == 0);
+    if silent
+        && !terminal::confirm_device_moves(
+            "No movement at all was recorded. Move the mouse a little to confirm it is still connected...",
+            || input::fetch_timed_events(&mut device),
+        )
+    {
+        println!("The mouse stopped sending input, so the samples measured nothing.");
+        println!("Check the connection and run the test again.");
+    } else if !samples.is_empty() {
         let avg_events: f64 =
             samples.iter().map(|s| s.event_count as f64).sum::<f64>() / samples.len() as f64;
         let avg_distance: f64 =
@@ -171,6 +251,7 @@ pub fn run() {
     }
 
     terminal::wait_for_enter();
+    true
 }
 
 fn analyze_jitter(movements: &[(i32, i32)]) -> JitterSample {
@@ -217,6 +298,19 @@ pub fn analyze_jitter_pub(movements: &[(i32, i32)]) -> JitterSample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_burst_is_a_disturbance_not_jitter() {
+        // The desk is bumped once: 25 reports, 40 counts, within a second
+        let bump: Vec<(f64, i32, i32)> = (0..25).map(|i| (1.2 + 0.01 * i as f64, 1, 1)).collect();
+        assert!(disturbed(&bump));
+        // A noisy sensor reports in most seconds of the sample
+        let noise: Vec<(f64, i32, i32)> = (0..25).map(|i| (0.2 * i as f64, 1, 1)).collect();
+        assert!(!disturbed(&noise));
+        // A count or two of noise is not judged either way
+        assert!(!disturbed(&[(0.5, 1, 0), (0.6, 1, 0)]));
+        assert!(!disturbed(&[]));
+    }
 
     #[test]
     fn test_analyze_jitter_empty_input() {

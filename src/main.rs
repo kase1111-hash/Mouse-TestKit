@@ -49,8 +49,12 @@ fn main() {
         };
 
         match choice.trim() {
-            "1" => tests::stutter::run(),
-            "2" => tests::polling::run(),
+            "1" => {
+                tests::stutter::run();
+            }
+            "2" => {
+                tests::polling::run();
+            }
             "3" => usb::conflicts::scan(),
             // These tests also report an outcome for the batch runner.
             "4" => {
@@ -68,11 +72,15 @@ fn main() {
             "8" => {
                 tests::angle_snap::run();
             }
-            "9" => tests::acceleration::run(),
+            "9" => {
+                tests::acceleration::run();
+            }
             "10" => {
                 tests::double_click::run();
             }
-            "11" => tests::jitter::run(),
+            "11" => {
+                tests::jitter::run();
+            }
             "12" => tests::standard::run_all(),
             "13" => tests::auto_test::run(),
             "0" => {

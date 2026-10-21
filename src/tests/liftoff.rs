@@ -44,15 +44,15 @@ pub fn run() -> TestOutcome {
     io::stdout().flush().ok();
     let mut dpi_input = String::new();
     io::stdin().read_line(&mut dpi_input).ok();
-    let (dpi, dpi_note) = match super::dpi::parse_dpi(&dpi_input) {
-        Some(d) => (d, ""),
+    let (dpi, dpi_assumed) = match super::dpi::parse_dpi(&dpi_input) {
+        Some(d) => (d, false),
         None => {
             println!(
                 "Assuming {:.0} DPI. If your mouse is set differently, the distances below",
                 DEFAULT_DPI
             );
             println!("are off by the same factor.");
-            (DEFAULT_DPI, " (assumed)")
+            (DEFAULT_DPI, true)
         }
     };
     println!(
@@ -73,9 +73,25 @@ pub fn run() -> TestOutcome {
 
     terminal::grab_device(&mut device);
 
+    // A clean lift sends nothing, so "no jumps" needs proof that this device
+    // is the mouse and is connected. This also drops input queued while the
+    // prompts waited.
+    if !terminal::confirm_device_moves(
+        "\nMove the mouse a little to confirm it is the one being tested...",
+        || input::fetch_timed_events(&mut device),
+    ) {
+        println!("No movement came from the selected device: it may be the wrong one of");
+        println!("several entries, in use by another program, or disconnected.");
+        terminal::wait_for_enter();
+        return TestOutcome::NoDevice;
+    }
+    println!("Now rest it on the pad and keep it still before the first lift.");
+
     let start = Instant::now();
     let secs = |t: Instant| t.saturating_duration_since(start).as_secs_f64();
-    let mut detector = LiftDetector::new(dpi);
+    // The hand may still be settling the mouse after the nudge: motion is
+    // only judged once the mouse has been seen still.
+    let mut detector = LiftDetector::new(dpi).watching_from(0.0);
     let mut tally = LiftTally::default();
     let mut lifts = 0usize;
     let mut last_print = Instant::now();
@@ -119,8 +135,11 @@ pub fn run() -> TestOutcome {
         }
 
         for timed in input::fetch_timed_events(&mut device) {
+            let Some(t) = terminal::secs_after(start, timed.time) else {
+                continue;
+            };
             if let MouseEvent::Move { dx, dy } = timed.event {
-                if let Some(burst) = detector.feed(secs(timed.time), dx, dy) {
+                if let Some(burst) = detector.feed(t, dx, dy) {
                     handle(burst, &mut tally);
                 }
             }
@@ -163,7 +182,7 @@ pub fn run() -> TestOutcome {
     println!(
         "DPI used: {:.0}{} | jump threshold: {:.1} mm ({:.0} counts)",
         dpi,
-        dpi_note,
+        if dpi_assumed { " (assumed)" } else { "" },
         JUMP_THRESHOLD_MM,
         mm_to_counts(JUMP_THRESHOLD_MM, dpi)
     );
@@ -195,7 +214,23 @@ pub fn run() -> TestOutcome {
         }
     }
 
-    let (outcome, lines) = verdict(jumps.len(), lifts);
+    let (mut outcome, mut lines) = verdict(jumps.len(), lifts, dpi_assumed);
+    // Not a single movement since the start: either every lift was perfectly
+    // clean, or the mouse stopped sending input (unplugged, link lost).
+    if outcome == TestOutcome::NoIssues && tally.bursts() == 0 {
+        println!("\nNo movement at all was seen during the test.");
+        if !terminal::confirm_device_moves(
+            "Move the mouse a little to confirm it is still connected...",
+            || input::fetch_timed_events(&mut device),
+        ) {
+            outcome = TestOutcome::Inconclusive;
+            lines = vec![
+                "? Inconclusive - the mouse stopped sending input during the test".to_string(),
+                "  (unplugged or the connection was lost), so the lifts were not measured."
+                    .to_string(),
+            ];
+        }
+    }
     println!();
     for line in lines {
         println!("{}", line);
@@ -214,10 +249,29 @@ pub fn run() -> TestOutcome {
     outcome
 }
 
-/// Overall verdict for `jumps` found over `lifts` recorded lifts.
-pub fn verdict(jumps: usize, lifts: usize) -> (TestOutcome, Vec<String>) {
+/// Overall verdict for `jumps` found over `lifts` recorded lifts, measured
+/// at a DPI the user gave or (`dpi_assumed`) at the default.
+pub fn verdict(jumps: usize, lifts: usize, dpi_assumed: bool) -> (TestOutcome, Vec<String>) {
     let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
     match liftoff::verdict(jumps, lifts, MIN_LIFTS) {
+        // Without the DPI the counts are no distance: the 63 counts that are
+        // 2 mm at the assumed 800 DPI are 0.5 mm at 3200 DPI, which an
+        // ordinary set-down can shift the mouse (as in Auto Diagnostics).
+        LiftVerdict::Jumps if dpi_assumed => (
+            TestOutcome::Inconclusive,
+            vec![
+                format!(
+                    "? {} possible jumps, measured at an assumed {:.0} DPI.",
+                    jumps, DEFAULT_DPI
+                ),
+                format!(
+                    "  If the mouse is set to {:.0} DPI or lower, the cursor jumps when it is lifted",
+                    DEFAULT_DPI
+                ),
+                "  (lower the lift-off distance); at a higher DPI the same counts are a shorter".to_string(),
+                "  distance and may be ordinary set-down shifts. Repeat with the mouse's DPI.".to_string(),
+            ],
+        ),
         LiftVerdict::Jumps => (
             TestOutcome::IssueFound,
             lines(&[
@@ -267,12 +321,25 @@ mod tests {
     #[test]
     fn test_verdict_needs_lifts_before_calling_it_clean() {
         // Quitting at once, or never pressing SPACE, is not a clean result.
-        assert_eq!(verdict(0, 0).0, TestOutcome::Inconclusive);
-        assert_eq!(verdict(0, MIN_LIFTS - 1).0, TestOutcome::Inconclusive);
-        assert_eq!(verdict(0, MIN_LIFTS).0, TestOutcome::NoIssues);
+        assert_eq!(verdict(0, 0, false).0, TestOutcome::Inconclusive);
+        assert_eq!(
+            verdict(0, MIN_LIFTS - 1, false).0,
+            TestOutcome::Inconclusive
+        );
+        assert_eq!(verdict(0, MIN_LIFTS, false).0, TestOutcome::NoIssues);
         // Jumps are evidence whether or not lifts were counted.
-        assert_eq!(verdict(1, 0).0, TestOutcome::PossibleIssue);
-        assert_eq!(verdict(2, 0).0, TestOutcome::IssueFound);
-        assert_eq!(verdict(3, 8).0, TestOutcome::IssueFound);
+        assert_eq!(verdict(1, 0, false).0, TestOutcome::PossibleIssue);
+        assert_eq!(verdict(2, 0, false).0, TestOutcome::IssueFound);
+        assert_eq!(verdict(3, 8, false).0, TestOutcome::IssueFound);
+    }
+
+    #[test]
+    fn test_jumps_at_an_assumed_dpi_are_not_a_problem_found() {
+        // Enter at the DPI prompt, a 3200 DPI mouse: two 0.6 mm set-down
+        // shifts read as 2.4 mm jumps at 800 DPI
+        let (outcome, lines) = verdict(2, 6, true);
+        assert_eq!(outcome, TestOutcome::Inconclusive);
+        assert!(lines.join(" ").contains("assumed 800 DPI"), "{:?}", lines);
+        assert_eq!(verdict(0, 6, true).0, TestOutcome::NoIssues);
     }
 }

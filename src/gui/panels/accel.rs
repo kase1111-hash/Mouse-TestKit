@@ -19,7 +19,8 @@ use std::time::Instant;
 use crate::export::{AccelerationExport, AngleSnapExport};
 use crate::input_bridge::{RawInputEvent, RawInputKind};
 use mouse_testkit::analysis::acceleration::{
-    analyze_strokes, AccelAnalysis, StrokeSample, MIN_STROKES_PER_GROUP, MIN_STROKE_COUNTS,
+    analyze_strokes, stroke_sample, AccelAnalysis, AccelVerdict, NotAPass, StrokeSample,
+    MIN_STROKES_PER_GROUP, MIN_STROKE_COUNTS,
 };
 use mouse_testkit::analysis::angle_snap::{
     analyze_shapes, stroke_shape, AngleSnapAnalysis, StrokeShape, MIN_NEAR_AXIS_STROKES,
@@ -29,8 +30,22 @@ use mouse_testkit::analysis::strokes::{Stroke, StrokeSegmenter};
 
 /// A pause this long (seconds) ends a stroke.
 const STROKE_GAP_S: f64 = 0.25;
+/// When the test is stopped with the Stop button, a stroke that ended this
+/// recently (seconds) was the pointer moving to the button. A real last pass
+/// ended earlier: a pause of [`STROKE_GAP_S`] split it from that trip, and
+/// another such pause passed before the trip was recorded.
+const STOP_TRIP_S: f64 = 0.6;
 /// Points kept for the angle-snap path drawing.
 const MAX_PATH_POINTS: usize = 4000;
+
+/// How an acceleration run was stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopBy {
+    /// From the keyboard: the mouse did not move to stop it.
+    Key,
+    /// With the Stop button, which the measured mouse moved to.
+    Button,
+}
 
 pub struct AccelPanel {
     // Acceleration detection
@@ -39,10 +54,19 @@ pub struct AccelPanel {
     epoch: Instant,
     accel_segmenter: StrokeSegmenter,
     accel_strokes: Vec<StrokeSample>,
+    /// End time (s) of the stroke behind the last entry of `accel_strokes`.
+    accel_last_end: Option<f64>,
+    /// Strokes left out because they turned back on themselves.
+    accel_turned_back: usize,
     accel_result: Option<AccelAnalysis>,
+    /// Whether the current or last acceleration run read raw counts (true)
+    /// or the on-screen pointer, which includes OS acceleration.
+    accel_raw: bool,
 
     // Angle snapping detection
     angle_running: bool,
+    /// Whether the current angle-snapping run reads raw counts.
+    angle_raw: bool,
     angle_segmenter: StrokeSegmenter,
     angle_shapes: Vec<StrokeShape>,
     /// Strokes too short to analyse (shown so the user knows why).
@@ -78,8 +102,12 @@ impl AccelPanel {
             epoch: Instant::now(),
             accel_segmenter: StrokeSegmenter::new(STROKE_GAP_S),
             accel_strokes: Vec::new(),
+            accel_last_end: None,
+            accel_turned_back: 0,
             accel_result: None,
+            accel_raw: true,
             angle_running: false,
+            angle_raw: true,
             angle_segmenter: StrokeSegmenter::new(STROKE_GAP_S),
             angle_shapes: Vec::new(),
             angle_short_strokes: 0,
@@ -134,9 +162,32 @@ impl AccelPanel {
         raw_events: &[RawInputEvent],
         has_bridge: bool,
     ) {
+        // Raw counts and OS-accelerated pointer movement cannot be compared
+        // within one run: stop it, keeping the passes measured so far.
+        if self.is_running && has_bridge != self.accel_raw {
+            self.stop_accel(self.secs(Instant::now()), StopBy::Key);
+        }
+        // Stopping from the keyboard does not move the mouse, so the pass in
+        // progress is a real one. The key is consumed so it cannot also
+        // press a focused button such as Start Test.
+        if self.is_running {
+            let stop_key = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                    | i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+            });
+            if stop_key {
+                self.stop_accel(self.secs(Instant::now()), StopBy::Key);
+            }
+        }
+        // Labels describe the input the run used, not the current one
+        let raw = if self.is_running || self.accel_result.is_some() {
+            self.accel_raw
+        } else {
+            has_bridge
+        };
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
-        if has_bridge {
+        if raw {
             ui.label(
                 "Detects acceleration in the mouse's sensor or firmware (more counts for the same distance when you move faster).",
             );
@@ -164,10 +215,10 @@ impl AccelPanel {
         ui.horizontal(|ui| {
             if self.is_running {
                 if ui.button("Stop Test").clicked() {
-                    self.stop_accel();
+                    self.stop_accel(self.secs(Instant::now()), StopBy::Button);
                 }
             } else if ui.button("Start Test").clicked() {
-                self.start_accel();
+                self.start_accel(has_bridge);
             }
             if ui.button("Clear Data").clicked() {
                 self.clear_accel();
@@ -190,6 +241,7 @@ impl AccelPanel {
                     ui.add_space(5.0);
                     ui.label("Move the mouse across the SAME physical distance each time (for example the full width of your mousepad).");
                     ui.label("Pause briefly after every pass. Do about 5 passes slowly, then 5 passes quickly.");
+                    ui.label("Press Enter or Esc to stop without moving the mouse.");
                     ui.add_space(10.0);
                     let in_progress = self
                         .accel_segmenter
@@ -201,6 +253,15 @@ impl AccelPanel {
                         self.accel_strokes.len(),
                         in_progress
                     ));
+                    if self.accel_turned_back > 0 {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} movement(s) went there and back without a pause and were left out - pause after each pass.",
+                                self.accel_turned_back
+                            ))
+                            .color(egui::Color32::YELLOW),
+                        );
+                    }
                 });
         } else {
             egui::Frame::new()
@@ -219,7 +280,7 @@ impl AccelPanel {
                         MIN_STROKE_COUNTS
                     ));
                     ui.label("2. Move across it, pause, move back, pause - about 5 times slowly.");
-                    ui.label("3. Repeat about 5 times quickly, then press Stop Test.");
+                    ui.label("3. Repeat about 5 times quickly, then press Enter (or Stop Test).");
                     ui.label(format!(
                         "At least {} slow and {} fast passes are needed for a verdict.",
                         MIN_STROKES_PER_GROUP, MIN_STROKES_PER_GROUP
@@ -280,21 +341,26 @@ impl AccelPanel {
                 .show(ui, |ui| {
                     // Fewer counts on fast passes is almost always the sensor
                     // losing tracking, not an acceleration setting to turn off.
-                    let loses_counts = result.has_acceleration && result.factor < 1.0;
-                    let (status, color) = if !result.conclusive {
-                        ("Inconclusive - vary your speed more", egui::Color32::YELLOW)
-                    } else if loses_counts {
-                        ("Fast Passes LOSE Counts", egui::Color32::RED)
-                    } else if result.has_acceleration {
-                        if has_bridge {
+                    let loses_counts = result.verdict == AccelVerdict::LosesCounts;
+                    let (status, color) = match result.verdict {
+                        AccelVerdict::Inconclusive => {
+                            ("Inconclusive - vary your speed more", egui::Color32::YELLOW)
+                        }
+                        AccelVerdict::LosesCounts => {
+                            ("Fast Passes LOSE Counts", egui::Color32::RED)
+                        }
+                        AccelVerdict::Acceleration if raw => {
                             ("Sensor/Firmware Acceleration DETECTED", egui::Color32::RED)
-                        } else {
+                        }
+                        AccelVerdict::Acceleration => {
                             ("Pointer Acceleration DETECTED", egui::Color32::RED)
                         }
-                    } else if has_bridge {
-                        ("No Sensor/Firmware Acceleration", egui::Color32::GREEN)
-                    } else {
-                        ("No Pointer Acceleration Detected", egui::Color32::GREEN)
+                        AccelVerdict::NoAcceleration if raw => {
+                            ("No Sensor/Firmware Acceleration", egui::Color32::GREEN)
+                        }
+                        AccelVerdict::NoAcceleration => {
+                            ("No Pointer Acceleration Detected", egui::Color32::GREEN)
+                        }
                     };
                     ui.label(egui::RichText::new(status).size(24.0).strong().color(color));
                     ui.add_space(15.0);
@@ -324,13 +390,13 @@ impl AccelPanel {
                     });
                     ui.add_space(10.0);
                     ui.label(format!(
-                        "Slow passes: {} at {:.0} counts/s averaging {:.0} counts   |   Fast passes: {} at {:.0} counts/s averaging {:.0} counts",
+                        "Slow passes: {}, typically {:.0} counts at {:.0} counts/s   |   Fast passes: {}, typically {:.0} counts at {:.0} counts/s (medians)",
                         result.slow_count,
-                        result.slow_avg_velocity,
-                        result.slow_avg_counts,
+                        result.slow_median_counts,
+                        result.slow_median_velocity,
                         result.fast_count,
-                        result.fast_avg_velocity,
-                        result.fast_avg_counts
+                        result.fast_median_counts,
+                        result.fast_median_velocity
                     ));
                     if !result.conclusive {
                         ui.add_space(10.0);
@@ -343,7 +409,7 @@ impl AccelPanel {
                     } else if loses_counts {
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new(if has_bridge {
+                            egui::RichText::new(if raw {
                                 "The sensor may be losing tracking at speed: try another mousepad or surface, or the mouse may be moving faster than it is rated for."
                             } else {
                                 "The pointer moved less on fast passes: it may have hit the screen edge, or the sensor is losing tracking at speed."
@@ -353,7 +419,7 @@ impl AccelPanel {
                     } else if result.has_acceleration {
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new(if has_bridge {
+                            egui::RichText::new(if raw {
                                 "Recommendation: turn off acceleration, \"enhanced\" or smoothing modes in the mouse's own software or on-board settings"
                             } else {
                                 "Recommendation: disable pointer acceleration / \"enhance pointer precision\" in your OS and mouse software"
@@ -361,7 +427,7 @@ impl AccelPanel {
                             .color(egui::Color32::YELLOW),
                         );
                     }
-                    if result.conclusive && has_bridge {
+                    if result.conclusive && raw {
                         ui.add_space(5.0);
                         ui.label(
                             egui::RichText::new(
@@ -387,41 +453,65 @@ impl AccelPanel {
 
         if self.is_running {
             let motion = self.frame_motion(ctx, raw_events, has_bridge);
-            for (t, dx, dy) in motion {
-                if let Some(stroke) = self.accel_segmenter.feed(t, dx, dy) {
-                    self.record_accel_stroke(&stroke);
-                }
-            }
             let now = self.secs(Instant::now());
-            if let Some(stroke) = self.accel_segmenter.tick(now) {
+            self.feed_accel(&motion, now);
+        }
+    }
+
+    /// Feed one frame's motion `(t, dx, dy)` and advance time to `now` (s).
+    fn feed_accel(&mut self, motion: &[(f64, i32, i32)], now: f64) {
+        for &(t, dx, dy) in motion {
+            if let Some(stroke) = self.accel_segmenter.feed(t, dx, dy) {
                 self.record_accel_stroke(&stroke);
             }
+        }
+        if let Some(stroke) = self.accel_segmenter.tick(now) {
+            self.record_accel_stroke(&stroke);
         }
     }
 
     fn record_accel_stroke(&mut self, stroke: &Stroke) {
-        let counts = stroke.path_length();
-        if counts < MIN_STROKE_COUNTS {
-            return;
+        match stroke_sample(stroke) {
+            Ok(sample) => {
+                self.accel_strokes.push(sample);
+                self.accel_last_end = Some(stroke.end);
+            }
+            Err(NotAPass::TurnsBack) => self.accel_turned_back += 1,
+            Err(NotAPass::TooShort) => {}
         }
-        self.accel_strokes.push(StrokeSample {
-            counts,
-            velocity: stroke.velocity(),
-        });
     }
 
-    fn start_accel(&mut self) {
+    fn start_accel(&mut self, has_bridge: bool) {
         self.is_running = true;
+        self.accel_raw = has_bridge;
         self.pointer_remainder = (0.0, 0.0);
         self.accel_segmenter.reset();
         self.accel_strokes.clear();
+        self.accel_last_end = None;
+        self.accel_turned_back = 0;
         self.accel_result = None;
     }
 
-    fn stop_accel(&mut self) {
+    /// Stop at time `now` (s). Reaching the Stop button moves the measured
+    /// mouse, and that trip is no pass: it is the stroke in progress, or one
+    /// that ended within [`STOP_TRIP_S`].
+    fn stop_accel(&mut self, now: f64, by: StopBy) {
         self.is_running = false;
-        if let Some(stroke) = self.accel_segmenter.flush() {
-            self.record_accel_stroke(&stroke);
+        match by {
+            StopBy::Key => {
+                if let Some(stroke) = self.accel_segmenter.flush() {
+                    self.record_accel_stroke(&stroke);
+                }
+            }
+            StopBy::Button => {
+                self.accel_segmenter.reset();
+                if self
+                    .accel_last_end
+                    .is_some_and(|end| now - end < STOP_TRIP_S)
+                {
+                    self.accel_strokes.pop();
+                }
+            }
         }
         self.accel_result = analyze_strokes(&self.accel_strokes);
     }
@@ -429,6 +519,8 @@ impl AccelPanel {
     fn clear_accel(&mut self) {
         self.accel_segmenter.reset();
         self.accel_strokes.clear();
+        self.accel_last_end = None;
+        self.accel_turned_back = 0;
         self.accel_result = None;
     }
 
@@ -441,6 +533,11 @@ impl AccelPanel {
         raw_events: &[RawInputEvent],
         has_bridge: bool,
     ) {
+        // Raw counts and OS-processed pointer movement cannot be mixed in one
+        // run: stop it, keeping the lines measured so far.
+        if self.angle_running && has_bridge != self.angle_raw {
+            self.stop_angle();
+        }
         ui.heading("Angle Snapping Detection");
         ui.add_space(5.0);
         ui.label(
@@ -463,7 +560,7 @@ impl AccelPanel {
                     self.stop_angle();
                 }
             } else if ui.button("Start Test").clicked() {
-                self.start_angle();
+                self.start_angle(has_bridge);
             }
             if ui.button("Clear Data").clicked() {
                 self.clear_angle();
@@ -608,8 +705,9 @@ impl AccelPanel {
         }
     }
 
-    fn start_angle(&mut self) {
+    fn start_angle(&mut self, has_bridge: bool) {
         self.angle_running = true;
+        self.angle_raw = has_bridge;
         self.pointer_remainder = (0.0, 0.0);
         self.angle_segmenter.reset();
         self.angle_shapes.clear();
@@ -638,17 +736,18 @@ impl AccelPanel {
 
     #[cfg(test)]
     pub(crate) fn start_accel_for_test(&mut self) {
-        self.start_accel();
+        self.start_accel(true);
     }
 
+    /// Stop as with Enter: the pass in progress counts.
     #[cfg(test)]
     pub(crate) fn stop_accel_for_test(&mut self) {
-        self.stop_accel();
+        self.stop_accel(self.secs(Instant::now()), StopBy::Key);
     }
 
     #[cfg(test)]
     pub(crate) fn start_angle_for_test(&mut self) {
-        self.start_angle();
+        self.start_angle(true);
     }
 
     #[cfg(test)]
@@ -660,6 +759,13 @@ impl AccelPanel {
 
     pub fn export_accel(&self) -> Option<AccelerationExport> {
         self.accel_result.as_ref().map(|result| AccelerationExport {
+            verdict: result.verdict.label().to_string(),
+            input: if self.accel_raw {
+                "raw sensor counts (sensor/firmware acceleration only)"
+            } else {
+                "on-screen pointer (includes OS pointer acceleration)"
+            }
+            .to_string(),
             has_acceleration: result.has_acceleration,
             conclusive: result.conclusive,
             accel_factor: result.factor,
@@ -686,6 +792,102 @@ impl AccelPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feed passes of `counts` along X at `per_ms` counts per millisecond,
+    /// alternating direction, with a 0.4 s pause after each; returns the time
+    /// after the last pause.
+    fn passes(p: &mut AccelPanel, mut t: f64, n: usize, counts: i32, per_ms: i32) -> f64 {
+        for i in 0..n {
+            let dir = if i % 2 == 0 { 1 } else { -1 };
+            let motion: Vec<(f64, i32, i32)> = (0..counts / per_ms)
+                .map(|k| (t + 0.001 * k as f64, dir * per_ms, 0))
+                .collect();
+            t += 0.001 * motion.len() as f64;
+            p.feed_accel(&motion, t);
+            t += 0.4;
+            p.feed_accel(&[], t);
+        }
+        t
+    }
+
+    #[test]
+    fn the_trip_to_the_stop_button_is_not_a_pass() {
+        // A linear mouse: 5 slow and 5 fast passes of 8000 counts, then the
+        // pointer moved a short way to Stop Test, slowly, and clicked.
+        for pause_before_click in [0.1, 0.4] {
+            let mut p = AccelPanel::new();
+            p.start_accel(true);
+            let t = passes(&mut p, 0.0, 5, 8000, 4);
+            let t = passes(&mut p, t, 5, 8000, 40);
+            let trip: Vec<(f64, i32, i32)> =
+                (0..300).map(|k| (t + 0.002 * k as f64, 2, 1)).collect();
+            let end = t + 0.6;
+            p.feed_accel(&trip, end);
+            p.feed_accel(&[], end + pause_before_click);
+            p.stop_accel(end + pause_before_click, StopBy::Button);
+            let r = p.accel_result.as_ref().unwrap();
+            assert_eq!(r.verdict, AccelVerdict::NoAcceleration, "{}", r.factor);
+            assert_eq!(p.accel_strokes.len(), 10);
+        }
+
+        // Stopped with Enter, the pass in progress is a pass
+        let mut p = AccelPanel::new();
+        p.start_accel(true);
+        let t = passes(&mut p, 0.0, 5, 8000, 4);
+        let t = passes(&mut p, t, 4, 8000, 40);
+        let last: Vec<(f64, i32, i32)> = (0..200).map(|k| (t + 0.001 * k as f64, 40, 0)).collect();
+        p.feed_accel(&last, t + 0.2);
+        p.stop_accel(t + 0.25, StopBy::Key);
+        assert_eq!(p.accel_strokes.len(), 10);
+    }
+
+    #[test]
+    fn passes_run_together_are_left_out() {
+        let mut p = AccelPanel::new();
+        p.start_accel(true);
+        let t = passes(&mut p, 0.0, 5, 8000, 4);
+        let t = passes(&mut p, t, 4, 8000, 40);
+        // Out and back without a pause: one stroke of 16000 counts
+        let mut motion: Vec<(f64, i32, i32)> =
+            (0..200).map(|k| (t + 0.001 * k as f64, 40, 0)).collect();
+        motion.extend((200..400).map(|k| (t + 0.001 * k as f64, -40, 0)));
+        p.feed_accel(&motion, t + 1.0);
+        p.stop_accel(t + 1.5, StopBy::Key);
+        assert_eq!(p.accel_turned_back, 1);
+        assert_eq!(p.accel_strokes.len(), 9);
+    }
+
+    #[test]
+    fn verdict_and_export_follow_the_input_the_run_used() {
+        let ctx = egui::Context::default();
+        // Fast passes lose a quarter of their counts on raw input
+        let mut p = AccelPanel::new();
+        p.start_accel(true);
+        let t = passes(&mut p, 0.0, 5, 8000, 4);
+        passes(&mut p, t, 5, 6000, 40);
+        p.stop_accel(100.0, StopBy::Key);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            // The mouse is released afterwards: the result stays a raw one
+            p.ui_accel(ui, &ctx, &[], false);
+        });
+        let e = p.export_accel().unwrap();
+        assert_eq!(e.verdict, "fast passes lose counts");
+        assert!(!e.has_acceleration);
+        assert!(e.input.starts_with("raw sensor counts"), "{}", e.input);
+
+        // A run that loses raw input part way is stopped, not mixed with
+        // OS-accelerated pointer movement
+        let mut p = AccelPanel::new();
+        p.start_accel(true);
+        passes(&mut p, 0.0, 3, 8000, 4);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            p.ui_accel(ui, &ctx, &[], false);
+        });
+        assert!(!p.is_running);
+        assert!(p.accel_raw);
+    }
 
     #[test]
     fn fallback_pointer_movement_is_not_lost_to_rounding() {

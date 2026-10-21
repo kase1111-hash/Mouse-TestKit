@@ -341,12 +341,13 @@ impl StutterPanel {
                     }
                     let (minor, moderate, severe) = self.detector.severity_counts();
                     ui.label(format!(
-                        "Stutter rate: {:.2}% | Worst gap: {:.1} ms | Minor (<4 ms late): {} | Moderate (4-8 ms): {} | Severe (8+ ms): {}",
+                        "Stutter rate: {:.2}% | Worst gap: {:.1} ms | Minor (<4 ms late): {} | Moderate (4-8 ms): {} | Severe (8+ ms): {} | Freezes (0.1-1 s): {}",
                         self.detector.stutter_rate_percent(),
                         self.detector.worst_gap_ms(),
                         minor,
                         moderate,
-                        severe
+                        severe,
+                        self.detector.freezes()
                     ));
                 });
         }
@@ -427,6 +428,8 @@ impl StutterPanel {
             return None;
         }
         Some(StutterExport {
+            rating: self.detector.rating().label().to_string(),
+            freezes: self.detector.freezes(),
             total_stutter_count: self.detector.stutter_count(),
             total_samples: judged,
             avg_delta_ms: self.detector.judged_mean_ms().unwrap_or(0.0),
@@ -499,6 +502,25 @@ mod tests {
             e.polling_rate_hz
         );
         assert_eq!(p.detector.rating(), StutterRating::Excellent);
+    }
+
+    #[test]
+    fn a_short_run_exports_as_inconclusive() {
+        // 1.5 s of fast movement with three late reports: on screen this is
+        // Inconclusive, and the export must say so next to the counts
+        let mut p = StutterPanel::new();
+        p.start();
+        let mut t = Instant::now();
+        let events: Vec<_> = (0..1500u32)
+            .map(|i| {
+                t += Duration::from_millis(if i % 500 == 499 { 8 } else { 1 });
+                mv(t, 3, 1)
+            })
+            .collect();
+        p.process_raw_events(&events);
+        let e = p.export().unwrap();
+        assert_eq!(e.total_stutter_count, 3);
+        assert_eq!(e.rating, "Inconclusive");
     }
 
     #[test]

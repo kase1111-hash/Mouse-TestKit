@@ -67,6 +67,11 @@ pub struct PollingRateExport {
 /// Stutter detection results with timing deltas and stutter events.
 #[derive(Serialize)]
 pub struct StutterExport {
+    /// The panel's rating, e.g. "Inconclusive" when too little fast
+    /// movement was judged for the counts below to mean anything.
+    pub rating: String,
+    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts).
+    pub freezes: usize,
     pub total_stutter_count: usize,
     pub total_samples: usize,
     pub avg_delta_ms: f64,
@@ -81,6 +86,10 @@ pub struct StutterExport {
 /// Click response test results for left and right buttons.
 #[derive(Serialize)]
 pub struct ClickResponseExport {
+    /// Where press and release times came from: "device" (raw input, each
+    /// report's own time) or "display frame" (about 16 ms steps; very short
+    /// presses read as 0 ms and min_hold_ms is not a measurement).
+    pub hold_timing: String,
     pub left: ClickButtonExport,
     pub right: ClickButtonExport,
 }
@@ -182,6 +191,9 @@ pub struct DoubleClickExport {
     pub total_clicks: usize,
     pub double_click_count: u32,
     pub accidental_double_clicks: u32,
+    /// False without raw input: frame-timed presses cannot show bounce, so
+    /// `accidental_double_clicks` was not counted.
+    pub bounce_measured: bool,
     pub avg_interval_ms: f64,
     pub min_interval_ms: f64,
     pub max_interval_ms: f64,
@@ -204,15 +216,27 @@ pub struct DpiSampleExport {
     pub target_dpi: u32,
     pub measured_dpi: f32,
     pub accuracy_percent: f32,
+    /// The panel's rating; "Check setup" means the sample is too far off to
+    /// be the sensor (another DPI stage, a wrong distance, a missed mark).
+    pub rating: String,
 }
 
-/// Acceleration detection results (pointer acceleration enabled).
+/// Acceleration detection results.
 #[derive(Serialize)]
 pub struct AccelerationExport {
+    /// The panel's verdict: "acceleration", "no acceleration", "fast passes
+    /// lose counts" (the sensor losing tracking, not acceleration) or
+    /// "inconclusive".
+    pub verdict: String,
+    /// What was measured: raw sensor counts, which cannot show OS pointer
+    /// acceleration, or the on-screen pointer, which includes it.
+    pub input: String,
+    /// True only when fast passes produced more counts (the verdict is
+    /// "acceleration").
     pub has_acceleration: bool,
     /// False when the slow and fast passes were too similar in speed to judge.
     pub conclusive: bool,
-    /// Mean counts of fast passes divided by mean counts of slow passes.
+    /// Median counts of fast passes divided by median counts of slow passes.
     pub accel_factor: f64,
     /// Median speed of fast passes divided by median speed of slow passes.
     pub speed_ratio: f64,
@@ -304,6 +328,8 @@ impl TestResultsExport {
 
         // Stutter
         if let Some(ref s) = self.stutter {
+            csv.push_str(&format!("Stutter,Rating,{}\n", csv_escape(&s.rating)));
+            csv.push_str(&format!("Stutter,Freezes (0.1-1 s),{}\n", s.freezes));
             csv.push_str(&format!(
                 "Stutter,Total Stutters,{}\n",
                 s.total_stutter_count
@@ -324,6 +350,7 @@ impl TestResultsExport {
 
         // Click Response
         if let Some(ref c) = self.click_response {
+            csv.push_str(&format!("Click Response,Hold Timing,{}\n", c.hold_timing));
             csv.push_str(&format!(
                 "Click Response (Left),Click Count,{}\n",
                 c.left.click_count
@@ -411,10 +438,14 @@ impl TestResultsExport {
                 "Double-Click,Double-Clicks,{}\n",
                 d.double_click_count
             ));
-            csv.push_str(&format!(
-                "Double-Click,Accidental,{}\n",
-                d.accidental_double_clicks
-            ));
+            if d.bounce_measured {
+                csv.push_str(&format!(
+                    "Double-Click,Accidental,{}\n",
+                    d.accidental_double_clicks
+                ));
+            } else {
+                csv.push_str("Double-Click,Accidental,not measured (no raw input)\n");
+            }
             csv.push_str(&format!(
                 "Double-Click,Avg Interval (ms),{:.1}\n",
                 d.avg_interval_ms
@@ -443,11 +474,18 @@ impl TestResultsExport {
                     i + 1,
                     sample.accuracy_percent
                 ));
+                csv.push_str(&format!(
+                    "DPI,Sample {} Rating,{}\n",
+                    i + 1,
+                    csv_escape(&sample.rating)
+                ));
             }
         }
 
         // Acceleration
         if let Some(ref a) = self.acceleration {
+            csv.push_str(&format!("Acceleration,Verdict,{}\n", a.verdict));
+            csv.push_str(&format!("Acceleration,Input,{}\n", a.input));
             csv.push_str(&format!("Acceleration,Detected,{}\n", a.has_acceleration));
             csv.push_str(&format!("Acceleration,Conclusive,{}\n", a.conclusive));
             csv.push_str(&format!("Acceleration,Factor,{:.2}\n", a.accel_factor));
@@ -504,25 +542,29 @@ impl TestResultsExport {
             if let Some(hz) = r.metrics.polling_hz {
                 csv.push_str(&format!("Auto Diagnostics,Polling Rate (Hz),{}\n", hz));
             }
+            // A check that was not run or had too little data says so: a 0
+            // would read as a measured pass.
+            let or_not_tested = |v: Option<String>| v.unwrap_or_else(|| "not tested".to_string());
             csv.push_str(&format!(
-                "Auto Diagnostics,Stutter Rate (%),{:.2}\n",
-                r.metrics.stutter_rate_percent
+                "Auto Diagnostics,Stutter Rate (%),{}\n",
+                or_not_tested(r.stutter_rate_percent().map(|v| format!("{:.2}", v)))
             ));
             csv.push_str(&format!(
-                "Auto Diagnostics,Rest Movement (counts),{:.1}\n",
+                "Auto Diagnostics,Rest Movement ({}),{:.1}\n",
+                r.rest_unit(),
                 r.metrics.rest_distance_counts
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Switch Bounces,{}\n",
-                r.metrics.bounce_events
+                or_not_tested(r.bounce_events().map(|v| v.to_string()))
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Scroll Reversals,{}\n",
-                r.metrics.scroll_reversals
+                or_not_tested(r.scroll_reversals().map(|v| v.to_string()))
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Lift Jumps,{}\n",
-                r.metrics.lift_jumps
+                or_not_tested(r.lift_jumps().map(|v| v.to_string()))
             ));
             for f in &r.findings {
                 csv.push_str(&format!(
@@ -607,6 +649,7 @@ mod tests {
                 }],
                 metrics: Metrics::default(),
                 phases_completed: vec![Phase::Rest],
+                untested: vec![],
                 aborted: false,
                 timing_reliable: true,
                 duration_secs: 42.0,
@@ -614,6 +657,11 @@ mod tests {
         };
         let csv = export.to_csv();
         assert!(csv.contains("Auto Diagnostics,Verdict,Needs attention\n"));
+        // Only the rest step ran: the other checks are not reported as 0
+        assert!(csv.contains("Auto Diagnostics,Stutter Rate (%),not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Switch Bounces,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Lift Jumps,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Rest Movement (counts),0.0\n"));
         assert!(csv.contains(
             "Auto Diagnostics,WARNING: Possible switch bounce,\"1 press came within 25 ms, re-run\"\n"
         ));
@@ -640,6 +688,37 @@ mod tests {
             scroll: None,
             auto_diagnostics: None,
         }
+    }
+
+    #[test]
+    fn test_csv_keeps_dpi_and_stutter_qualifiers() {
+        let mut export = empty_export();
+        export.dpi = Some(DpiExport {
+            target_dpi: 800,
+            samples: vec![DpiSampleExport {
+                target_dpi: 800,
+                measured_dpi: 1600.0,
+                accuracy_percent: 0.0,
+                rating: "Check setup".to_string(),
+            }],
+            avg_accuracy_percent: 0.0,
+        });
+        export.stutter = Some(StutterExport {
+            rating: "Inconclusive".to_string(),
+            freezes: 0,
+            total_stutter_count: 3,
+            total_samples: 1500,
+            avg_delta_ms: 1.0,
+            min_delta_ms: 1.0,
+            max_delta_ms: 8.0,
+            polling_rate_hz: 1000.0,
+            threshold_multiplier: 2.0,
+            stutter_rate_percent: 0.2,
+            deltas: Vec::new(),
+        });
+        let csv = export.to_csv();
+        assert!(csv.contains("DPI,Sample 1 Rating,Check setup\n"), "{}", csv);
+        assert!(csv.contains("Stutter,Rating,Inconclusive\n"), "{}", csv);
     }
 
     fn jitter(unit: &str) -> JitterExport {

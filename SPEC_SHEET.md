@@ -14,7 +14,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Guided one-minute check-up that looks for faults automatically |
 | Steps | Rest (2 s settle + 5 s), Movement (up to 12 s), Clicks (up to 20 s), Scroll (up to 12 s), Lift (10 s); each ends on its own once enough data is collected or its time is up |
-| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable polling, a polling rate under 60 Hz (60-110 Hz is only noted: normal for Bluetooth, low for USB), dropouts, timed only between reports with 2+ counts on an axis (fast enough to report every poll); switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1 = warning, 2+ = fault), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms (1-2 = warning, 3+ = fault); lift-off jumps as in test 6 (1 = info, 2+ = warning; with the DPI unknown, 2+ = inconclusive) |
+| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable polling, a polling rate under 60 Hz (60-110 Hz is only noted: normal for Bluetooth, low for USB), freezes (0.1-1 s gaps while the mouse kept moving the same way, after which the held-back counts arrive in one report; 1 = info, 2+ = warning), timed only between same-direction reports with 2+ counts on an axis (fast enough to report every poll) that are not the small reports of a hand slowing to a stop, as in test 1; switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1-2 = warning, 3+ = fault, as in test 10), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms, not counting the notch that carries on the original way (1-2 = warning, 3+ = fault, as in the Scroll Wheel test); lift-off jumps as in test 6 (1 = info, 2+ = warning; with the DPI unknown, 2+ = inconclusive) |
 | Output | Verdict (Healthy / Needs attention / Fault detected / Inconclusive), findings with severity and explanation, raw measurements; included in JSON/CSV export. A button or scroll direction that registered nothing, too little fast movement, or an aborted run gives Inconclusive, never Healthy |
 | Availability | GUI panel and CLI menu option 13 (device timestamps per report). Without raw input (macOS) the Movement and Lift steps are left out and bounce, short-press and scroll-skip checks are not judged |
 
@@ -23,7 +23,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Detects mouse movement stutter and irregularities |
-| Method | Judges report intervals only during fast, steady movement (slow movement, reversals and pauses legitimately skip polls); stutter = more than the chosen multiple of the median interval and at least 2.5 ms |
+| Method | Judges report intervals only during fast, steady movement (slow movement, reversals and pauses legitimately skip polls; the small reports of a hand slowing to a brief stop are left out); stutter = more than the chosen multiple of the median interval and at least 2.5 ms; a freeze = a stutter of 0.1-1 s between full-size reports after which the held-back counts (3+ median reports' worth) arrive in one report, 2+ rate the session at least Fair |
 | Output | Visual graph representation of stutter events |
 | Use Case | Identifying inconsistent tracking or frame drops |
 
@@ -32,8 +32,8 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Displays real-time mouse polling rate |
-| Measurement | Hz (polls per second) |
-| Common Values | 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz |
+| Measurement | Hz (polls per second), from the median interval of fast movement only (slow movement and reversals skip polls); GUI and CLI |
+| Common Values | 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz; under 110 Hz no USB rate is named (normal for Bluetooth) |
 | Use Case | Verifying advertised polling rates and consistency |
 
 ### 3. USB Conflict Detection
@@ -66,7 +66,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Tests for cursor jump during mouse lift |
 | Detection | Motion that starts after the mouse has been still for 100 ms is summed over its first 100 ms; carrying the cursor more than 2 mm is a jump. Counts are converted with the mouse's DPI (800 assumed, and reported as assumed, when not given). Movement that continues more than 2 mm after that window is sliding and is not judged |
-| Verdict | 2+ jumps = problem, 1 = possible problem (repeat); "no jumps" needs 5 lifts reported with SPACE, otherwise inconclusive. The Auto Diagnostics lift step uses the same rules |
+| Verdict | 2+ jumps = problem, 1 = possible problem (repeat); with the DPI assumed, 2+ jumps = inconclusive (they may be ordinary set-down shifts at a higher DPI); "no jumps" needs 5 lifts reported with SPACE, otherwise inconclusive. The Auto Diagnostics lift step uses the same jump rules, but cannot count lifts: one movement after a pause is enough for its "no jumps" note, which says when no lift or set-down motion was seen at all |
 | Availability | CLI menu option 6 and GUI panel; needs raw input |
 | Use Case | Evaluating sensor lift-off behavior and calibration |
 
@@ -93,8 +93,8 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Tests for unwanted acceleration curves in the mouse's sensor/firmware |
-| Method | Compares movement distance at different speeds |
-| Output | Acceleration coefficient and consistency |
+| Method | Compares the median counts of slow and fast passes over the same distance; strokes that turn back on themselves are left out |
+| Output | Fast/slow count factor and verdict (acceleration above 1.15x, lost counts below 0.85x), with the input measured |
 | Scope | Raw counts are read before OS pointer acceleration, which is not covered |
 | Use Case | Ensuring the mouse itself reports 1:1 for precision tasks |
 
@@ -141,7 +141,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Component | Requirement |
 |-----------|-------------|
 | Platform | Linux x64, Windows x64, macOS ARM64/x64 |
-| Rust | 1.70 or later |
+| Rust | 1.92 or later |
 | USB | USB 2.0 or higher |
 | Input | HID-compliant mouse device |
 

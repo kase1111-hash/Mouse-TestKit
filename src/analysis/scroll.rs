@@ -7,8 +7,8 @@
 //!   opposite direction while the wheel is turned one way, so the page jumps
 //!   back. A finger cannot stop a wheel and turn it back within
 //!   [`Config::scroll_reversal_ms`] (60 ms) of the previous notch, so a
-//!   reversal that fast is counted as a skip. Auto Diagnostics uses the same
-//!   window.
+//!   reversal that fast is counted as a skip. Auto Diagnostics counts skips
+//!   with the same [`WheelCheck`].
 //! - **Dead direction**: plenty of notches one way and none the other.
 //!
 //! Scrolling speed and rhythm are not judged: they describe the hand, not
@@ -19,7 +19,7 @@ use super::diagnostics::Config;
 
 /// Repeated skips at or above this count mean the encoder is failing. One or
 /// two can be a hand flicking the wheel back, so they only ask for a re-test.
-/// Auto Diagnostics also needs 3 reversals before it reports skipping.
+/// Auto Diagnostics also needs this many before it reports skipping.
 pub const SKIP_FAULT_COUNT: usize = 3;
 
 /// What the notches seen so far say about the wheel.

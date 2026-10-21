@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::config::DOUBLE_CLICK_THRESHOLD_RANGE;
 use crate::export::DoubleClickExport;
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
-use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
+use mouse_testkit::analysis::diagnostics::{bounce_verdict, BounceVerdict, Config as DiagConfig};
 
 /// A press this soon after the previous release of the button is switch
 /// bounce (the contact re-closing as it opens), whatever the press-to-press
@@ -27,10 +27,16 @@ fn release_bounce_gap_ms() -> f64 {
 ///
 /// With raw input available every hardware press is seen with its own
 /// timestamp, so two presses a few milliseconds apart are both counted.
-/// Without it, the panel reads egui's pointer events; several presses that
-/// land in one frame are still counted individually (with a zero interval).
+/// Without it, the panel reads egui's pointer events, which only carry the
+/// display frame's time (about 16 ms steps): clicks and their intervals are
+/// shown, but switch bounce, a matter of 25-50 ms, is not judged.
 pub struct DoubleClickPanel {
     is_running: bool,
+    /// Whether the current or last run read raw input; without it bounce
+    /// is not judged.
+    run_raw: bool,
+    /// Where the click target was last drawn.
+    target_rect: egui::Rect,
     clicks: Vec<Instant>,
     /// Time of the most recent button release, for release-edge bounce.
     last_release: Option<Instant>,
@@ -48,6 +54,8 @@ impl DoubleClickPanel {
     pub fn new() -> Self {
         Self {
             is_running: false,
+            run_raw: true,
+            target_rect: egui::Rect::NOTHING,
             clicks: Vec::new(),
             last_release: None,
             intervals: Vec::new(),
@@ -114,6 +122,7 @@ impl DoubleClickPanel {
             } else if ui.button("Start").clicked() {
                 self.clear();
                 self.is_running = true;
+                self.run_raw = has_bridge;
             }
             if ui.button("Clear Results").clicked() {
                 self.clear();
@@ -144,6 +153,7 @@ impl DoubleClickPanel {
         ui.vertical_centered(|ui| {
             let (rect, _) = ui.allocate_exact_size(target_size, egui::Sense::hover());
             target_rect = rect;
+            self.target_rect = rect;
             let fill = if self.is_running {
                 egui::Color32::from_rgb(60, 100, 180)
             } else {
@@ -194,7 +204,11 @@ impl DoubleClickPanel {
                     self.stat_box(
                         ui,
                         "Accidental",
-                        &format!("{}", self.accidental_double_clicks),
+                        &if self.run_raw {
+                            format!("{}", self.accidental_double_clicks)
+                        } else {
+                            "n/a".to_string()
+                        },
                         if self.accidental_double_clicks > 0 {
                             egui::Color32::RED
                         } else {
@@ -276,7 +290,14 @@ impl DoubleClickPanel {
             let consistency = self.calculate_consistency();
             // Primary concern is detecting switch issues (accidental double-clicks)
             // Consistency is secondary - humans naturally vary in click timing
-            let (rating, color, message) = if self.accidental_double_clicks > 2 {
+            let bounces = bounce_verdict(self.accidental_double_clicks as usize);
+            let (rating, color, message) = if !self.run_raw {
+                (
+                    "Switch not judged",
+                    egui::Color32::GRAY,
+                    "Without raw input presses are only known to the display frame (about 16 ms), too coarse for the 25-50 ms bounce check, so accidental double-clicks are not counted. Clicks and intervals are shown.".to_string(),
+                )
+            } else if bounces == BounceVerdict::Failing {
                 (
                     "Switch Issue",
                     egui::Color32::RED,
@@ -285,12 +306,12 @@ impl DoubleClickPanel {
                         self.accidental_double_clicks
                     ),
                 )
-            } else if self.accidental_double_clicks > 0 {
+            } else if bounces == BounceVerdict::Possible {
                 (
-                    "Minor Issue",
+                    "Possible Issue",
                     egui::Color32::YELLOW,
                     format!(
-                        "{} accidental double-click(s) detected. Monitor for worsening.",
+                        "{} accidental double-click(s) detected. Run the test again; if it happens again the switch is starting to fail.",
                         self.accidental_double_clicks
                     ),
                 )
@@ -329,12 +350,21 @@ impl DoubleClickPanel {
                 });
         }
 
-        // Capture presses
+        // Capture presses. Raw input and frame-timed pointer events cannot be
+        // judged together, so a change of input source ends the run.
+        if self.is_running && has_bridge != self.run_raw {
+            self.is_running = false;
+        }
         if self.is_running {
             if has_bridge {
+                // Raw input sees every click, also on Stop or the sidebar:
+                // only presses on the target count.
+                let on_target = ctx
+                    .input(|i| i.pointer.hover_pos())
+                    .is_some_and(|pos| target_rect.contains(pos));
                 for event in raw_events {
                     match event.kind {
-                        RawInputKind::ButtonPress(RawButton::Left) => {
+                        RawInputKind::ButtonPress(RawButton::Left) if on_target => {
                             self.register_click_at(event.timestamp)
                         }
                         RawInputKind::ButtonRelease(RawButton::Left) => {
@@ -398,8 +428,10 @@ impl DoubleClickPanel {
             let release_gap_ms = self
                 .last_release
                 .map(|r| now.duration_since(r).as_secs_f64() * 1000.0);
-            let accidental = interval < self.threshold_ms
-                || release_gap_ms.is_some_and(|g| g < release_bounce_gap_ms());
+            // Frame-timed input cannot resolve these gaps (see `run_raw`)
+            let accidental = self.run_raw
+                && (interval < self.threshold_ms
+                    || release_gap_ms.is_some_and(|g| g < release_bounce_gap_ms()));
 
             if accidental {
                 self.accidental_double_clicks += 1;
@@ -412,9 +444,15 @@ impl DoubleClickPanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn target_center_for_test(&self) -> egui::Pos2 {
+        self.target_rect.center()
+    }
+
+    #[cfg(test)]
     pub(crate) fn start_for_test(&mut self) {
         self.clear();
         self.is_running = true;
+        self.run_raw = true;
     }
 
     fn calculate_consistency(&self) -> f64 {
@@ -455,6 +493,7 @@ impl DoubleClickPanel {
             total_clicks: self.clicks.len(),
             double_click_count: self.double_click_count,
             accidental_double_clicks: self.accidental_double_clicks,
+            bounce_measured: self.run_raw,
             avg_interval_ms: self.avg_interval,
             min_interval_ms: if self.min_interval == f64::MAX {
                 0.0
@@ -589,6 +628,44 @@ mod tests {
     }
 
     // ── settings_changed tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_frame_timed_presses_are_not_judged_as_bounce() {
+        // Without raw input two presses in one frame (a frame hitch) or a
+        // release and press in adjacent frames are timing artefacts
+        let mut panel = DoubleClickPanel::new();
+        panel.run_raw = false;
+        let t = Instant::now();
+        panel.register_click_at(t);
+        panel.last_release = Some(t + std::time::Duration::from_millis(17));
+        panel.register_click_at(t + std::time::Duration::from_millis(33));
+        panel.register_click_at(t + std::time::Duration::from_millis(33));
+        assert_eq!(panel.accidental_double_clicks, 0);
+        assert_eq!(panel.clicks.len(), 3);
+        assert!(!panel.export().unwrap().bounce_measured);
+    }
+
+    #[test]
+    fn test_raw_presses_off_the_target_are_not_clicks() {
+        // A left press on Stop or the sidebar while the run is on
+        let ctx = egui::Context::default();
+        let mut panel = DoubleClickPanel::new();
+        panel.start_for_test();
+        let t = Instant::now();
+        let press = vec![RawInputEvent {
+            kind: RawInputKind::ButtonPress(RawButton::Left),
+            timestamp: t,
+        }];
+        let input = egui::RawInput {
+            events: vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let c = ui.ctx().clone();
+            panel.ui(ui, &c, &press, true);
+        });
+        assert!(panel.clicks.is_empty());
+    }
 
     #[test]
     fn test_settings_changed_detection() {

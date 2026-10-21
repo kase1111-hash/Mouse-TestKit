@@ -10,6 +10,7 @@
 use super::standard::TestOutcome;
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use mouse_testkit::analysis::dpi::SETUP_ERROR_FRACTION;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -38,16 +39,20 @@ pub fn run() -> TestOutcome {
     println!("\n=== DPI Accuracy Test ===");
     println!("This test measures your mouse's actual DPI against a ruler.");
 
-    // Get expected DPI from user
-    print!("\nEnter your mouse's configured DPI (e.g., 800, 1600): ");
-    io::stdout().flush().ok();
-    let mut dpi_input = String::new();
-    io::stdin().read_line(&mut dpi_input).ok();
-    let expected_dpi = match parse_dpi(&dpi_input) {
-        Some(d) => d,
-        None => {
-            println!("Invalid DPI value. Using 800 as default.");
-            800.0
+    // Get expected DPI from user. Without one the DPI is only measured: a
+    // guessed value would turn every mouse set differently into a fault.
+    let expected_dpi = loop {
+        print!("\nEnter your mouse's configured DPI (e.g., 800, 1600) [Enter = just measure it]: ");
+        io::stdout().flush().ok();
+        let mut dpi_input = String::new();
+        let read = io::stdin().read_line(&mut dpi_input).unwrap_or(0);
+        if read == 0 || dpi_input.trim().is_empty() {
+            println!("No DPI entered: the DPI will be measured, not judged.");
+            break None;
+        }
+        match parse_dpi(&dpi_input) {
+            Some(d) => break Some(d),
+            None => println!("Could not read that DPI - type a number such as 1600."),
         }
     };
 
@@ -75,7 +80,9 @@ pub fn run() -> TestOutcome {
     };
     let distance_label = format_distance(distance_mm);
 
-    println!("\nExpected DPI: {}", expected_dpi);
+    if let Some(dpi) = expected_dpi {
+        println!("\nExpected DPI: {}", dpi);
+    }
     println!("Distance: {}", distance_label);
     println!(
         "A 1 mm placement error changes the result by {:.1}%.",
@@ -151,14 +158,14 @@ pub fn run() -> TestOutcome {
                     match DpiSample::new(total_x, total_y, distance_mm, expected_dpi) {
                         Some(sample) => {
                             say(&format!(
-                                "Sample {}: {:.0} counts (X {:+}, Y {:+}) over {} = {:.0} DPI ({:.1}% of expected)",
+                                "Sample {}: {:.0} counts (X {:+}, Y {:+}) over {} = {:.0} DPI{}",
                                 samples.len() + 1,
                                 sample.counts,
                                 total_x,
                                 total_y,
                                 distance_label,
                                 sample.measured_dpi,
-                                sample.accuracy
+                                sample.of_expected()
                             ));
                             samples.push(sample);
                         }
@@ -199,13 +206,14 @@ pub fn run() -> TestOutcome {
     let outcome = if !samples.is_empty() {
         let avg_dpi: f64 =
             samples.iter().map(|s| s.measured_dpi).sum::<f64>() / samples.len() as f64;
-        let avg_accuracy: f64 =
-            samples.iter().map(|s| s.accuracy).sum::<f64>() / samples.len() as f64;
 
         let mut dpis: Vec<f64> = samples.iter().map(|s| s.measured_dpi).collect();
         dpis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        println!("Expected DPI: {:.0}", expected_dpi);
+        match expected_dpi {
+            Some(dpi) => println!("Expected DPI: {:.0}", dpi),
+            None => println!("Expected DPI: not entered (measured only)"),
+        }
         println!("Distance used: {}", distance_label);
         println!("Samples taken: {}\n", samples.len());
 
@@ -223,20 +231,27 @@ pub fn run() -> TestOutcome {
             dpis.first().copied().unwrap_or(0.0),
             dpis.last().copied().unwrap_or(0.0)
         );
-        println!("  Average accuracy: {:.1}%", avg_accuracy);
-
-        let deviation = ((typical_dpi - expected_dpi) / expected_dpi * 100.0).abs();
-        println!("  Deviation of the median from expected: {:.1}%", deviation);
+        let deviation = expected_dpi.map(|expected| {
+            let avg_accuracy: f64 = samples
+                .iter()
+                .map(|s| s.measured_dpi / expected * 100.0)
+                .sum::<f64>()
+                / samples.len() as f64;
+            println!("  Average accuracy: {:.1}%", avg_accuracy);
+            let deviation = ((typical_dpi - expected) / expected * 100.0).abs();
+            println!("  Deviation of the median from expected: {:.1}%", deviation);
+            deviation
+        });
 
         println!("\nSamples:");
         for (i, sample) in samples.iter().enumerate() {
             println!(
-                "  #{}: {:.0} counts over {} = {:.0} DPI ({:.1}%)",
+                "  #{}: {:.0} counts over {} = {:.0} DPI{}",
                 i + 1,
                 sample.counts,
                 distance_label,
                 sample.measured_dpi,
-                sample.accuracy
+                sample.of_expected()
             );
         }
 
@@ -248,8 +263,16 @@ pub fn run() -> TestOutcome {
                     spread
                 ),
             )
-        } else {
+        } else if let Some(deviation) = deviation {
             verdict(deviation, distance_mm)
+        } else {
+            (
+                TestOutcome::Measured,
+                format!(
+                    "Measured DPI: {:.0}. No DPI was entered, so this is not judged: compare it with\n  the DPI set in the mouse's software or on its DPI button.",
+                    typical_dpi
+                ),
+            )
         };
         println!("\n{}", message);
         if disagree && samples.len() >= 3 {
@@ -304,15 +327,37 @@ fn moves(events: Vec<input::TimedEvent>) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Parse a DPI value typed by the user, e.g. "1600" or "1600 DPI" (CPI is
-/// accepted too). Accepts 50 to 100000.
+/// Parse a DPI value typed by the user, e.g. "1600", "1,600", "1.6k",
+/// "1,6k" or "1600 DPI" (CPI is accepted too). Accepts 50 to 100000.
 pub fn parse_dpi(input: &str) -> Option<f64> {
-    let s = input.trim().to_ascii_lowercase();
+    let chars: Vec<char> = input.trim().to_ascii_lowercase().chars().collect();
+    // A comma before a group of three digits separates thousands ("1,600");
+    // any other comma is a decimal comma ("1,6k" is 1600, not 16000)
+    let s: String = chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| match c {
+            '_' => None,
+            ',' => {
+                let digits = chars[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                (digits != 3).then_some('.')
+            }
+            c => Some(c),
+        })
+        .collect();
     let number = s
         .strip_suffix("dpi")
         .or_else(|| s.strip_suffix("cpi"))
-        .unwrap_or(&s);
-    let dpi: f64 = number.trim().parse().ok()?;
+        .unwrap_or(&s)
+        .trim();
+    let (number, scale) = match number.strip_suffix('k') {
+        Some(n) => (n.trim(), 1000.0),
+        None => (number, 1.0),
+    };
+    let dpi = number.parse::<f64>().ok()? * scale;
     (50.0..=100_000.0).contains(&dpi).then_some(dpi)
 }
 
@@ -386,7 +431,16 @@ fn spread_limit_pct(distance_mm: f64) -> f64 {
 /// Verdict for a deviation (percent) of the median measured over `distance_mm`.
 pub fn verdict(deviation_pct: f64, distance_mm: f64) -> (TestOutcome, String) {
     let placement_pct = PLACEMENT_ERROR_MM / distance_mm * 100.0;
-    if deviation_pct < ACCURATE_PCT {
+    if deviation_pct > SETUP_ERROR_FRACTION * 100.0 {
+        // As in the GUI: that far off is the setup, not the sensor.
+        (
+            TestOutcome::Inconclusive,
+            format!(
+                "? Off by {:.0}%: far more than a sensor deviates (a few %). This is almost always\n  the setup: the mouse on a different DPI stage than entered, a wrong distance,\n  or a missed mark. Check them and repeat.",
+                deviation_pct
+            ),
+        )
+    } else if deviation_pct < ACCURATE_PCT {
         (
             TestOutcome::NoIssues,
             format!("✓ DPI is accurate (within {:.0}% tolerance)", ACCURATE_PCT),
@@ -418,11 +472,12 @@ pub fn verdict(deviation_pct: f64, distance_mm: f64) -> (TestOutcome, String) {
 struct DpiSample {
     counts: f64,
     measured_dpi: f64,
-    accuracy: f64,
+    /// Percent of the DPI entered, when one was.
+    accuracy: Option<f64>,
 }
 
 impl DpiSample {
-    fn new(dx: i64, dy: i64, distance_mm: f64, expected_dpi: f64) -> Option<Self> {
+    fn new(dx: i64, dy: i64, distance_mm: f64, expected_dpi: Option<f64>) -> Option<Self> {
         let counts = net_counts(dx, dy);
         if counts < MIN_SAMPLE_COUNTS {
             return None;
@@ -431,8 +486,15 @@ impl DpiSample {
         Some(Self {
             counts,
             measured_dpi,
-            accuracy: measured_dpi / expected_dpi * 100.0,
+            accuracy: expected_dpi.map(|e| measured_dpi / e * 100.0),
         })
+    }
+
+    /// " (99.6% of expected)", or nothing when no DPI was entered.
+    fn of_expected(&self) -> String {
+        self.accuracy
+            .map(|a| format!(" ({:.1}% of expected)", a))
+            .unwrap_or_default()
     }
 }
 
@@ -476,8 +538,16 @@ mod tests {
     #[test]
     fn test_parse_dpi() {
         assert_eq!(parse_dpi("1600\n"), Some(1600.0));
-        // Typing the unit is natural and must not fall back to 800.
+        // Typing the unit, a thousands separator or "k" is natural.
         assert_eq!(parse_dpi("1600 DPI\n"), Some(1600.0));
+        assert_eq!(parse_dpi("1,600"), Some(1600.0));
+        assert_eq!(parse_dpi("1.6k"), Some(1600.0));
+        assert_eq!(parse_dpi("26K DPI"), Some(26000.0));
+        // A decimal comma, as typed in much of Europe
+        assert_eq!(parse_dpi("3,2k"), Some(3200.0));
+        assert_eq!(parse_dpi("12,000"), Some(12000.0));
+        assert_eq!(parse_dpi("1,60"), None);
+        assert_eq!(parse_dpi(""), None);
         assert_eq!(parse_dpi("3200dpi"), Some(3200.0));
         assert_eq!(parse_dpi("400 cpi"), Some(400.0));
         assert_eq!(parse_dpi("dpi"), None);
@@ -529,6 +599,16 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_mistakes_are_not_reported_as_a_fault() {
+        // A 1600 DPI mouse measured against 800 (another DPI stage, or the
+        // DPI typed differently): 100% off is the setup, not the sensor
+        let (outcome, message) = verdict(100.0, 100.0);
+        assert_eq!(outcome, TestOutcome::Inconclusive);
+        assert!(message.contains("DPI stage"), "{}", message);
+        assert_eq!(verdict(50.0, 100.0).0, TestOutcome::Inconclusive);
+    }
+
+    #[test]
     fn test_one_lifted_sample_does_not_fail_an_accurate_mouse() {
         // 800 DPI, 10 cm: two good samples and one where the mouse was
         // lifted near the end. The average (742) reads 7% low - "minor
@@ -561,9 +641,10 @@ mod tests {
 
     #[test]
     fn test_sample_needs_movement() {
-        assert!(DpiSample::new(3, 2, 100.0, 800.0).is_none());
-        let s = DpiSample::new(3150, 0, 100.0, 800.0).unwrap();
+        assert!(DpiSample::new(3, 2, 100.0, Some(800.0)).is_none());
+        let s = DpiSample::new(3150, 0, 100.0, Some(800.0)).unwrap();
         assert!((s.measured_dpi - 800.1).abs() < 0.1);
-        assert!((s.accuracy - 100.0).abs() < 0.1);
+        assert!((s.accuracy.unwrap() - 100.0).abs() < 0.1);
+        assert_eq!(DpiSample::new(3150, 0, 100.0, None).unwrap().accuracy, None);
     }
 }

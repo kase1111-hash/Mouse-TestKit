@@ -21,7 +21,9 @@ use crate::input_windows::{self as input, MouseEvent};
 /// Judged intervals kept for the live graph.
 const GRAPH_SAMPLES: usize = 60;
 
-pub fn run() {
+/// Returns false when no mouse was selected, so the test suite does not
+/// count the test as run.
+pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
     println!("Move your mouse quickly and continuously in circles.");
     println!("Only fast, steady movement is judged; slow movement, direction");
@@ -34,7 +36,7 @@ pub fn run() {
         None => {
             println!("\nNo mouse selected. Returning to menu...");
             terminal::wait_for_enter();
-            return;
+            return false;
         }
     };
 
@@ -74,10 +76,12 @@ pub fn run() {
         }
 
         if last_print.elapsed() >= Duration::from_millis(200) {
-            print!("\x1B[2J\x1B[1;1H");
-            println!("=== Stutter Detection ===\n");
-            print_live(&detector, &recent);
-            println!("\nPress 'q' to quit");
+            // Raw mode: every line must end in "\r\n" (see raw_lines)
+            let frame = format!(
+                "=== Stutter Detection ===\n\n{}\nPress 'q' to quit\n",
+                live_text(&detector, &recent)
+            );
+            print!("\x1B[2J\x1B[1;1H{}", terminal::raw_lines(&frame));
 
             use std::io::Write;
             std::io::stdout().flush().ok();
@@ -91,35 +95,31 @@ pub fn run() {
     print_summary(&detector);
 
     terminal::wait_for_enter();
+    true
 }
 
-fn print_live(detector: &StutterDetector, recent: &VecDeque<f64>) {
+/// The live screen below the title.
+fn live_text(detector: &StutterDetector, recent: &VecDeque<f64>) -> String {
     match (detector.median_interval_ms(), detector.threshold_ms()) {
         (Some(median), Some(threshold)) => {
-            println!(
-                "Median interval: {:.3} ms (~{:.0} Hz) | Stutter threshold: {:.2} ms",
+            let samples: Vec<f64> = recent.iter().copied().collect();
+            format!(
+                "Median interval: {:.3} ms (~{:.0} Hz) | Stutter threshold: {:.2} ms\nFast movement judged: {:.1} s ({} intervals) | Stutters: {} | Worst: {:.1} ms\n\n{}\n",
                 median,
                 1000.0 / median,
-                threshold
-            );
-            println!(
-                "Fast movement judged: {:.1} s ({} intervals) | Stutters: {} | Worst: {:.1} ms\n",
+                threshold,
                 detector.judged_secs(),
                 detector.judged(),
                 detector.stutter_count(),
-                detector.worst_gap_ms()
-            );
-            let samples: Vec<f64> = recent.iter().copied().collect();
-            println!("{}", render_stutter_graph(&samples, median, threshold));
+                detector.worst_gap_ms(),
+                render_stutter_graph(&samples, median, threshold)
+            )
         }
-        _ => {
-            println!(
-                "Waiting for fast movement... ({} reports seen, {} fast intervals collected)",
-                detector.reports(),
-                detector.pending()
-            );
-            println!("Move the mouse quickly in circles.");
-        }
+        _ => format!(
+            "Waiting for fast movement... ({} reports seen, {} fast intervals collected)\nMove the mouse quickly in circles.\n",
+            detector.reports(),
+            detector.pending()
+        ),
     }
 }
 
@@ -141,6 +141,12 @@ fn print_summary(detector: &StutterDetector) {
         println!("  Moderate (4-8 ms):    {}", moderate);
         println!("  Minor (under 4 ms):   {}", minor);
         println!("  Worst gap: {:.1} ms", detector.worst_gap_ms());
+        if detector.freezes() > 0 {
+            println!(
+                "  Freezes (0.1-1 s while moving the same way): {}",
+                detector.freezes()
+            );
+        }
     }
 
     println!("\nRating: {} - {}", rating.label(), rating.message());
@@ -152,7 +158,7 @@ fn print_summary(detector: &StutterDetector) {
         );
     }
     println!(
-        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms.)",
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s after which the held-back movement arrives at once; two or more rate the session at least Fair.)",
         DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
     );
 }
@@ -214,6 +220,18 @@ fn render_stutter_graph(deltas: &[f64], median: f64, threshold: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_screen_has_no_bare_line_feeds() {
+        let mut d = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+        for i in 0..200 {
+            d.feed(i as f64 / 1000.0, 3, 1);
+        }
+        let recent: VecDeque<f64> = std::iter::repeat_n(1.0, 30).collect();
+        let screen = terminal::raw_lines(&live_text(&d, &recent));
+        assert!(screen.contains("Median interval"), "{}", screen);
+        assert!(!screen.replace("\r\n", "").contains('\n'), "{}", screen);
+    }
 
     #[test]
     fn graph_marks_only_intervals_over_the_threshold() {

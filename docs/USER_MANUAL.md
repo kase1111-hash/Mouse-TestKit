@@ -18,12 +18,12 @@ A one-minute guided check-up that looks for faults by itself. Available from the
 
 1. Click **Start Diagnostics**, then take your hand off the mouse
 2. Follow the instruction shown for each step. Every step ends on its own once enough data is collected or its time runs out:
-   - **Sensor at rest** (about 7 s: 2 s to let go, then 5 s) - do not touch the mouse or the desk. Clicks or scrolls here are phantom input; movement counts as drift or jitter only when it keeps showing up (in 3 or more separate seconds). A single bump is noted but is not a fault
-   - **Continuous movement** (up to 12 s) - move in brisk, wide circles. A mouse only sends a report when it has moved, so only reports sent while it moves fast enough to report on every poll are timed. If your movement is too slow to time (common at 2-8 kHz or low DPI) the step shows "move faster" and the polling checks are inconclusive rather than flagged. Measures polling rate, stutters (judged by the share of movement time lost to late reports), unstable rate, dropouts. A rate of 60-110 Hz is only noted: it is normal for a Bluetooth mouse (67-133 Hz), while a USB mouse should report 125 Hz or more. Under 60 Hz the pointer moves in visible steps on any connection and is a warning
-   - **Button clicks** (up to 20 s) - point at the box shown and click: about 20 normal left clicks, then a few right clicks. Looks for switch bounce (accidental double clicks: one is a warning, a repeat is a fault), presses too short for a finger, sticky releases, buttons that never release (reported however few clicks were made)
+   - **Sensor at rest** (about 7 s: 2 s to let go, then 5 s) - do not touch the mouse or the desk. Clicks or scrolls here are phantom input; movement counts as drift or jitter only when it keeps showing up (in 3 or more separate seconds). A single bump is noted but is not a fault, and neither is a hand that leaves late: a burst at least as large as all the movement before it, followed by at least a second of stillness, is taken (with anything before it) as the hand letting go. A sensor that keeps reporting small amounts all through the step is still judged as jitter
+   - **Continuous movement** (up to 12 s) - move in brisk, wide circles. A mouse only sends a report when it has moved, so only reports sent while it moves fast enough to report on every poll are timed. If your movement is too slow to time (common at 2-8 kHz or low DPI) the step shows "move faster" and the polling checks are inconclusive rather than flagged. Measures polling rate, stutters (judged by the share of movement time lost to late reports), unstable rate, and freezes (the reports stopping for 0.1-1 s while the mouse kept moving the same way, then the held-back movement arriving all at once, so the cursor freezes and jumps: one is only noted, as a moment of interference can cause it; two or more are a warning). A hand that stops and starts again, however abruptly, and a mouse lifted while moving hold nothing back and are not freezes. Direction reversals and brief stops are not timed, as in the Stutter test. A rate of 60-110 Hz is only noted: it is normal for a Bluetooth mouse (67-133 Hz), while a USB mouse should report 125 Hz or more. Under 60 Hz the pointer moves in visible steps on any connection and is a warning
+   - **Button clicks** (up to 20 s) - point at the box shown and click: about 20 normal left clicks, then a few right clicks. Looks for switch bounce (accidental double clicks: one or two are a warning to re-run, three or more a fault, as in the Double-Click test), presses too short for a finger, sticky releases, buttons that never release (reported however few clicks were made)
    - **Scroll wheel** (up to 12 s) - about 10 notches down, then 10 up. Looks for notches reported in the wrong direction (encoder skipping)
    - **Lift-off** (10 s) - lift the mouse straight up about 1 cm and set it straight back down without sliding it, keep it still for a second, then move it in a small circle and stop; three times. Uses the rules of the Lift-Off Jump test: motion after a pause that carries the cursor more than 2 mm within 100 ms and then stops is a jump (one is noted, two or more are a warning); longer movements are not judged. Distances use the DPI set on the DPI Accuracy page; otherwise (and in the CLI) 800 DPI is assumed, the finding says so, and two or more jumps make the step inconclusive rather than a warning, because on a higher-DPI mouse they may be ordinary set-down shifts. If the mouse never paused and then moved, lift-off is reported as not tested
-3. Read the verdict: **Healthy**, **Needs attention** (warnings), **Fault detected** (a critical finding), or **Inconclusive** (a step did not collect enough data, or a button or wheel direction registered nothing - if you did use it, it may be dead; if you skipped it, re-run and follow the instructions for the whole step). A run is only Healthy when every step completed
+3. Read the verdict: **Healthy**, **Needs attention** (warnings), **Fault detected** (a critical finding), or **Inconclusive** (a step did not collect enough data, or a button or wheel direction registered nothing - if you did use it, it may be dead; if you skipped it, re-run and follow the instructions for the whole step, or the mouse's raw input stopped during a step: it was unplugged, its link dropped out, or another input was chosen). A run is only Healthy when every step completed. A run keeps the input it started with: if raw input stops, nothing else is measured in its place until the mouse is back
 4. Each finding explains what was measured and what it usually means. Tick **Show raw measurements** for the numbers behind it
 5. Press **Abort** (top right) or **Esc** to stop early (a partial report is still produced) or **Run Again** to repeat. During the click step only Esc stops the run, so stray clicks cannot end it, and the sidebar export buttons stay disabled until the run ends
 
@@ -40,9 +40,10 @@ Measures how often your mouse reports its position to the computer. Requires raw
 
 1. Click **Start**
 2. Move the mouse quickly and continuously, e.g. in circles
-3. View real-time Hz readings and graph. "Nominal" is the nearest standard rate the measurement corresponds to
+3. View real-time Hz readings and graph. "Nominal" is the nearest standard USB rate the measurement corresponds to. Under 110 Hz none is named: that is normal for a Bluetooth mouse (67-133 Hz), and the panel says so
+4. Each **Start** begins a new measurement, so switching the polling-rate setting or the mouse between runs does not blend the readings
 
-A mouse only sends a report when it has moved at least one count, so slow movement and direction changes legitimately produce fewer reports. Readings are only taken while the mouse moves fast enough to report at every poll; otherwise "Current" shows "-" and asks you to move faster, and Min/Avg/Nominal are not affected. At 4000-8000 Hz each report holds very few counts: move briskly or use 1600+ DPI.
+A mouse only sends a report when it has moved at least one count, so slow movement and direction changes legitimately produce fewer reports. Readings are only taken while the mouse moves fast enough to report at every poll; otherwise "Current" shows "-" and asks you to move faster, and Min/Avg/Nominal are not affected. The CLI monitor (1) uses the same rule. At 4000-8000 Hz each report holds very few counts: move briskly or use 1600+ DPI.
 
 **Common polling rates:** 125Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz
 
@@ -55,7 +56,7 @@ Detects reports that arrive late while the mouse is moving fast (choppy cursor m
 2. Move the mouse quickly and continuously in circles until at least 3 s of fast movement has been judged
 3. Spikes above the red threshold line indicate stutters
 
-Only intervals during fast, steady movement are judged against the median interval; slow passes, direction reversals and pauses are ignored because a healthy mouse legitimately sends fewer reports then. Each interval is counted once. A stutter must also be at least 2.5 ms long, so normal sub-millisecond timing noise at 2-8 kHz is not flagged. The rating is **Inconclusive** until enough fast movement was recorded.
+Only intervals during fast, steady movement are judged against the median interval; slow passes, direction reversals and pauses are ignored because a healthy mouse legitimately sends fewer reports then. Each interval is counted once. A stutter must also be at least 2.5 ms long, so normal sub-millisecond timing noise at 2-8 kHz is not flagged. A gap of 0.1-1 s between full-size reports in the same direction, after which the held-back movement arrives in one report (the cursor freezes, then jumps), is a **freeze**: the connection dropped out while the hand kept moving. A hand that stops and starts again, or a mouse lifted while moving, holds nothing back and is not one. Two or more freezes make the rating at least Fair. The rating is **Inconclusive** until enough fast movement was recorded.
 
 **Tip:** Adjust sensitivity slider (multiple of the median interval) - lower = more sensitive detection.
 
@@ -66,8 +67,10 @@ Counts clicks and measures hold duration. Click latency (the delay inside the mo
 
 1. Select **Left Click** or **Right Click**
 2. Click **Start**
-3. Click inside the test area
+3. Click inside the test area (only presses there count)
 4. View clicks count, CPS (clicks per second), and hold times
+
+Without raw input every click is still counted, even a press and release within one display frame, but press and release times are only known to the frame (about 16 ms): hold times are rounded to frames, the shortest hold is not shown, and the export says so. A run ends if raw input is lost or gained part way, so one run never mixes the two timings.
 
 ---
 
@@ -151,11 +154,11 @@ With raw input this covers the mouse's **sensor/firmware** only: OS pointer acce
 1. Pick a fixed physical distance (for example the full width of your mousepad, or between two marks)
 2. Click **Start Test**
 3. Move across that exact distance, pause, move back, pause - about 5 passes slowly
-4. Do about 5 more passes quickly, then click **Stop Test**
+4. Do about 5 more passes quickly, then press **Enter** (or **Esc**) to stop without moving the mouse. **Stop Test** works too: the move to the button is not counted as a pass
 
-Each pass must be at least 50 counts and the fast passes must be clearly faster than the slow ones, otherwise the result is **Inconclusive**.
+Each pass must be at least 50 counts and the fast passes must be clearly faster than the slow ones, otherwise the result is **Inconclusive**. A movement that goes there and back without the pause is left out (the panel says how many). The slow and fast passes are compared by their medians, so one stray movement cannot decide the result.
 
-**1.0x factor** = No acceleration (ideal). Above 1.15x or below 0.85x is reported as acceleration.
+**1.0x factor** = No acceleration (ideal). Above 1.15x is reported as acceleration; below 0.85x as fast passes losing counts, which is almost always the sensor losing tracking at speed (or the pointer hitting the screen edge), not an acceleration setting. The export records the verdict and whether raw counts or the on-screen pointer were measured. The result keeps describing the input the run used, and a run is stopped if raw input is lost or gained part way.
 
 ---
 
@@ -164,7 +167,9 @@ Detects switch issues that cause accidental double-clicks.
 
 1. Click **Start**, then click the large target repeatedly at a normal pace
 2. A press closer than the threshold to the previous press, or within 25 ms of the previous release, is flagged as accidental (a finger cannot do either)
-3. Multiple accidental double-clicks indicate a failing switch
+3. One or two accidental double-clicks are a possible fault (run the test again); three or more indicate a failing switch
+
+Only presses on the target count. Switch bounce needs raw input: without it presses are only known to the display frame (about 16 ms), too coarse for these checks, so clicks and intervals are shown but the switch is not judged (as in Auto Diagnostics).
 
 ---
 
@@ -173,7 +178,7 @@ Measures sensor noise when the mouse is stationary.
 
 1. Place mouse on pad
 2. Click **Take Sample (5s)**, then let go of the mouse: recording starts 2 seconds later so the click and your hand leaving are not recorded
-3. Wait 5 seconds without touching the mouse (a button press while recording discards the sample)
+3. Wait 5 seconds without touching the mouse (a button press while recording discards the sample, as does raw input stopping or starting, for example when the mouse is unplugged). The sample keeps recording if you open another page meanwhile
 4. Lower distance = less jitter = better sensor. Amounts are raw counts at the mouse's current DPI; a healthy sensor that nobody touches normally reports nothing
 
 Without raw input no rating is given: only pointer movement in screen points is visible.
@@ -190,14 +195,15 @@ Without raw input no rating is given: only pointer movement in screen points is 
 
 ## Command-Line (CLI) Tests
 
-The `mouse-testkit` binary (Linux and Windows) runs the same tests from a text menu. Timing comes from the device's own report timestamps, and click thresholds are the Auto Diagnostics ones, so the CLI, the GUI and the check-up agree. Where a CLI test works differently from the GUI panel described above:
+The `mouse-testkit` binary (Linux and Windows) runs the same tests from a text menu. Timing comes from the device's own report timestamps, and click thresholds are the Auto Diagnostics ones, so the CLI, the GUI and the check-up agree. On Windows the tested mouse's clicks still reach the window under the pointer, so while a test runs the console's own mouse handling (QuickEdit selection, right-click paste) is switched off: clicking on the console window cannot paste text into the test or pause it. Where a CLI test works differently from the GUI panel described above:
 
 - **Click Reaction Time (4)** - after a random 1.5-4 s wait, `CLICK NOW!` appears; click as fast as you can. Clicking before the cue (or under 100 ms after it, which is a guess rather than a reaction) is a false start and the trial is repeated. The result is your reaction time plus display and input delay (typically 200-300 ms). It is not the mouse's own click latency, which is a few ms and cannot be separated from human reaction this way
-- **Click Stickiness (5)** - click normally about 20 times. A hold over 250 ms is a slow release; one long hold is treated as the hand, two or more as a late-releasing switch. Presses under 3 ms (contact bounce) and a button still held for over a second when you press `q` (stuck switch) are also reported. Fewer than 5 clicks is **Inconclusive**
-- **Lift-Off Jump (6)** - enter the mouse's DPI (or press Enter to assume 800), then lift the mouse straight up about 1 cm and set it straight back down, 5-10 times with a pause in between, pressing **SPACE** after each lift. Motion in the first 100 ms of each lift or set-down is summed; if it carries the cursor more than 2 mm, it is a jump. A movement that keeps going for more than another 2 mm after that is treated as sliding and not judged. One jump may be a hand slip; two or more mean a high lift-off distance. A clean lift produces no motion at all, so with no jumps and fewer than 5 lifts recorded the result is **Inconclusive**
-- **DPI Accuracy (7)** - enter the configured DPI and the distance you will move (for example `10cm` or `4in`; default 10 cm). Line up one edge of the mouse with the start mark of a ruler, press **SPACE**, slide it until the same edge is on the end mark in one movement (any direction), press **SPACE** again. The straight-line distance in counts gives the DPI. Take 3 or more samples: the verdict uses their median, so one sample spoiled by lifting the mouse does not decide it. A longer distance reduces the effect of hand placement; if the deviation could be explained by placing the mouse 1 mm off at each end, the result is **Inconclusive**
+- **Click Stickiness (5)** - click normally about 20 times. A hold over 250 ms is a slow release; one long hold is treated as the hand, two or more as a late-releasing switch. Presses under 3 ms (contact bounce) and a button still held for over a second when you press `q` (stuck switch) are also reported. Fewer than 5 clicks is **Inconclusive**. The result lists the clicks each button registered and only covers those buttons: if only one registered, it says so (a button you clicked that is missing may be dead). Clicks made before the test started (for example while choosing the device) are not counted
+- **Lift-Off Jump (6)** - enter the mouse's DPI (or press Enter to assume 800) and nudge the mouse when asked, which confirms the right device is being read (a clean lift sends nothing, so does a silent device). Then lift the mouse straight up about 1 cm and set it straight back down, 5-10 times with a pause in between, pressing **SPACE** after each lift. Motion in the first 100 ms of each lift or set-down is summed; if it carries the cursor more than 2 mm, it is a jump. A movement that keeps going for more than another 2 mm after that is treated as sliding and not judged. One jump may be a hand slip; two or more mean a high lift-off distance, unless the DPI was assumed: then they may be ordinary set-down shifts of a higher-DPI mouse and the result is **Inconclusive** (as in Auto Diagnostics). A clean lift produces no motion at all, so with no jumps and fewer than 5 lifts recorded the result is **Inconclusive**; with no movement at all the test asks you to nudge the mouse again to confirm it is still connected
+- **DPI Accuracy (7)** - enter the configured DPI (`1600`, `1,600`, `1.6k` and `1,6k` all work; press Enter to just measure the DPI without judging it) and the distance you will move (for example `10cm` or `4in`; default 10 cm). Line up one edge of the mouse with the start mark of a ruler, press **SPACE**, slide it until the same edge is on the end mark in one movement (any direction), press **SPACE** again. The straight-line distance in counts gives the DPI. Take 3 or more samples: the verdict uses their median, so one sample spoiled by lifting the mouse does not decide it. A longer distance reduces the effect of hand placement; if the deviation could be explained by placing the mouse 1 mm off at each end, the result is **Inconclusive**. As in the GUI, a result more than 25% off is **Inconclusive** too (check the setup: almost always another DPI stage than entered, a wrong distance or a missed mark), not a sensor fault
 - **Angle Snapping (8)** - draw freehand lines that are *almost* horizontal or vertical (tilted about 5°), a few centimetres long, pausing between them; press `q` when done. Uses the same line analysis as the GUI. Diagonal lines cannot show snapping, so fewer than 3 near-axis lines is **Inconclusive**
-- **Double-Click (10)** - click normally about 20 times per button. A press within 50 ms of the previous press, or within 25 ms of the previous release, of the same button is an accidental double-click. 1-2 are a possible fault (re-run), 3 or more a failing switch
+- **Double-Click (10)** - click normally about 20 times per button. A press within 50 ms of the previous press, or within 25 ms of the previous release, of the same button is an accidental double-click. 1-2 are a possible fault (re-run), 3 or more a failing switch. As in test 5, the result lists the clicks per button and notes when only one button registered
+- **Jitter (11)** - nudge the mouse when asked (this confirms the device is live), let go, then press SPACE. Recording starts 2 s later, as in the GUI. A sample whose movement is confined to one or two seconds (a bump of the desk, the hand leaving late) is set aside and taken again rather than rated as sensor noise, as in Auto Diagnostics
 - **Run All Standard Tests (12)** - before each test you can press Enter to run it, `s` to skip it or `q` to stop the suite. The summary shows what each test found (problem, possible problem, no problem, inconclusive, not run); tests that were skipped or had no mouse are never reported as completed
 
 ---
