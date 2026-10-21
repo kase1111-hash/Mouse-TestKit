@@ -248,8 +248,11 @@ impl Report {
     }
 
     /// Cursor jumps on lift, when the lift step had something to judge.
+    /// Jumps found at an assumed DPI leave the step inconclusive, but they
+    /// were still seen (in counts), so they are a number, not "not tested".
     pub fn lift_jumps(&self) -> Option<usize> {
-        self.step_judged(Phase::Lift)
+        (self.step_judged(Phase::Lift)
+            || (self.step_ran(Phase::Lift) && self.metrics.lift_jumps > 0))
             .then_some(self.metrics.lift_jumps)
     }
 
@@ -2750,6 +2753,8 @@ mod tests {
         );
         assert!(f.detail.contains("DPI was not given"), "{}", f.detail);
         assert_eq!(r.verdict, Verdict::Inconclusive);
+        // Inconclusive, but the jumps were seen: not "not tested"
+        assert_eq!(r.lift_jumps(), Some(3));
 
         // With its DPI given, the same motion is a set of clean set-downs.
         let mut sim = sim_at_lift(Config {
