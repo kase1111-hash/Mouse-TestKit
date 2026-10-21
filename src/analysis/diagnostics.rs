@@ -324,7 +324,8 @@ pub struct Config {
     /// is one burst well under a second long; a drifting or noisy sensor
     /// keeps reporting. The hand leaving late is not counted: movement that
     /// runs from the start of the step and then stops, or everything up to
-    /// the largest burst when only noise follows it for a second or more.
+    /// the largest burst when that burst is at least as large as all the
+    /// movement before it and only noise follows it for a second or more.
     /// Severity is judged on the movement outside the largest burst.
     pub rest_spread_windows: usize,
     /// A direction change within this many ms of the previous notch is a skip.
@@ -921,20 +922,23 @@ impl AutoTest {
             .count();
         // A hand resting on the mouse moves it only now and then, so it can
         // also leave after a still second: the largest burst is the hand
-        // lifting off when only noise follows it for at least a whole
-        // second, and everything before it was the hand too. A burst in the
-        // last second is not excused: it may be the next step started early.
+        // lifting off when it moved the mouse at least as far as everything
+        // before it and only noise follows it for at least a whole second;
+        // everything before it was the hand too. A noisy sensor's busiest
+        // second is no larger than its noise before it. A burst in the last
+        // second is not excused: it may be the next step started early.
+        let distance = |seconds: &[RestSecond]| seconds.iter().map(|s| s.distance).sum::<f64>();
         let lift_off = self
             .rest_seconds
             .iter()
             .enumerate()
             .max_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
-            .map(|(i, _)| i)
-            .filter(|&i| {
-                let after: f64 = self.rest_seconds[i + 1..].iter().map(|s| s.distance).sum();
-                i + 1 < windows_in_step && after < REST_NOISE_COUNTS
+            .filter(|&(i, burst)| {
+                i + 1 < windows_in_step
+                    && burst.distance >= distance(&self.rest_seconds[..i])
+                    && distance(&self.rest_seconds[i + 1..]) < REST_NOISE_COUNTS
             })
-            .map_or(0, |i| i + 1);
+            .map_or(0, |(i, _)| i + 1);
         let skip = if lead < windows_in_step { lead } else { 0 }.max(lift_off);
         let later = &self.rest_seconds[skip.min(self.rest_seconds.len())..];
         let windows = later.iter().filter(moved).count();
@@ -3058,6 +3062,27 @@ mod tests {
         sim.idle(0.5);
         let f = rest_findings(&sim);
         assert!(f.iter().any(|(s, _)| *s >= Severity::Warning), "{:?}", f);
+    }
+
+    #[test]
+    fn test_steady_jitter_is_not_excused_as_a_hand_leaving() {
+        // A noisy sensor on an untouched mouse: single counts all through
+        // the step, two or three a second, fewer in the last two seconds
+        // by chance. Its busiest second is no lift-off: it is no larger
+        // than the noise before it.
+        let mut sim = Sim::new(cfg());
+        for t in [2.3, 2.7, 3.2, 3.6, 4.1, 4.4, 4.8, 5.5, 6.5] {
+            sim.at.feed(t, &MouseEvent::Move { dx: 1, dy: 0 });
+        }
+        sim.t = 7.0;
+        sim.idle(0.5);
+        assert_eq!(sim.phase(), Some(Phase::Movement));
+        let f = rest_findings(&sim);
+        assert!(
+            f.contains(&(Severity::Warning, "Sensor jitter at rest".to_string())),
+            "{:?}",
+            f
+        );
     }
 
     #[test]
