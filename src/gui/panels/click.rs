@@ -2,6 +2,7 @@ use eframe::egui;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use super::polling::raw_input_required_notice;
 use crate::export::{
     ClickButtonExport, ClickResponseExport, ClickStickyExport, LiftOffExport, StickyButtonExport,
 };
@@ -985,20 +986,10 @@ impl ClickPanel {
         ui.label("Detects cursor jumps when the mouse is lifted or set down.");
         if !has_bridge {
             ui.add_space(5.0);
-            egui::Frame::new()
-                .fill(egui::Color32::from_rgb(70, 50, 20))
-                .inner_margin(12.0)
-                .corner_radius(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "Raw input unavailable - lift-off jumps cannot be measured",
-                        )
-                        .strong()
-                        .color(egui::Color32::YELLOW),
-                    );
-                    ui.label("Without raw input only the window-system pointer is visible: movement in screen points after OS acceleration, once per frame. A jump is judged in sensor counts over the first 100 ms of motion, which that cannot provide, so this test does not run.");
-                });
+            raw_input_required_notice(
+                ui,
+                "A lift-off jump (sensor counts summed over the first 100 ms of motion)",
+            );
         }
         ui.add_space(10.0);
         ui.label(
@@ -1133,6 +1124,18 @@ impl ClickPanel {
                     ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
                     ui.add_space(5.0);
                     ui.label(message);
+                    if dpi_assumed && jumps > 0 {
+                        // At a higher DPI the same counts are a shorter
+                        // distance: 2 mm at 800 DPI is 0.5 mm at 3200.
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "These distances assume {:.0} DPI. If your mouse is set higher, the jumps are shorter than shown and may be ordinary set-down shifts: set its DPI on the DPI Accuracy page and repeat the test.",
+                                dpi
+                            ))
+                            .color(egui::Color32::YELLOW),
+                        );
+                    }
                     if tally.slides > 0 {
                         ui.add_space(5.0);
                         ui.label(
