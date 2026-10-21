@@ -14,7 +14,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Guided one-minute check-up that looks for faults automatically |
 | Steps | Rest (2 s settle + 5 s), Movement (up to 12 s), Clicks (up to 20 s), Scroll (up to 12 s), Lift (10 s); each ends on its own once enough data is collected or its time is up |
-| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable polling, a polling rate under 60 Hz (60-110 Hz is only noted: normal for Bluetooth, low for USB), freezes (0.1-1 s gaps while the mouse kept moving the same way, after which the held-back counts arrive in one report; 1 = info, 2+ = warning), timed only between same-direction reports with 2+ counts on an axis (fast enough to report every poll) that are not the small reports of a hand slowing to a stop, as in test 1; switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1-2 = warning, 3+ = fault, as in test 10), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms, not counting the notch that carries on the original way (1-2 = warning, 3+ = fault, as in the Scroll Wheel test); lift-off jumps as in test 6 (1 = info, 2+ = warning; with the DPI unknown, 2+ = inconclusive) |
+| Detects | Phantom clicks/scroll at rest, and movement at rest that recurs in 3+ separate seconds (a single bump is not a fault); stutters (time lost to reports later than 2.5x the poll period and at least 2 ms), unstable polling, a polling rate under 60 Hz (60-110 Hz is only noted: normal for Bluetooth, low for USB), Bluetooth batching (2+ reports per delivery, deliveries 5+ ms apart, at most 4 reports each; noted, and rate, stutters and stability judged per delivery), freezes (0.1-1 s gaps while the mouse kept moving the same way, after which the held-back counts arrive in one report; or, at 1 kHz and up, 0.1-1 s gaps with two full-speed reports on each side, which no hand produces; 1 = info, 2+ = warning), fast reports pinned at a report format limit of 127, 2047 or 32767 counts with none larger (warning: movement lost at high speed), timed only between same-direction reports with 2+ counts on an axis (fast enough to report every poll) that are not the small reports of a hand slowing to a stop, as in test 1; switch bounce (press within 25 ms of the previous release or 50 ms of the previous press; 1-2 = warning, 3+ = fault, as in test 10), presses under 3 ms, holds over 250 ms, buttons still down at the end; scroll notches reversed within 60 ms, not counting the notch that carries on the original way (1-2 = warning, 3+ = fault, as in the Scroll Wheel test); lift-off jumps as in test 6 (1 = info, 2+ = warning; with the DPI unknown, 2+ = inconclusive) |
 | Output | Verdict (Healthy / Needs attention / Fault detected / Inconclusive), findings with severity and explanation, raw measurements; included in JSON/CSV export. A button or scroll direction that registered nothing, too little fast movement, or an aborted run gives Inconclusive, never Healthy |
 | Availability | GUI panel and CLI menu option 13 (device timestamps per report). Without raw input (macOS) the Movement and Lift steps are left out and bounce, short-press and scroll-skip checks are not judged |
 
@@ -23,7 +23,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Detects mouse movement stutter and irregularities |
-| Method | Judges report intervals only during fast, steady movement (slow movement, reversals and pauses legitimately skip polls; the small reports of a hand slowing to a brief stop are left out); stutter = more than the chosen multiple of the median interval and at least 2.5 ms; a freeze = a stutter of 0.1-1 s between full-size reports after which the held-back counts (3+ median reports' worth) arrive in one report, 2+ rate the session at least Fair |
+| Method | Judges report intervals only during fast, steady movement (slow movement, reversals and pauses legitimately skip polls; the small reports of a hand slowing to a brief stop are left out); stutter = more than the chosen multiple (default 2.5x) of the median interval and at least 2.5 ms; a freeze = a stutter of 0.1-1 s between full-size reports after which the held-back counts (3+ median reports' worth) arrive in one report, or (at 1 kHz and up, where a hand's slow-down of 4+ ms spans 3+ polls) with two full-speed reports on each side and the movement lost; 2+ rate the session at least Fair. Batched (Bluetooth) delivery is judged per delivery; reports pinned at a report format limit are shown as clipping, not stutters |
 | Output | Visual graph representation of stutter events |
 | Use Case | Identifying inconsistent tracking or frame drops |
 
@@ -32,7 +32,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Displays real-time mouse polling rate |
-| Measurement | Hz (polls per second), from the median interval of fast movement only (slow movement and reversals skip polls); GUI and CLI |
+| Measurement | Hz (polls per second), from the median interval of fast movement only (slow movement and reversals skip polls); deliveries per second when a Bluetooth mouse delivers reports in batches; GUI and CLI |
 | Common Values | 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz; under 110 Hz no USB rate is named (normal for Bluetooth) |
 | Use Case | Verifying advertised polling rates and consistency |
 
@@ -122,7 +122,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Counts wheel notches and checks for encoder faults |
 | Measurement | Notch count each way, speed (not rated), direction changes |
-| Detection | Notches reversed within 60 ms of the previous one (skipping), a direction that never registers; lost notches are checked by the user counting detents |
+| Detection | Notches reversed within 60 ms of the previous one (skipping, raw input only), a direction that never registers; lost notches are checked by the user counting detents |
 | Availability | GUI only |
 | Use Case | Validating scroll wheel reliability and encoder quality |
 

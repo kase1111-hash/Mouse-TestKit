@@ -61,6 +61,9 @@ pub struct PollingRateExport {
     pub max_hz: u32,
     pub avg_hz: f64,
     pub samples: u32,
+    /// Reports arrived several at a time (Bluetooth connection events): the
+    /// rates are deliveries per second.
+    pub batched_delivery: bool,
     pub history: Vec<f64>,
 }
 
@@ -70,8 +73,16 @@ pub struct StutterExport {
     /// The panel's rating, e.g. "Inconclusive" when too little fast
     /// movement was judged for the counts below to mean anything.
     pub rating: String,
-    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts).
+    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts)...
     pub freezes: usize,
+    /// ... of which this many lost the movement instead of catching up.
+    pub freezes_movement_lost: usize,
+    /// Reports arrived several at a time (Bluetooth connection events): the
+    /// intervals and rate are per delivery.
+    pub batched_delivery: bool,
+    /// Fast reports were pinned at this many counts, the limit of the
+    /// mouse's report format: movement lost at high speed.
+    pub clipped_at_counts: Option<i32>,
     pub total_stutter_count: usize,
     pub total_samples: usize,
     pub avg_delta_ms: f64,
@@ -274,6 +285,9 @@ pub struct ScrollExport {
     /// Wheel reports counted as skips: reversed within `skip_window_ms` of
     /// the previous report, faster than a finger turns the wheel back.
     pub skips: usize,
+    /// False without raw input: frame-timed notches cannot show a skip, so
+    /// `skips` and `consistency_percent` were not measured.
+    pub skips_measured: bool,
     pub skip_window_ms: f64,
     /// What the panel concluded about the wheel.
     pub verdict: String,
@@ -324,12 +338,25 @@ impl TestResultsExport {
             csv.push_str(&format!("Polling Rate,Max Hz,{}\n", p.max_hz));
             csv.push_str(&format!("Polling Rate,Avg Hz,{:.1}\n", p.avg_hz));
             csv.push_str(&format!("Polling Rate,Samples,{}\n", p.samples));
+            if p.batched_delivery {
+                csv.push_str("Polling Rate,Delivery,batched (rates are deliveries per second)\n");
+            }
         }
 
         // Stutter
         if let Some(ref s) = self.stutter {
             csv.push_str(&format!("Stutter,Rating,{}\n", csv_escape(&s.rating)));
             csv.push_str(&format!("Stutter,Freezes (0.1-1 s),{}\n", s.freezes));
+            csv.push_str(&format!(
+                "Stutter,Freezes That Lost the Movement,{}\n",
+                s.freezes_movement_lost
+            ));
+            if s.batched_delivery {
+                csv.push_str("Stutter,Delivery,batched (intervals are per delivery)\n");
+            }
+            if let Some(limit) = s.clipped_at_counts {
+                csv.push_str(&format!("Stutter,Clipped At (counts),{}\n", limit));
+            }
             csv.push_str(&format!(
                 "Stutter,Total Stutters,{}\n",
                 s.total_stutter_count
@@ -517,14 +544,18 @@ impl TestResultsExport {
                 s.direction_changes
             ));
             csv.push_str(&format!("Scroll,Avg Speed (sps),{:.1}\n", s.avg_speed_sps));
-            csv.push_str(&format!(
-                "Scroll,Skips (reversed within {:.0} ms),{}\n",
-                s.skip_window_ms, s.skips
-            ));
-            csv.push_str(&format!(
-                "Scroll,Reports Not Skipped (%),{}\n",
-                s.consistency_percent
-            ));
+            if s.skips_measured {
+                csv.push_str(&format!(
+                    "Scroll,Skips (reversed within {:.0} ms),{}\n",
+                    s.skip_window_ms, s.skips
+                ));
+                csv.push_str(&format!(
+                    "Scroll,Reports Not Skipped (%),{}\n",
+                    s.consistency_percent
+                ));
+            } else {
+                csv.push_str("Scroll,Skips,not measured (no raw input)\n");
+            }
             csv.push_str(&format!("Scroll,Verdict,{}\n", csv_escape(&s.verdict)));
         }
 
@@ -706,6 +737,9 @@ mod tests {
         export.stutter = Some(StutterExport {
             rating: "Inconclusive".to_string(),
             freezes: 0,
+            freezes_movement_lost: 0,
+            batched_delivery: false,
+            clipped_at_counts: None,
             total_stutter_count: 3,
             total_samples: 1500,
             avg_delta_ms: 1.0,
@@ -794,6 +828,7 @@ mod tests {
             avg_speed_sps: 30.0,
             consistency_percent: 85,
             skips: 8,
+            skips_measured: true,
             skip_window_ms: 60.0,
             verdict: "Wheel is skipping".to_string(),
         });
@@ -805,6 +840,19 @@ mod tests {
         let json = export.to_json().unwrap();
         assert!(json.contains("\"skips\": 8"));
         assert!(json.contains("\"consistency_percent\": 85"));
+        // Without raw input no skip count is given
+        if let Some(s) = export.scroll.as_mut() {
+            s.skips = 0;
+            s.consistency_percent = 100;
+            s.skips_measured = false;
+        }
+        let csv = export.to_csv();
+        assert!(
+            csv.contains("Scroll,Skips,not measured (no raw input)\n"),
+            "{}",
+            csv
+        );
+        assert!(!csv.contains("Reports Not Skipped"), "{}", csv);
     }
 
     #[test]

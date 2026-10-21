@@ -12,7 +12,11 @@
 //! [`MIN_RELATIVE_REPORT_SIZE`]), compares them against the median of such
 //! intervals, and counts each interval exactly once. The same rule finds
 //! freezes: gaps longer than a poll between two such reports after which
-//! the held-back movement arrives at once (see [`is_freeze`]).
+//! the held-back movement arrives at once (see [`is_freeze`]), or after
+//! which the reports go on at full speed with the movement lost, which no
+//! hand can do (see [`is_dropout`]). Reports pinned at the largest value
+//! the report format holds are counted apart (see [`ClipCheck`]): that is
+//! movement lost at high speed, not late reports.
 //!
 //! [`analyze_stutter`] is the older deviation-from-mean classifier for a plain
 //! list of intervals. It knows nothing about pauses or slow movement and is
@@ -20,7 +24,10 @@
 
 use std::collections::VecDeque;
 
-use crate::analysis::polling::{is_saturated_pair, median_in_place, MAX_POLL_INTERVAL_MS};
+use crate::analysis::polling::{
+    batched_delivery, is_saturated_pair, is_saturated_report, median_in_place, Batching,
+    BATCH_GAP_MS, MAX_POLL_INTERVAL_MS, MIN_SATURATED_COUNTS,
+};
 
 /// Default stutter threshold as a multiple of the median report interval.
 /// A single missed poll doubles the interval; 2.5x needs at least two in a
@@ -78,6 +85,262 @@ pub fn is_freeze(interval_ms: f64, smaller: f64, after: f64, median_size: f64) -
         && interval_ms <= MAX_FREEZE_MS
         && smaller >= MIN_RELATIVE_REPORT_SIZE * median_size
         && after >= FREEZE_CARRY_REPORTS * median_size
+}
+
+/// A hand needs at least this long (ms) to bring the mouse from its brisk
+/// cruising speed to rest, or from rest back up to it. Muscle force builds
+/// up over tens of milliseconds, and even the sharpest flicks change their
+/// acceleration no faster than about 6000 m/s^3, which takes 4 ms to reach
+/// a slow 5 cm/s from rest (and as long to lose it).
+pub const MIN_HAND_RAMP_MS: f64 = 4.0;
+
+/// [`is_dropout`] is only judged when a hand's slow-down or speed-up spans
+/// at least this many polls ([`MIN_HAND_RAMP_MS`] at 1 kHz and up). Then at
+/// least one of the last two reports before a stop, and of the first two
+/// after it, is clearly smaller than the reports of steady movement. At
+/// 125-500 Hz a hand can stop within a poll or two, so the reports either
+/// side of a stop can be full-size.
+const RAMP_POLLS: f64 = 3.0;
+
+/// Two consecutive reports holding at least this share of two median
+/// reports of fast movement were sent at cruising speed (see
+/// [`is_dropout`]). Taken over two reports, because the counts of one
+/// report are rounded down and the remainder goes into the next: at a few
+/// counts a poll single reports vary by a third.
+pub const FULL_SPEED_SIZE: f64 = 0.75;
+
+/// ... and neither report is smaller than this share of the median (a
+/// large report followed by a small one is a hand slowing down).
+const MIN_EDGE_SIZE: f64 = 0.5;
+
+/// The four reports around a gap between the two reports of a saturated
+/// pair: the two before the gap and the two after it, each pair also
+/// saturated (see [`GapEdgeTracker`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GapEdges {
+    /// The gap (ms): from the last report before it to the first after it.
+    pub gap_ms: f64,
+    /// Sizes (counts) of the two reports before the gap and of the two
+    /// after it, in time order.
+    pub sizes: [f64; 4],
+    /// Intervals (ms) between the two reports before the gap and between
+    /// the two after it.
+    pub edge_ms: [f64; 2],
+}
+
+/// Whether a gap longer than [`MAX_POLL_INTERVAL_MS`] and at most
+/// [`MAX_FREEZE_MS`] is a dropout that lost the movement: the reports
+/// stopped while the mouse moved at full speed, and went on at full speed
+/// (in any direction, see [`turned_gap`]).
+///
+/// `period_ms` is the poll period (the median interval of fast movement) and
+/// `median_size` the median report size of fast movement. The two reports
+/// before the gap and the two after it each move at least [`FULL_SPEED_SIZE`]
+/// of the median per poll, each pair one poll apart. A hand cannot do that: it
+/// slows down before it stops and speeds up again after it, over at least
+/// [`MIN_HAND_RAMP_MS`], which shows in those reports once the poll period
+/// is short enough ([`RAMP_POLLS`]). A link that drops reports without
+/// sending their movement later, or a sensor that loses track of the
+/// surface, does exactly that (see [`is_freeze`] for a mouse that holds the
+/// movement back instead). A mouse lifted while moving fast and set down
+/// still moving looks the same.
+pub fn is_dropout(edges: &GapEdges, period_ms: f64, median_size: f64) -> bool {
+    let one_poll = |ms: f64| ms > 0.0 && ms < 2.0 * period_ms;
+    period_ms > 0.0
+        && period_ms * RAMP_POLLS <= MIN_HAND_RAMP_MS
+        && edges.gap_ms > MAX_POLL_INTERVAL_MS
+        && edges.gap_ms <= MAX_FREEZE_MS
+        && edges
+            .sizes
+            .iter()
+            .all(|&size| size >= MIN_EDGE_SIZE * median_size)
+        && edges
+            .sizes
+            .chunks(2)
+            .all(|pair| pair[0] + pair[1] >= 2.0 * FULL_SPEED_SIZE * median_size)
+        && edges.edge_ms.iter().all(|&ms| one_poll(ms))
+}
+
+/// Whether two consecutive motion reports that do not point the same way
+/// are still a gap to judge with [`is_dropout`]: longer than a poll, and
+/// both large enough to show the mouse moving. What no hand can do is stop
+/// and set off again without slowing down and speeding up, whichever way it
+/// sets off; and a hand circling once a second keeps turning through a
+/// dropout, by 90 degrees in a quarter of a second.
+pub fn turned_gap(prev: (i32, i32), next: (i32, i32), interval_ms: f64) -> bool {
+    interval_ms > MAX_POLL_INTERVAL_MS
+        && is_saturated_report(prev.0, prev.1)
+        && is_saturated_report(next.0, next.1)
+}
+
+/// Collects the reports around each gap longer than a poll, for
+/// [`is_dropout`]. Feed it every saturated pair of consecutive motion
+/// reports and every [`turned_gap`], numbered by the later report.
+///
+/// Reports are matched by number, so a pair that is not fed (not saturated,
+/// or after a reset of the caller's previous report) breaks the chain
+/// instead of joining reports that were not neighbours.
+#[derive(Debug, Clone, Default)]
+pub struct GapEdgeTracker {
+    /// The last pair no longer than a poll: number of its later report, size
+    /// of its earlier one and its interval (ms).
+    last_pair: Option<(usize, f64, f64)>,
+    /// A gap waiting for the pair after it: number of the report that ended
+    /// the gap, and the edges known so far.
+    open: Option<(usize, GapEdges)>,
+}
+
+impl GapEdgeTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that motion reports `index - 1` and `index`, `interval_ms`
+    /// apart, holding `before` and `after` counts, form a saturated pair.
+    /// Returns a gap whose four reports are now known, with the number of the
+    /// report that ended it.
+    pub fn pair(
+        &mut self,
+        index: usize,
+        interval_ms: f64,
+        before: f64,
+        after: f64,
+    ) -> Option<(usize, GapEdges)> {
+        if interval_ms <= MAX_POLL_INTERVAL_MS {
+            let done =
+                self.open
+                    .take()
+                    .filter(|&(gap, _)| gap + 1 == index)
+                    .map(|(gap, mut edges)| {
+                        edges.sizes[3] = after;
+                        edges.edge_ms[1] = interval_ms;
+                        (gap, edges)
+                    });
+            self.last_pair = Some((index, before, interval_ms));
+            done
+        } else {
+            self.open = self
+                .last_pair
+                .filter(|&(i, ..)| i + 1 == index && interval_ms <= MAX_FREEZE_MS)
+                .map(|(_, first, edge_ms)| {
+                    let edges = GapEdges {
+                        gap_ms: interval_ms,
+                        sizes: [first, before, after, 0.0],
+                        edge_ms: [edge_ms, 0.0],
+                    };
+                    (index, edges)
+                });
+            self.last_pair = None;
+            None
+        }
+    }
+
+    /// Forget the gap ended by report `index` (it was already judged).
+    pub fn cancel(&mut self, index: usize) {
+        if self.open.is_some_and(|(gap, _)| gap == index) {
+            self.open = None;
+        }
+    }
+}
+
+/// Largest |dx| or |dy| a mouse report can carry with 8-bit, 12-bit (used by
+/// many wireless receivers) and 16-bit motion fields. A signed field also
+/// reaches one more on the negative side (-128, -2048, -32768).
+pub const REPORT_LIMITS: [i32; 3] = [127, 2047, 32767];
+
+/// Clipping is reported once at least this many fast reports...
+const MIN_CLIPPED_REPORTS: usize = 10;
+/// ... and this share of them sit exactly at a limit...
+const MIN_CLIPPED_SHARE: f64 = 0.02;
+/// ... at least this many times as often as at each of the
+/// [`CLIP_BAND`] values just below it, with none beyond it. A mouse whose
+/// reports run into the limit piles every faster report onto that one value;
+/// a mouse that merely moves at about that speed spreads its reports over
+/// the neighbouring values too, and sometimes past the limit.
+const CLIP_PILE_UP: f64 = 4.0;
+const CLIP_BAND: i64 = 8;
+
+/// Fast reports pinned at a report format's limit (see [`ClipCheck`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clipping {
+    /// The limit (counts) the reports were pinned at.
+    pub limit: i32,
+    /// Fast reports with an axis at the limit...
+    pub pinned: usize,
+    /// ... out of this many fast reports (see
+    /// [`crate::analysis::polling::MIN_SATURATED_COUNTS`]).
+    pub fast_reports: usize,
+}
+
+impl Clipping {
+    pub fn percent(&self) -> f64 {
+        self.pinned as f64 / self.fast_reports.max(1) as f64 * 100.0
+    }
+}
+
+/// Finds motion reports pinned at the largest value the mouse's report
+/// format can carry ([`REPORT_LIMITS`]).
+///
+/// Moved faster than its reports can describe, a mouse sends the limit in
+/// every report and loses the rest of the movement (or sends it later, so
+/// the cursor lags behind): fast movements come up short. That is a fault
+/// at high speed, not late reports. Feed it every motion report.
+#[derive(Debug, Clone, Default)]
+pub struct ClipCheck {
+    fast_reports: usize,
+    /// Largest and smallest dx or dy seen in any report.
+    highest: i64,
+    lowest: i64,
+    /// Per limit: fast reports with an axis at the limit...
+    at_limit: [usize; 3],
+    /// ... and fast reports whose larger axis lies just below it.
+    below_limit: [usize; 3],
+}
+
+impl ClipCheck {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn feed(&mut self, dx: i32, dy: i32) {
+        let (dx, dy) = (i64::from(dx), i64::from(dy));
+        self.highest = self.highest.max(dx).max(dy);
+        self.lowest = self.lowest.min(dx).min(dy);
+        let larger = dx.abs().max(dy.abs());
+        if larger < i64::from(MIN_SATURATED_COUNTS) {
+            return;
+        }
+        self.fast_reports += 1;
+        for (k, &limit) in REPORT_LIMITS.iter().enumerate() {
+            let limit = i64::from(limit);
+            // A signed field holds -(limit + 1)..=limit; firmware that
+            // clamps usually stops at -limit
+            let pinned = |v: i64| v == limit || v == -limit || v == -limit - 1;
+            if pinned(dx) || pinned(dy) {
+                self.at_limit[k] += 1;
+            } else if (limit - CLIP_BAND..limit).contains(&larger) {
+                self.below_limit[k] += 1;
+            }
+        }
+    }
+
+    /// The format limit the fast reports were pinned at, if any.
+    pub fn clipping(&self) -> Option<Clipping> {
+        REPORT_LIMITS.iter().enumerate().find_map(|(k, &limit)| {
+            let pinned = self.at_limit[k];
+            let per_value_below = self.below_limit[k] as f64 / CLIP_BAND as f64;
+            let fits = self.highest <= i64::from(limit) && self.lowest >= -i64::from(limit) - 1;
+            (fits
+                && pinned >= MIN_CLIPPED_REPORTS
+                && pinned as f64 >= MIN_CLIPPED_SHARE * self.fast_reports as f64
+                && pinned as f64 >= CLIP_PILE_UP * per_value_below)
+                .then_some(Clipping {
+                    limit,
+                    pinned,
+                    fast_reports: self.fast_reports,
+                })
+        })
+    }
 }
 
 /// This many freezes in a session are a fault whatever the stutter rate: a
@@ -200,9 +463,13 @@ pub fn rate_stutters(judged_secs: f64, stutters: usize) -> StutterRating {
 /// report of such movement (see [`MIN_RELATIVE_REPORT_SIZE`]). A judged
 /// interval longer than [`stutter_threshold_ms`]`(median, multiplier)` is a
 /// stutter. Only intervals up to [`MAX_POLL_INTERVAL_MS`] shape the median;
-/// a longer interval is judged only when it is a freeze (see [`is_freeze`]):
-/// otherwise it is the hand stopping or the mouse being lifted. Intervals
-/// over [`MAX_FREEZE_MS`] are not judged.
+/// a longer interval is judged only when it is a freeze (see [`is_freeze`]
+/// and [`is_dropout`]): otherwise it is the hand stopping or the mouse being
+/// lifted. Intervals over [`MAX_FREEZE_MS`] are not judged. When reports
+/// arrive several at a time (see
+/// [`crate::analysis::polling::batched_delivery`]) the median is the
+/// interval between deliveries and the gaps inside a delivery are not
+/// judged.
 #[derive(Debug, Clone)]
 pub struct StutterDetector {
     multiplier: f64,
@@ -229,6 +496,16 @@ pub struct StutterDetector {
     moderate: usize,
     severe: usize,
     freezes: usize,
+    /// Reports around gaps longer than a poll, for [`is_dropout`].
+    gap_edges: GapEdgeTracker,
+    /// Gaps whose four reports were known before the baseline existed:
+    /// (number of the report that ended the gap, edges).
+    pending_gaps: Vec<(usize, GapEdges)>,
+    /// Freezes after which the movement was lost (see [`is_dropout`]).
+    dropouts: usize,
+    /// Reports arriving several at a time, as of the last baseline.
+    batching: Option<Batching>,
+    clip: ClipCheck,
     worst_gap_ms: f64,
     events: VecDeque<StutterEvent>,
 }
@@ -254,6 +531,11 @@ impl StutterDetector {
             moderate: 0,
             severe: 0,
             freezes: 0,
+            gap_edges: GapEdgeTracker::new(),
+            pending_gaps: Vec::new(),
+            dropouts: 0,
+            batching: None,
+            clip: ClipCheck::new(),
             worst_gap_ms: 0.0,
             events: VecDeque::new(),
         }
@@ -269,20 +551,33 @@ impl StutterDetector {
     ///
     /// Returns the interval (ms) since the previous report when it is judged,
     /// or held back to be judged once the baseline exists (a gap longer than
-    /// a poll only once it is judged a freeze); `None` otherwise.
+    /// a poll only once it is judged a freeze); `None` otherwise. A dropout
+    /// (see [`is_dropout`]) is only known one report after the gap: that
+    /// report returns the gap instead of its own interval.
     pub fn feed(&mut self, t: f64, dx: i32, dy: i32) -> Option<f64> {
         if dx == 0 && dy == 0 {
             return None;
         }
+        self.clip.feed(dx, dy);
         let index = self.reports;
         self.reports += 1;
         let (prev_t, pdx, pdy) = self.last.replace((t, dx, dy))?;
         let interval = (t - prev_t) * 1000.0;
-        if !is_saturated_pair((pdx, pdy), (dx, dy)) || interval <= 0.0 || interval > MAX_FREEZE_MS {
+        let saturated = is_saturated_pair((pdx, pdy), (dx, dy));
+        if !(saturated || turned_gap((pdx, pdy), (dx, dy), interval))
+            || interval <= 0.0
+            || interval > MAX_FREEZE_MS
+        {
             return None;
         }
         let size = (dx as f64).hypot(dy as f64);
-        let smaller = (pdx as f64).hypot(pdy as f64).min(size);
+        let prev_size = (pdx as f64).hypot(pdy as f64);
+        let smaller = prev_size.min(size);
+        let gap_done = self.gap_edges.pair(index, interval, prev_size, size);
+        if !saturated {
+            // Only a dropout candidate, judged once the next report is in
+            return None;
+        }
 
         // A longer gap is a pause or a freeze, judged by the size of its
         // reports; it says nothing about the poll period.
@@ -300,10 +595,19 @@ impl StutterDetector {
 
         if self.median_ms.is_none() {
             self.pending.push((index, interval, smaller, size));
+            self.pending_gaps.extend(gap_done);
             if self.pending.len() >= BASELINE_MIN_INTERVALS {
                 self.refresh_baseline();
+                let mut freezes = Vec::new();
                 for (i, ms, smaller, after) in std::mem::take(&mut self.pending) {
-                    self.judge(i, ms, smaller, after);
+                    if self.judge(i, ms, smaller, after) && ms > MAX_POLL_INTERVAL_MS {
+                        freezes.push(i);
+                    }
+                }
+                for (i, edges) in std::mem::take(&mut self.pending_gaps) {
+                    if !freezes.contains(&i) {
+                        self.judge_dropout(i, &edges);
+                    }
                 }
             }
             (interval <= MAX_POLL_INTERVAL_MS).then_some(interval)
@@ -311,17 +615,39 @@ impl StutterDetector {
             if self.since_refresh >= BASELINE_REFRESH {
                 self.refresh_baseline();
             }
-            self.judge(index, interval, smaller, size)
-                .then_some(interval)
+            let dropout = gap_done
+                .filter(|(i, edges)| self.judge_dropout(*i, edges))
+                .map(|(_, edges)| edges.gap_ms);
+            let judged = self.judge(index, interval, smaller, size);
+            dropout.or(judged.then_some(interval))
         }
     }
 
     fn refresh_baseline(&mut self) {
         let mut values: Vec<f64> = self.recent.iter().copied().collect();
-        self.median_ms = median_in_place(&mut values);
+        self.batching = batched_delivery(&values);
+        self.median_ms = match self.batching {
+            Some(b) => Some(b.event_period_ms),
+            None => median_in_place(&mut values),
+        };
         let mut sizes: Vec<f64> = self.recent_sizes.iter().copied().collect();
         self.median_size = median_in_place(&mut sizes);
         self.since_refresh = 0;
+    }
+
+    /// Judge the gap that report `index` ended, once the reports around it
+    /// are known (see [`is_dropout`]). Returns whether it was a dropout.
+    fn judge_dropout(&mut self, index: usize, edges: &GapEdges) -> bool {
+        let (Some(median), Some(median_size)) = (self.median_ms, self.median_size) else {
+            return false;
+        };
+        if !is_dropout(edges, median, median_size) {
+            return false;
+        }
+        self.freezes += 1;
+        self.dropouts += 1;
+        self.record(index, edges.gap_ms, median);
+        true
     }
 
     /// Judge one interval whose smaller report holds `smaller` counts and
@@ -335,12 +661,23 @@ impl StutterDetector {
         if smaller < MIN_RELATIVE_REPORT_SIZE * median_size {
             return false;
         }
+        // Reports delivered together say nothing about the link's timing
+        if self.batching.is_some() && interval <= BATCH_GAP_MS {
+            return false;
+        }
         if interval > MAX_POLL_INTERVAL_MS {
             if !is_freeze(interval, smaller, after, median_size) {
                 return false;
             }
             self.freezes += 1;
+            // Counted once: not again as a dropout
+            self.gap_edges.cancel(index);
         }
+        self.record(index, interval, median)
+    }
+
+    /// Count one judged interval, and the stutter it is if it is late.
+    fn record(&mut self, index: usize, interval: f64, median: f64) -> bool {
         self.judged += 1;
         self.judged_sum_ms += interval;
         self.judged_min_ms = self.judged_min_ms.min(interval);
@@ -394,7 +731,8 @@ impl StutterDetector {
         self.median_ms
     }
 
-    /// Polling rate (Hz) implied by the median interval of fast movement.
+    /// Polling rate (Hz) implied by the median interval of fast movement
+    /// (deliveries per second when reports arrive batched).
     pub fn polling_hz(&self) -> Option<f64> {
         self.median_ms.filter(|&m| m > 0.0).map(|m| 1000.0 / m)
     }
@@ -433,9 +771,27 @@ impl StutterDetector {
     }
 
     /// Freezes: stutters longer than [`MAX_POLL_INTERVAL_MS`] (see
-    /// [`is_freeze`]).
+    /// [`is_freeze`] and [`is_dropout`]).
     pub fn freezes(&self) -> usize {
         self.freezes
+    }
+
+    /// Freezes after which the movement was lost rather than caught up
+    /// (see [`is_dropout`]); included in [`Self::freezes`].
+    pub fn dropouts(&self) -> usize {
+        self.dropouts
+    }
+
+    /// Reports arriving several at a time, one delivery apart (see
+    /// [`crate::analysis::polling::batched_delivery`]); the median interval
+    /// and polling rate are then per delivery.
+    pub fn batching(&self) -> Option<Batching> {
+        self.batching
+    }
+
+    /// Fast reports pinned at the report format's limit (see [`ClipCheck`]).
+    pub fn clipping(&self) -> Option<Clipping> {
+        self.clip.clipping()
     }
 
     /// (minor, moderate, severe) stutter counts.
@@ -1011,6 +1367,259 @@ mod detector_tests {
         assert_eq!(d.rating(), StutterRating::Good);
     }
 
+    /// Like [`simulate`], but polls for which `lost(t)` is true are lost
+    /// with their movement: the mouse discards what it could not send.
+    fn simulate_losing(
+        hz: f64,
+        segs: Vec<Seg>,
+        lost: impl Fn(f64) -> bool,
+        noise_s: f64,
+    ) -> Vec<(f64, i32, i32)> {
+        let (total, pos) = path(segs);
+        let mut rng = Lcg(42);
+        let (mut rx, mut ry) = (0i64, 0i64);
+        let mut out = Vec::new();
+        for k in 1..(total * hz) as usize {
+            let t = k as f64 / hz;
+            let (x, y) = pos(t);
+            let dx = (x - rx as f64).trunc() as i64;
+            let dy = (y - ry as f64).trunc() as i64;
+            rx += dx;
+            ry += dy;
+            if !lost(t) && (dx != 0 || dy != 0) {
+                out.push((t + noise_s * rng.unit(), dx as i32, dy as i32));
+            }
+        }
+        out
+    }
+
+    /// A link that drops out for 150-400 ms every 2 s.
+    fn every_two_seconds(t: f64) -> bool {
+        let k = (t / 2.0).floor();
+        let start = k * 2.0 + 1.0;
+        t > 0.5 && (start..start + 0.15 + 0.05 * (k % 6.0)).contains(&t)
+    }
+
+    #[test]
+    fn dropouts_that_lose_the_movement_are_freezes() {
+        // Brisk circles while the link (or the sensor's tracking) drops out
+        // and the mouse discards the movement: nothing is caught up, but
+        // the reports stop and resume at full speed
+        // About 4 counts a poll
+        for (hz, radius) in [(1000.0, 600.0), (2000.0, 1200.0), (8000.0, 4800.0)] {
+            let reports = simulate_losing(
+                hz,
+                vec![circles(12.0, radius, 1.0)],
+                every_two_seconds,
+                20e-6,
+            );
+            let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+            assert_eq!(d.freezes(), 6, "{} Hz", hz);
+            assert_eq!(d.dropouts(), 6, "{} Hz", hz);
+            assert_eq!(d.rating(), StutterRating::Fair, "{} Hz", hz);
+        }
+        // One is not a fault
+        let one = |t: f64| (5.0..5.3).contains(&t);
+        let d = run(
+            &simulate_losing(1000.0, vec![circles(12.0, 600.0, 1.0)], one, 30e-6),
+            2.0,
+        );
+        assert_eq!((d.freezes(), d.dropouts()), (1, 1));
+        assert_eq!(d.rating(), StutterRating::Good);
+    }
+
+    #[test]
+    fn stops_that_slow_down_and_speed_up_are_not_dropouts() {
+        // 0.12-0.88 s stops from about 0.3-0.5 m/s at 400-26000 DPI, slowing
+        // down and speeding up over 4-30 ms, at 1-8 kHz: the reports either
+        // side of each stop shrink, as a hand's always do
+        let rest = |i: usize| 0.12 + 0.04 * i as f64;
+        let mut candidates = 0;
+        for hz in [1000.0, 2000.0, 4000.0, 8000.0] {
+            // 3 and 20 counts a poll, and 0.5 m/s at 26000 DPI
+            for v in [3.0 * hz, 20.0 * hz, 500_000.0] {
+                for ramp in [0.004, 0.008, 0.03] {
+                    let reports = simulate(hz, stop_and_go_ramp(v, ramp, rest), no_drops, 20e-6);
+                    // Stops with reports of 2+ counts either side
+                    candidates += reports
+                        .windows(2)
+                        .filter(|w| {
+                            turned_gap(
+                                (w[0].1, w[0].2),
+                                (w[1].1, w[1].2),
+                                (w[1].0 - w[0].0) * 1000.0,
+                            )
+                        })
+                        .count();
+                    let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+                    assert_eq!(d.freezes(), 0, "{} Hz, {} counts/s, {} s", hz, v, ramp);
+                    assert_eq!(d.stutter_count(), 0, "{} Hz {} {}", hz, v, ramp);
+                }
+            }
+        }
+        // (mostly at 26000 DPI; with fewer counts the slowing hand sends
+        // 1-count reports, which end the judging at once)
+        assert!(candidates >= 50, "{}", candidates);
+        // At 125-500 Hz a hand can stop within a poll or two, so a stop and a
+        // dropout that loses the movement look alike: neither is judged
+        for hz in [125.0, 250.0, 500.0] {
+            let reports = simulate(hz, stop_and_go_ramp(1500.0, 0.008, rest), no_drops, 30e-6);
+            assert_eq!(run(&reports, 2.0).freezes(), 0, "{} Hz", hz);
+            let lost = simulate_losing(
+                hz,
+                vec![circles(12.0, 400.0, 1.0)],
+                every_two_seconds,
+                30e-6,
+            );
+            assert_eq!(run(&lost, 2.0).freezes(), 0, "{} Hz", hz);
+        }
+    }
+
+    #[test]
+    fn dropouts_before_the_baseline_exists_are_still_judged() {
+        // The link drops the movement 30 ms into the session, before 50
+        // fast intervals exist, and again later
+        let lost = |t: f64| (0.03..0.23).contains(&t) || (5.0..5.25).contains(&t);
+        let reports = simulate_losing(1000.0, vec![circles(8.0, 600.0, 1.0)], lost, 20e-6);
+        let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+        assert_eq!((d.freezes(), d.dropouts()), (2, 2));
+        // A dropout is reported by the report after its gap, once
+        let mut d = StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER);
+        let gaps: Vec<f64> = reports
+            .iter()
+            .filter_map(|&(t, dx, dy)| d.feed(t, dx, dy))
+            .filter(|&ms| ms > MAX_POLL_INTERVAL_MS)
+            .collect();
+        assert_eq!(gaps.len(), 1, "{:?}", gaps);
+        assert!((gaps[0] - 250.0).abs() < 2.0, "{:?}", gaps);
+    }
+
+    #[test]
+    fn a_held_back_freeze_is_not_counted_again_as_a_dropout() {
+        // Fast circles at 1 kHz whose catch-up report is followed by full
+        // reports: both rules match, it is one freeze
+        let drop = |t: f64| (3.0..3.2).contains(&t) || (7.0..7.3).contains(&t);
+        let reports = simulate(1000.0, vec![circles(10.0, 600.0, 1.0)], drop, 20e-6);
+        let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+        assert_eq!((d.freezes(), d.dropouts()), (2, 0));
+        assert_eq!(d.stutter_count(), 2);
+    }
+
+    /// Reports of a Bluetooth mouse sampling every `sample_ms` and served
+    /// every `event_ms`: each connection event delivers the reports made
+    /// since the last one, 0.4 ms apart. Events where `skip(k)` is true are
+    /// missed and their reports go out with the next.
+    fn bluetooth(
+        segs: Vec<Seg>,
+        sample_ms: f64,
+        event_ms: f64,
+        skip: impl Fn(usize) -> bool,
+    ) -> Vec<(f64, i32, i32)> {
+        let made = simulate(1000.0 / sample_ms, segs, no_drops, 0.0);
+        let mut out = Vec::new();
+        let mut next = 0;
+        let mut k = 1;
+        while next < made.len() {
+            let event = k as f64 * event_ms / 1000.0;
+            if !skip(k) {
+                let mut at = event;
+                while next < made.len() && made[next].0 <= event {
+                    out.push((at, made[next].1, made[next].2));
+                    at += 0.0004;
+                    next += 1;
+                }
+            }
+            k += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn bluetooth_batches_are_not_stutters() {
+        // 250 Hz sampling over 7.5-15 ms connection intervals: two to four
+        // reports per event, judged per delivery
+        for event_ms in [7.5, 11.25, 15.0] {
+            let reports = bluetooth(everyday_session(1.0), 4.0, event_ms, |_| false);
+            let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+            assert!(d.batching().is_some(), "{} ms", event_ms);
+            assert_eq!(d.stutter_count(), 0, "{} ms", event_ms);
+            assert_eq!(d.rating(), StutterRating::Excellent, "{} ms", event_ms);
+            let hz = d.polling_hz().unwrap();
+            assert!(
+                (hz - 1000.0 / event_ms).abs() < 2.0,
+                "{} ms: {} Hz",
+                event_ms,
+                hz
+            );
+        }
+        // Missing three connection events in a row, every half second, is
+        // still a stutter on Bluetooth
+        let reports = bluetooth(vec![circles(8.0, 600.0, 1.0)], 4.0, 11.25, |k| k % 45 < 3);
+        let d = run(&reports, DEFAULT_STUTTER_MULTIPLIER);
+        assert!(d.batching().is_some());
+        assert!(d.stutter_count() >= 12, "{}", d.stutter_count());
+    }
+
+    /// `reports` with every axis clamped to +-`limit`, as firmware with
+    /// that report format does when the mouse moves faster.
+    fn clamped(reports: &[(f64, i32, i32)], limit: i32) -> Vec<(f64, i32, i32)> {
+        reports
+            .iter()
+            .map(|&(t, dx, dy)| (t, dx.clamp(-limit, limit), dy.clamp(-limit, limit)))
+            .collect()
+    }
+
+    fn clip_check(reports: &[(f64, i32, i32)]) -> Option<Clipping> {
+        let mut c = ClipCheck::new();
+        for &(_, dx, dy) in reports {
+            c.feed(dx, dy);
+        }
+        c.clipping()
+    }
+
+    #[test]
+    fn reports_pinned_at_the_format_limit_are_clipping() {
+        // Brisk circles at 125 Hz and 1600 DPI peak at about 200 counts a
+        // poll: an 8-bit mouse sends 127 instead
+        let fast = simulate(125.0, vec![circles(8.0, 4000.0, 1.0)], no_drops, 30e-6);
+        let c = clip_check(&clamped(&fast, 127)).expect("clipped");
+        assert_eq!(c.limit, 127);
+        assert!(c.percent() > 20.0, "{:?}", c);
+        // ... the same movement from a 16-bit mouse is not
+        assert_eq!(clip_check(&fast), None);
+        // ... and the stutter rating does not count it
+        let d = run(&clamped(&fast, 127), DEFAULT_STUTTER_MULTIPLIER);
+        assert_eq!(d.clipping().map(|c| c.limit), Some(127));
+        assert_eq!(d.stutter_count(), 0);
+        // 12-bit fields at 26000 DPI
+        let faster = simulate(125.0, vec![circles(8.0, 60_000.0, 1.0)], no_drops, 30e-6);
+        assert_eq!(
+            clip_check(&clamped(&faster, 2047)).map(|c| c.limit),
+            Some(2047)
+        );
+        assert_eq!(clip_check(&faster), None);
+    }
+
+    #[test]
+    fn moving_at_about_the_limit_is_not_clipping() {
+        // Circles whose fastest reports are 120-127 counts on an axis, on a
+        // mouse with 16-bit reports; and everyday movement
+        for radius in [2420.0, 2480.0, 2526.0] {
+            let reports = simulate(125.0, vec![circles(12.0, radius, 1.0)], no_drops, 30e-6);
+            let largest = reports
+                .iter()
+                .map(|r| r.1.abs().max(r.2.abs()))
+                .max()
+                .unwrap();
+            assert!((120..=127).contains(&largest), "{}: {}", radius, largest);
+            assert_eq!(clip_check(&reports), None, "{}", radius);
+        }
+        for hz in [125.0, 1000.0, 8000.0] {
+            let reports = simulate(hz, everyday_session(4.0), no_drops, 20e-6);
+            assert_eq!(clip_check(&reports), None, "{} Hz", hz);
+        }
+    }
+
     #[test]
     fn abrupt_stops_of_a_slow_hand_are_not_freezes() {
         // A slow hand at 125-250 Hz stops within a poll or two (friction
@@ -1031,32 +1640,33 @@ mod detector_tests {
     }
 
     #[test]
-    fn lifting_the_mouse_while_moving_is_not_a_freeze() {
+    fn lifting_the_mouse_while_moving_is_no_catch_up_freeze() {
         // Circling, the mouse is lifted for 150-400 ms every 2 s and set
-        // down still moving: the sensor counts nothing in the air.
-        let lifted = |t: f64| {
-            let k = (t / 2.0).floor();
-            let start = k * 2.0 + 1.0;
-            t > 0.5 && (start..start + 0.15 + 0.05 * (k % 6.0)).contains(&t)
-        };
-        let (_, pos) = path(vec![circles(12.0, 600.0, 1.0)]);
-        let hz = 1000.0;
-        let mut reports = Vec::new();
-        let (mut rx, mut ry) = (0i64, 0i64);
-        for k in 1..(12.0 * hz) as usize {
-            let t = k as f64 / hz;
-            let (x, y) = pos(t);
-            let dx = (x - rx as f64).trunc() as i64;
-            let dy = (y - ry as f64).trunc() as i64;
-            rx += dx;
-            ry += dy;
-            if !lifted(t) && (dx != 0 || dy != 0) {
-                reports.push((t, dx as i32, dy as i32));
+        // down still moving: the sensor counts nothing in the air, so
+        // nothing is held back. At 1 kHz the reports stop and resume at full
+        // speed, which a link dropping out also does and a hand stopping
+        // never does: it is counted as a dropout (the finding names a lift
+        // as a cause). At 125-500 Hz a stop can look the same, and it is
+        // not judged.
+        for (hz, dropouts) in [(125.0, 0), (250.0, 0), (500.0, 0), (1000.0, 6)] {
+            let (_, pos) = path(vec![circles(12.0, 600.0, 1.0)]);
+            let mut reports = Vec::new();
+            let (mut rx, mut ry) = (0i64, 0i64);
+            for k in 1..(12.0 * hz) as usize {
+                let t = k as f64 / hz;
+                let (x, y) = pos(t);
+                let dx = (x - rx as f64).trunc() as i64;
+                let dy = (y - ry as f64).trunc() as i64;
+                rx += dx;
+                ry += dy;
+                if !every_two_seconds(t) && (dx != 0 || dy != 0) {
+                    reports.push((t, dx as i32, dy as i32));
+                }
             }
+            let d = run(&reports, 2.0);
+            assert_eq!(d.freezes(), dropouts, "{} Hz", hz);
+            assert_eq!(d.dropouts(), dropouts, "{} Hz", hz);
         }
-        let d = run(&reports, 2.0);
-        assert_eq!(d.freezes(), 0);
-        assert_eq!(d.stutter_count(), 0);
     }
 
     #[test]
