@@ -9,9 +9,25 @@ use crate::export::{
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
 use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
 use mouse_testkit::analysis::liftoff::{
-    self, counts_to_mm, mm_to_counts, Burst, LiftDetector, LiftTally, LiftVerdict,
+    self, counts_to_mm, mm_to_counts, Burst, LiftDetector, LiftState, LiftTally, LiftVerdict,
     JUMP_THRESHOLD_MM, JUMP_WINDOW_MS, MIN_LIFTS,
 };
+
+/// When the lift-off test is stopped by clicking Stop, motion that ended
+/// this recently (s) was the hand taking the measured mouse to the button,
+/// not a lift (the acceleration test uses the same window). Enter or Esc
+/// stop the test without moving the mouse.
+const LIFTOFF_STOP_TRIP_S: f64 = 0.6;
+
+/// How a lift-off run was stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiftoffStop {
+    /// From the keyboard, or because the mouse went away: the mouse did not
+    /// move to stop it.
+    Key,
+    /// With the Stop button, which the measured mouse moved to.
+    Button,
+}
 
 /// Smallest value in the iterator, or 0.0 when it is empty (so an export
 /// never contains `f64::MAX`).
@@ -242,6 +258,10 @@ pub struct ClickPanel {
     /// Start of the current run; event times are seconds after it, and
     /// events from before it are ignored.
     liftoff_epoch: Instant,
+    /// Bursts that ended less than [`LIFTOFF_STOP_TRIP_S`] ago, kept out of
+    /// `liftoff_tally` until then: if Stop is clicked first, they were the
+    /// trip to the button.
+    liftoff_pending: Vec<Burst>,
 }
 
 impl ClickPanel {
@@ -291,6 +311,7 @@ impl ClickPanel {
             liftoff_tally: LiftTally::default(),
             liftoff_lifts: 0,
             liftoff_epoch: Instant::now(),
+            liftoff_pending: Vec::new(),
         }
     }
 
@@ -884,16 +905,44 @@ impl ClickPanel {
         // mouse has been seen still.
         self.liftoff_detector = LiftDetector::new(self.liftoff_dpi.0).watching_from(0.0);
         self.liftoff_tally = LiftTally::default();
+        self.liftoff_pending.clear();
         self.liftoff_lifts = 0;
         self.liftoff_epoch = Instant::now();
         self.liftoff_running = true;
     }
 
-    /// End the run; motion still under way is judged as it stands, as in
-    /// the CLI test.
+    /// Seconds from the start of the run to `t`.
+    fn liftoff_secs(&self, t: Instant) -> f64 {
+        t.saturating_duration_since(self.liftoff_epoch)
+            .as_secs_f64()
+    }
+
+    /// End the run from the keyboard (or because the mouse went away);
+    /// motion still under way is judged as it stands, as in the CLI test.
     fn stop_liftoff(&mut self) {
-        let burst = self.liftoff_detector.flush();
-        self.record_liftoff(burst);
+        self.stop_liftoff_at(Instant::now(), LiftoffStop::Key);
+    }
+
+    /// End the run at `now`. Clicking Stop moved the measured mouse: the
+    /// motion under way, and any that ended within [`LIFTOFF_STOP_TRIP_S`],
+    /// was that trip and is not judged.
+    fn stop_liftoff_at(&mut self, now: Instant, by: LiftoffStop) {
+        let open = self.liftoff_detector.flush();
+        let pending = std::mem::take(&mut self.liftoff_pending);
+        let dpi = self.liftoff_dpi.0;
+        match by {
+            LiftoffStop::Key => {
+                for burst in pending.iter().chain(&open) {
+                    self.liftoff_tally.record(burst, dpi);
+                }
+            }
+            LiftoffStop::Button => {
+                let trip_from = self.liftoff_secs(now) - LIFTOFF_STOP_TRIP_S;
+                for burst in pending.iter().filter(|b| b.end_s < trip_from) {
+                    self.liftoff_tally.record(burst, dpi);
+                }
+            }
+        }
         self.liftoff_running = false;
     }
 
@@ -901,13 +950,13 @@ impl ClickPanel {
         self.liftoff_running = false;
         self.liftoff_detector = LiftDetector::new(self.liftoff_dpi.0);
         self.liftoff_tally = LiftTally::default();
+        self.liftoff_pending.clear();
         self.liftoff_lifts = 0;
     }
 
+    /// Hold a finished burst back until it is [`LIFTOFF_STOP_TRIP_S`] old.
     fn record_liftoff(&mut self, burst: Option<Burst>) {
-        if let Some(burst) = burst {
-            self.liftoff_tally.record(&burst, self.liftoff_dpi.0);
-        }
+        self.liftoff_pending.extend(burst);
     }
 
     /// Feed raw motion reports (from the bridge) and advance to `now`.
@@ -923,16 +972,43 @@ impl ClickPanel {
                 self.record_liftoff(burst);
             }
         }
-        let burst = self.liftoff_detector.tick(secs(now.max(epoch)));
+        let now_s = secs(now.max(epoch));
+        let burst = self.liftoff_detector.tick(now_s);
         self.record_liftoff(burst);
+        // Bursts old enough that a Stop click now cannot be their trip.
+        let pending = std::mem::take(&mut self.liftoff_pending);
+        let (settled, recent): (Vec<Burst>, Vec<Burst>) = pending
+            .into_iter()
+            .partition(|b| b.end_s < now_s - LIFTOFF_STOP_TRIP_S);
+        for burst in &settled {
+            self.liftoff_tally.record(burst, self.liftoff_dpi.0);
+        }
+        self.liftoff_pending = recent;
+    }
+
+    /// The totals so far, with the bursts still held back counted in.
+    fn liftoff_view(&self) -> LiftTally {
+        let mut tally = self.liftoff_tally.clone();
+        for burst in &self.liftoff_pending {
+            tally.record(burst, self.liftoff_dpi.0);
+        }
+        tally
     }
 
     fn liftoff_verdict(&self) -> LiftVerdict {
-        liftoff::verdict(
-            self.liftoff_tally.jumps.len(),
-            self.liftoff_lifts,
-            MIN_LIFTS,
-        )
+        self.liftoff_view().verdict(self.liftoff_lifts, MIN_LIFTS)
+    }
+
+    /// What the status cell shows.
+    fn liftoff_status(&self) -> &'static str {
+        if !self.liftoff_running {
+            return "Stopped";
+        }
+        match self.liftoff_detector.state() {
+            LiftState::Settling => "Waiting for the mouse to be still",
+            LiftState::Still => "Still",
+            LiftState::Moving => "Moving",
+        }
     }
 
     pub fn ui_liftoff(
@@ -943,11 +1019,19 @@ impl ClickPanel {
         has_bridge: bool,
     ) {
         // Input first, before any button is drawn: SPACE is consumed so it
-        // cannot "click" a focused button such as Stop.
+        // cannot "click" a focused button such as Stop. Enter or Esc stop the
+        // test without moving the mouse, so the last lift still counts.
         if self.liftoff_running {
             if has_bridge {
+                let stop_key = ctx.input_mut(|i| {
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        | i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                });
                 self.liftoff_lifts += take_space_presses(ctx);
                 self.feed_liftoff(raw_events, Instant::now());
+                if stop_key {
+                    self.stop_liftoff();
+                }
             } else {
                 // The measured mouse went away: keep what was measured.
                 self.stop_liftoff();
@@ -988,7 +1072,7 @@ impl ClickPanel {
         ui.horizontal(|ui| {
             if self.liftoff_running {
                 if ui.button("Stop").clicked() {
-                    self.stop_liftoff();
+                    self.stop_liftoff_at(Instant::now(), LiftoffStop::Button);
                 }
             } else if ui
                 .add_enabled(has_bridge, egui::Button::new("Start"))
@@ -1005,8 +1089,9 @@ impl ClickPanel {
         ui.add_space(20.0);
 
         // Stats
-        let tally = &self.liftoff_tally;
+        let tally = &self.liftoff_view();
         let jumps = tally.jumps.len();
+        let possible = tally.possible.len();
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
             .corner_radius(8.0)
@@ -1022,9 +1107,9 @@ impl ClickPanel {
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Jumps Detected");
-                        let color = match jumps {
-                            0 => egui::Color32::WHITE,
-                            1 => egui::Color32::YELLOW,
+                        let color = match (jumps, jumps + possible) {
+                            (_, 0) => egui::Color32::WHITE,
+                            (0 | 1, _) => egui::Color32::YELLOW,
                             _ => egui::Color32::RED,
                         };
                         ui.label(
@@ -1032,6 +1117,12 @@ impl ClickPanel {
                                 .size(24.0)
                                 .color(color),
                         );
+                        if possible > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("+{} possible", possible))
+                                    .color(egui::Color32::YELLOW),
+                            );
+                        }
                     });
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
@@ -1048,18 +1139,21 @@ impl ClickPanel {
                     ui.vertical(|ui| {
                         ui.label("Slides ignored");
                         ui.label(egui::RichText::new(format!("{}", tally.slides)).size(20.0));
+                        if tally.nudges > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("+{} hand nudges", tally.nudges))
+                                    .weak(),
+                            );
+                        }
                     });
                     ui.add_space(40.0);
                     ui.vertical(|ui| {
                         ui.label("Status");
-                        let status = if !self.liftoff_running {
-                            "Stopped"
-                        } else if self.liftoff_detector.in_burst() {
-                            "Moving"
-                        } else {
-                            "Still"
-                        };
-                        ui.label(egui::RichText::new(status).size(20.0));
+                        // The long "waiting" text in a smaller size
+                        let settling = self.liftoff_running
+                            && self.liftoff_detector.state() == LiftState::Settling;
+                        let size = if settling { 14.0 } else { 20.0 };
+                        ui.label(egui::RichText::new(self.liftoff_status()).size(size));
                     });
                 });
             });
@@ -1072,7 +1166,17 @@ impl ClickPanel {
                 LiftVerdict::Jumps => (
                     "Cursor jumps on lift",
                     egui::Color32::RED,
-                    "The cursor jumps when the mouse is lifted or set down. Lower the lift-off distance (LOD) in the mouse software, or try a plainer surface.".to_string(),
+                    "The cursor jumps when the mouse is lifted or set down, too abruptly for the hand to have moved it. Lower the lift-off distance (LOD) in the mouse software, or try a plainer surface.".to_string(),
+                ),
+                LiftVerdict::PossibleJumps => (
+                    "Possible jumps",
+                    egui::Color32::YELLOW,
+                    format!(
+                        "{} movements carried the cursor more than {:.1} mm, but {} of them started or stopped gently enough to be the hand - for example the mouse landing while it still slid sideways, or a mouse reporting too rarely to show how it moved. Set the mouse straight down without sliding it and repeat the test: if they come back, the lift-off distance (LOD) is likely too high.",
+                        jumps + possible,
+                        JUMP_THRESHOLD_MM,
+                        possible
+                    ),
                 ),
                 LiftVerdict::OneJump => (
                     "One jump",
@@ -1103,7 +1207,7 @@ impl ClickPanel {
                     ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
                     ui.add_space(5.0);
                     ui.label(message);
-                    if dpi_assumed && jumps > 0 {
+                    if dpi_assumed && jumps + possible > 0 {
                         // At a higher DPI the same counts are a shorter
                         // distance: 2 mm at 800 DPI is 0.5 mm at 3200.
                         ui.add_space(5.0);
@@ -1125,12 +1229,22 @@ impl ClickPanel {
                             .weak(),
                         );
                     }
+                    if tally.nudges > 0 {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} movement(s) sped up and slowed down smoothly, as the hand moves the mouse, and were not judged.",
+                                tally.nudges
+                            ))
+                            .weak(),
+                        );
+                    }
                 });
             ui.add_space(10.0);
         }
 
         // Jump history
-        if !tally.jumps.is_empty() {
+        if tally.jump_sized_count() > 0 {
             egui::Frame::dark_canvas(ui.style())
                 .inner_margin(15.0)
                 .corner_radius(8.0)
@@ -1148,14 +1262,25 @@ impl ClickPanel {
                         ));
                     });
                     ui.collapsing("All jumps", |ui| {
-                        for (i, jump) in tally.jumps.iter().enumerate() {
+                        let all = tally
+                            .jumps
+                            .iter()
+                            .map(|j| (j, "too abrupt for a hand"))
+                            .chain(
+                                tally
+                                    .possible
+                                    .iter()
+                                    .map(|j| (j, "possible: could be the hand")),
+                            );
+                        for (i, (jump, kind)) in all.enumerate() {
                             ui.label(format!(
-                                "#{}: {:.1} mm (dx {:+}, dy {:+} counts) within {:.0} ms",
+                                "#{}: {:.1} mm (dx {:+}, dy {:+} counts) within {:.0} ms - {}",
                                 i + 1,
                                 counts_to_mm(jump.peak_counts, dpi),
                                 jump.peak_dx,
                                 jump.peak_dy,
-                                jump.peak_ms
+                                jump.peak_ms,
+                                kind
                             ));
                         }
                     });
@@ -1175,13 +1300,20 @@ impl ClickPanel {
                 ui.label("2. Lift it straight up about 1 cm, hold it there a moment, then set it straight back down - try not to slide it");
                 ui.label("3. Press SPACE (with your other hand) after each lift and set-down, so the test knows how many lifts you made");
                 ui.label(format!(
-                    "4. Wait about a second and repeat - at least {} times - then click Stop",
+                    "4. Wait about a second and repeat - at least {} times - then press Enter (or click Stop)",
                     MIN_LIFTS
                 ));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Enter or Esc stop the test without moving the mouse. Clicking Stop does move it, so motion in the last {:.1} s before the click is taken as the trip to the button and not judged.",
+                        LIFTOFF_STOP_TRIP_S
+                    ))
+                    .weak(),
+                );
                 ui.add_space(5.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "A jump: motion that starts from stillness and carries the cursor more than {:.1} mm ({:.0} counts at {:.0} DPI) within {:.0} ms. Longer sliding movements are not judged.",
+                        "Jump-sized: motion that starts from stillness and carries the cursor more than {:.1} mm ({:.0} counts at {:.0} DPI) within {:.0} ms. Longer sliding movements are not judged, nor are movements that speed up and slow down smoothly as the hand moves the mouse. One that starts and stops too abruptly for a hand is a jump; one that could also be the hand (for example the mouse landing while it still slid sideways) is a possible jump.",
                         JUMP_THRESHOLD_MM,
                         mm_to_counts(JUMP_THRESHOLD_MM, dpi),
                         dpi,
@@ -1193,7 +1325,7 @@ impl ClickPanel {
     }
 
     fn has_liftoff_data(&self) -> bool {
-        self.liftoff_lifts > 0 || self.liftoff_tally.bursts() > 0
+        self.liftoff_lifts > 0 || self.liftoff_tally.bursts() + self.liftoff_pending.len() > 0
     }
 
     pub fn export_response(&self) -> Option<ClickResponseExport> {
@@ -1284,10 +1416,12 @@ impl ClickPanel {
             return None;
         }
         let (dpi, dpi_assumed) = self.liftoff_dpi;
-        let tally = &self.liftoff_tally;
-        let counts: Vec<f64> = tally.jumps.iter().map(|j| j.peak_counts).collect();
+        let tally = &self.liftoff_view();
+        // Jumps and possible jumps; the verdict says whether any could have
+        // been the hand.
+        let counts: Vec<f64> = tally.jump_sized().map(|j| j.peak_counts).collect();
         Some(LiftOffExport {
-            jump_count: tally.jumps.len(),
+            jump_count: tally.jump_sized_count(),
             avg_distance_px: tally.avg_jump_counts(),
             max_distance_px: tally.max_jump_counts(),
             jump_distances_mm: counts.iter().map(|&c| counts_to_mm(c, dpi)).collect(),
@@ -1664,6 +1798,8 @@ mod tests {
         let mut events = reports(t0, 500, 20, 1, 10, 0);
         events.extend(reports(t0, 1500, 20, 1, 0, -10));
         liftoff_frame(&mut panel, &events, true, true);
+        // Frames go on until the second set-down has been still a while.
+        panel.feed_liftoff(&[], t0 + Duration::from_millis(3000));
         panel.stop_liftoff();
         assert_eq!(panel.liftoff_tally.jumps.len(), 2);
         assert_eq!(panel.liftoff_verdict(), LiftVerdict::Jumps);
@@ -1753,6 +1889,176 @@ mod tests {
         liftoff_frame(&mut panel, &[], true, false);
         assert!(!panel.liftoff_running);
         assert_eq!(panel.liftoff_lifts, 1);
+    }
+
+    /// One frame of the lift-off panel with `keys` pressed and released.
+    fn liftoff_frame_keys(panel: &mut ClickPanel, keys: &[egui::Key]) {
+        let ctx = egui::Context::default();
+        let events = keys
+            .iter()
+            .flat_map(|&key| {
+                [true, false].map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+            })
+            .collect();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_liftoff(ui, &ctx, &[], true);
+        });
+    }
+
+    #[test]
+    fn liftoff_stop_button_does_not_count_the_trip_to_it() {
+        // A set-down jump, then the hand takes the mouse to the Stop button:
+        // a quick 3 mm move that ends 0.3 s before the click (and that a
+        // stray count after it has already closed), and a last correction
+        // still under way at the click. Neither is a lift.
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut events = reports(t0, 500, 10, 1, 10, 0);
+        events.extend(reports(t0, 1690, 10, 1, -10, 0));
+        events.extend(reports(t0, 1900, 1, 1, 1, 0));
+        events.extend(reports(t0, 1990, 6, 1, 0, 12));
+        liftoff_frame(&mut panel, &events, false, true);
+        assert_eq!(panel.liftoff_view().jumps.len(), 2);
+        panel.stop_liftoff_at(t0 + Duration::from_millis(2000), LiftoffStop::Button);
+        assert_eq!(
+            panel.liftoff_tally.jumps.len(),
+            1,
+            "{:?}",
+            panel.liftoff_tally
+        );
+        assert_eq!(panel.liftoff_tally.jumps[0].peak_dx, 100);
+        assert!(panel.liftoff_pending.is_empty());
+
+        // Stopped from the keyboard the mouse did not move: all of it counts,
+        // the motion under way included (judged as it stands, which without
+        // its stop makes it a possible jump at most).
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut shifted = events.clone();
+        for e in &mut shifted {
+            e.timestamp =
+                t0 + e.timestamp.duration_since(events[0].timestamp) + Duration::from_millis(500);
+        }
+        liftoff_frame(&mut panel, &shifted, false, true);
+        panel.stop_liftoff_at(t0 + Duration::from_millis(2000), LiftoffStop::Key);
+        let tally = &panel.liftoff_tally;
+        assert_eq!(
+            (tally.jumps.len(), tally.possible.len()),
+            (2, 1),
+            "{:?}",
+            tally
+        );
+    }
+
+    #[test]
+    fn liftoff_enter_or_esc_stops_without_the_mouse() {
+        for key in [egui::Key::Enter, egui::Key::Escape] {
+            let mut panel = ClickPanel::new();
+            panel.start_liftoff();
+            let t0 = panel.liftoff_epoch;
+            // A jump still under way when the key is pressed is kept.
+            panel.feed_liftoff(
+                &reports(t0, 500, 10, 1, 10, 0),
+                t0 + Duration::from_millis(505),
+            );
+            assert!(panel.liftoff_detector.in_burst());
+            liftoff_frame_keys(&mut panel, &[key]);
+            assert!(!panel.liftoff_running, "{:?}", key);
+            assert_eq!(panel.liftoff_tally.jump_sized_count(), 1);
+        }
+        // Not a stop key while stopped (Enter could start a test again).
+        let mut panel = ClickPanel::new();
+        liftoff_frame_keys(&mut panel, &[egui::Key::Enter]);
+        assert!(!panel.liftoff_running);
+    }
+
+    #[test]
+    fn liftoff_status_says_when_it_waits_for_stillness() {
+        let mut panel = ClickPanel::new();
+        assert_eq!(panel.liftoff_status(), "Stopped");
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        // Still moving from the click on Start: nothing is judged yet, and
+        // the panel says so rather than "Still".
+        panel.feed_liftoff(
+            &reports(t0, 10, 30, 2, 4, 0),
+            t0 + Duration::from_millis(70),
+        );
+        assert_eq!(panel.liftoff_status(), "Waiting for the mouse to be still");
+        assert!(panel.liftoff_view().bursts() == 0);
+        // A whole idle window without motion.
+        panel.feed_liftoff(&[], t0 + Duration::from_millis(200));
+        assert_eq!(panel.liftoff_status(), "Still");
+        panel.feed_liftoff(
+            &reports(t0, 300, 3, 1, 20, 0),
+            t0 + Duration::from_millis(303),
+        );
+        assert_eq!(panel.liftoff_status(), "Moving");
+        // It renders with every status.
+        liftoff_frame(&mut panel, &[], false, true);
+    }
+
+    #[test]
+    fn liftoff_hand_nudges_and_possible_jumps_are_told_apart() {
+        // 800 DPI, 1000 Hz. Two smooth 3 mm hand nudges are not judged;
+        // two set-downs that land sliding (full speed at once, then slowing)
+        // could be the hand: possible jumps, not "cursor jumps on lift".
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let f = |tau: f64| 10.0 * tau.powi(3) - 15.0 * tau.powi(4) + 6.0 * tau.powi(5);
+        let mut events = Vec::new();
+        for k in 0..2u64 {
+            let (mut carried, mut last) = (0.0, 0.0);
+            for ms in 1..=60u64 {
+                let x = 3.0 * f(ms as f64 / 60.0);
+                carried += mm_to_counts(x - last, 800.0);
+                last = x;
+                if carried >= 1.0 {
+                    let dx = carried.trunc();
+                    carried -= dx;
+                    events.extend(reports(t0, 500 + k * 1000 + ms, 1, 1, dx as i32, 0));
+                }
+            }
+        }
+        for k in 0..2u64 {
+            for (i, dx) in [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 2, 1, 1, 1]
+                .into_iter()
+                .enumerate()
+            {
+                events.extend(reports(t0, 3000 + k * 1000 + i as u64, 1, 1, dx, 0));
+            }
+        }
+        for _ in 0..MIN_LIFTS {
+            liftoff_frame(&mut panel, &[], true, true);
+        }
+        liftoff_frame(&mut panel, &events, false, true);
+        panel.stop_liftoff();
+        let tally = &panel.liftoff_tally;
+        assert_eq!(
+            (tally.nudges, tally.possible.len(), tally.jumps.len()),
+            (2, 2, 0),
+            "{:?}",
+            tally
+        );
+        assert_eq!(panel.liftoff_verdict(), LiftVerdict::PossibleJumps);
+        let export = panel.export_liftoff().unwrap();
+        assert_eq!(export.jump_count, 2);
+        assert_eq!(export.verdict, "Possible jumps - repeat the test");
+        liftoff_frame(&mut panel, &[], false, true);
     }
 
     #[test]
