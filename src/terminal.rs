@@ -135,19 +135,41 @@ pub fn confirm_device_moves(prompt: &str, mut fetch: impl FnMut() -> Vec<TimedEv
 
 /// RAII guard that enables raw terminal mode on creation and disables it on drop.
 /// Guarantees terminal state cleanup even if a test panics.
+///
+/// On Windows it also takes the console's mouse input for the program while
+/// it lives. Raw Input does not keep the tested mouse's clicks from the
+/// window under the pointer, which is usually this console: otherwise a
+/// right-click pastes the clipboard into the test's key input (a 'q' in it
+/// ends the test) and a left click starts a QuickEdit selection that pauses
+/// the program's output. With mouse input enabled those clicks arrive as
+/// mouse events, which the tests ignore.
 pub struct TerminalGuard {
     raw_mode_enabled: bool,
+    #[cfg(target_os = "windows")]
+    mouse_captured: bool,
 }
 
 impl TerminalGuard {
     pub fn new() -> Self {
         let raw_mode_enabled = enable_raw_mode();
-        Self { raw_mode_enabled }
+        #[cfg(target_os = "windows")]
+        let mouse_captured =
+            crossterm::execute!(io::stdout(), crossterm::event::EnableMouseCapture).is_ok();
+        Self {
+            raw_mode_enabled,
+            #[cfg(target_os = "windows")]
+            mouse_captured,
+        }
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        // In reverse order: mouse capture restores the raw-mode console mode
+        #[cfg(target_os = "windows")]
+        if self.mouse_captured {
+            crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture).ok();
+        }
         if self.raw_mode_enabled {
             disable_raw_mode();
         }
