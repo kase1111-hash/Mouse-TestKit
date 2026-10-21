@@ -39,9 +39,9 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 
 | Specification | Description |
 |---------------|-------------|
-| Function | Shows other devices connected to the same USB controller/hub |
-| Purpose | Identify potential bandwidth conflicts |
-| Use Case | Diagnosing performance issues caused by USB bus contention |
+| Function | Shows each mouse's USB bus, hubs, link speed and what shares the bus (device types from interface descriptors) |
+| Purpose | Explain polling limits (low speed: about 125 Hz) and flag a mouse sharing a 12 Mbit/s hub with audio, video or storage devices; sharing a bus is reported as information |
+| Use Case | Checking how a mouse is connected when other tests show low polling or stutter |
 
 ### 4. Click Response Test
 
@@ -116,9 +116,9 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 
 | Specification | Description |
 |---------------|-------------|
-| Function | Tests scroll wheel functionality and consistency |
-| Measurement | Step count, speed, direction changes |
-| Detection | Identifies missed scroll steps and inconsistent behavior |
+| Function | Counts wheel notches and checks for encoder faults |
+| Measurement | Notch count each way, speed (not rated), direction changes |
+| Detection | Notches reversed within 60 ms of the previous one (skipping), a direction that never registers; lost notches are checked by the user counting detents |
 | Availability | GUI only |
 | Use Case | Validating scroll wheel reliability and encoder quality |
 

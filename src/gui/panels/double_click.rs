@@ -6,13 +6,18 @@
 use eframe::egui;
 use std::time::Instant;
 
+use crate::config::DOUBLE_CLICK_THRESHOLD_RANGE;
 use crate::export::DoubleClickExport;
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
 
 /// A press this soon after the previous release of the button is switch
 /// bounce (the contact re-closing as it opens), whatever the press-to-press
 /// threshold is set to. A finger cannot release and press again this fast.
-const RELEASE_BOUNCE_GAP_MS: f64 = 25.0;
+/// Auto Diagnostics' `bounce_gap_ms` (25 ms), so both tests agree.
+fn release_bounce_gap_ms() -> f64 {
+    DiagConfig::default().bounce_gap_ms
+}
 
 /// Panel for testing double-click behavior and switch health.
 ///
@@ -51,8 +56,8 @@ impl DoubleClickPanel {
             max_interval: 0.0,
             double_click_count: 0,
             accidental_double_clicks: 0,
-            threshold_ms: 50.0,
-            last_saved_threshold: 50.0,
+            threshold_ms: DiagConfig::default().bounce_threshold_ms,
+            last_saved_threshold: DiagConfig::default().bounce_threshold_ms,
         }
     }
 
@@ -122,7 +127,7 @@ impl DoubleClickPanel {
             ui.label("Accidental double-click threshold:");
             ui.add(
                 egui::DragValue::new(&mut self.threshold_ms)
-                    .range(10.0..=100.0)
+                    .range(DOUBLE_CLICK_THRESHOLD_RANGE)
                     .speed(1.0)
                     .suffix(" ms"),
             );
@@ -394,7 +399,7 @@ impl DoubleClickPanel {
                 .last_release
                 .map(|r| now.duration_since(r).as_secs_f64() * 1000.0);
             let accidental = interval < self.threshold_ms
-                || release_gap_ms.is_some_and(|g| g < RELEASE_BOUNCE_GAP_MS);
+                || release_gap_ms.is_some_and(|g| g < release_bounce_gap_ms());
 
             if accidental {
                 self.accidental_double_clicks += 1;

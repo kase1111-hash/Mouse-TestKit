@@ -6,6 +6,7 @@ use crate::export::{
     ClickButtonExport, ClickResponseExport, ClickStickyExport, LiftOffExport, StickyButtonExport,
 };
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
 
 /// Jump threshold in pixels - movements larger than this after idle are considered jumps
 const JUMP_THRESHOLD_PX: f64 = 15.0;
@@ -20,6 +21,54 @@ fn min_or_zero(values: impl Iterator<Item = f64>) -> f64 {
             Some(acc.map_or(v, |a| a.min(v)))
         })
         .unwrap_or(0.0)
+}
+
+/// What the stickiness test says about one button. Uses the Auto
+/// Diagnostics thresholds so the GUI, CLI and Auto Diagnostics agree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StickyVerdict {
+    /// The button has been down longer than any click lasts.
+    HeldDown { held_ms: f64 },
+    /// Fewer clicks than needed to judge.
+    NeedMoreClicks { need: usize },
+    /// Two or more long holds: the switch may be releasing late.
+    SlowReleases { count: usize, longest_ms: f64 },
+    /// A single long hold: usually the hand, not the switch.
+    OneLongHold { held_ms: f64 },
+    /// No click held past the threshold.
+    NoSlowReleases,
+}
+
+/// Judge one button from its completed hold times and, if it is down right
+/// now, how long it has been held. A deliberate click is held about
+/// 80-150 ms, so only holds past `sticky_threshold_ms` (250 ms) count, and
+/// one long hold is not enough: anyone can linger on a click once.
+fn sticky_verdict(
+    holds_ms: &[f64],
+    current_hold_ms: Option<f64>,
+    cfg: &DiagConfig,
+) -> StickyVerdict {
+    if let Some(held_ms) = current_hold_ms.filter(|&h| h > cfg.stuck_threshold_ms) {
+        return StickyVerdict::HeldDown { held_ms };
+    }
+    if holds_ms.len() < cfg.clicks_min_left {
+        return StickyVerdict::NeedMoreClicks {
+            need: cfg.clicks_min_left,
+        };
+    }
+    let long: Vec<f64> = holds_ms
+        .iter()
+        .copied()
+        .filter(|&h| h > cfg.sticky_threshold_ms)
+        .collect();
+    let longest_ms = long.iter().copied().fold(0.0, f64::max);
+    match long.len() {
+        0 => StickyVerdict::NoSlowReleases,
+        1 => StickyVerdict::OneLongHold {
+            held_ms: longest_ms,
+        },
+        count => StickyVerdict::SlowReleases { count, longest_ms },
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -128,7 +177,13 @@ impl ClickPanel {
     ) {
         ui.heading("Click Test");
         ui.add_space(5.0);
-        ui.label("Tests mouse button response - measures click registration and hold duration.");
+        ui.label("Counts clicks and measures how long each press is held.");
+        ui.label(
+            egui::RichText::new(
+                "Click latency (the delay inside the mouse) is not measured: that needs external hardware.",
+            )
+            .weak(),
+        );
         ui.add_space(15.0);
 
         // Button selector
@@ -474,9 +529,15 @@ impl ClickPanel {
         raw_events: &[RawInputEvent],
         has_bridge: bool,
     ) {
+        let cfg = DiagConfig::default();
+        let sticky_ms = cfg.sticky_threshold_ms;
+
         ui.heading("Click Stickiness Test");
         ui.add_space(5.0);
-        ui.label("Tests for stuck or delayed click releases. Long holds (>100ms) may indicate sticky switches.");
+        ui.label(format!(
+            "Tests for slow or stuck click releases. Clicks held longer than {:.0} ms are counted; it takes two or more to suggest a sticky switch.",
+            sticky_ms
+        ));
         ui.add_space(15.0);
 
         // Button selector
@@ -569,10 +630,27 @@ impl ClickPanel {
         ui.add_space(20.0);
 
         // Stats - show for selected button
-        let (holds, sticky_count) = match self.sticky_button {
-            TestButton::Left => (&self.sticky_holds, self.sticky_count),
-            TestButton::Right => (&self.sticky_right_holds, self.sticky_right_count),
+        let (holds, sticky_count, press_start) = match self.sticky_button {
+            TestButton::Left => (
+                &self.sticky_holds,
+                self.sticky_count,
+                self.sticky_press_start,
+            ),
+            TestButton::Right => (
+                &self.sticky_right_holds,
+                self.sticky_right_count,
+                self.sticky_right_press_start,
+            ),
         };
+        let current_hold_ms = press_start.filter(|_| is_pressed).map(|start| {
+            Instant::now()
+                .saturating_duration_since(start)
+                .as_secs_f64()
+                * 1000.0
+        });
+        let verdict = sticky_verdict(holds, current_hold_ms, &cfg);
+        let slow = matches!(verdict, StickyVerdict::SlowReleases { .. });
+        let warn_color = egui::Color32::ORANGE;
 
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(15.0)
@@ -589,11 +667,11 @@ impl ClickPanel {
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
-                        ui.label("Sticky (>100ms)");
-                        let color = if sticky_count == 0 {
-                            egui::Color32::GREEN
-                        } else {
-                            egui::Color32::RED
+                        ui.label(format!("Long holds (>{:.0} ms)", sticky_ms));
+                        let color = match sticky_count {
+                            0 => egui::Color32::GREEN,
+                            1 => egui::Color32::WHITE,
+                            _ => warn_color,
                         };
                         ui.label(
                             egui::RichText::new(format!("{}", sticky_count))
@@ -615,10 +693,10 @@ impl ClickPanel {
                     ui.vertical(|ui| {
                         ui.label("Max Hold");
                         let max = holds.iter().cloned().fold(0.0, f64::max);
-                        let color = if max > 100.0 {
-                            egui::Color32::RED
+                        let color = if slow {
+                            warn_color
                         } else {
-                            egui::Color32::GREEN
+                            egui::Color32::WHITE
                         };
                         ui.label(
                             egui::RichText::new(format!("{:.1} ms", max))
@@ -627,6 +705,66 @@ impl ClickPanel {
                         );
                     });
                 });
+            });
+
+        ui.add_space(10.0);
+
+        // Verdict for the selected button
+        let (title, color, message) = match verdict {
+            StickyVerdict::HeldDown { held_ms } => (
+                "Button held down",
+                egui::Color32::YELLOW,
+                format!(
+                    "The {} button has been down for {:.1} s. If you are not pressing it, the switch is stuck.",
+                    button_name.to_lowercase(),
+                    held_ms / 1000.0
+                ),
+            ),
+            StickyVerdict::NeedMoreClicks { need } => (
+                "Keep clicking",
+                egui::Color32::LIGHT_GRAY,
+                format!(
+                    "Click quickly at least {} times to check the releases ({} so far).",
+                    need,
+                    holds.len()
+                ),
+            ),
+            StickyVerdict::SlowReleases { count, longest_ms } => (
+                "Slow or sticky releases",
+                warn_color,
+                format!(
+                    "{} of {} clicks were held longer than {:.0} ms (longest {:.0} ms). If you were clicking quickly and not holding the button, the switch is releasing late.",
+                    count,
+                    holds.len(),
+                    sticky_ms,
+                    longest_ms
+                ),
+            ),
+            StickyVerdict::OneLongHold { held_ms } => (
+                "One long click",
+                egui::Color32::WHITE,
+                format!(
+                    "One click was held for {:.0} ms. A single long hold is usually the hand, not the switch.",
+                    held_ms
+                ),
+            ),
+            StickyVerdict::NoSlowReleases => (
+                "No slow releases",
+                egui::Color32::GREEN,
+                format!(
+                    "None of {} clicks was held longer than {:.0} ms.",
+                    holds.len(),
+                    sticky_ms
+                ),
+            ),
+        };
+        egui::Frame::dark_canvas(ui.style())
+            .inner_margin(15.0)
+            .corner_radius(8.0)
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
+                ui.add_space(5.0);
+                ui.label(message);
             });
 
         // Capture real mouse button input
@@ -654,7 +792,7 @@ impl ClickPanel {
                                             * 1000.0;
                                     self.sticky_holds.push(hold_ms);
 
-                                    if hold_ms > 100.0 {
+                                    if hold_ms > sticky_ms {
                                         self.sticky_count += 1;
                                     }
                                 }
@@ -678,7 +816,7 @@ impl ClickPanel {
                                     event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
                                 self.sticky_right_holds.push(hold_ms);
 
-                                if hold_ms > 100.0 {
+                                if hold_ms > sticky_ms {
                                     self.sticky_right_count += 1;
                                 }
                             }
@@ -712,7 +850,7 @@ impl ClickPanel {
                         let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
                         self.sticky_holds.push(hold_ms);
 
-                        if hold_ms > 100.0 {
+                        if hold_ms > sticky_ms {
                             self.sticky_count += 1;
                         }
                     }
@@ -732,7 +870,7 @@ impl ClickPanel {
                         let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
                         self.sticky_right_holds.push(hold_ms);
 
-                        if hold_ms > 100.0 {
+                        if hold_ms > sticky_ms {
                             self.sticky_right_count += 1;
                         }
                     }
@@ -1034,5 +1172,113 @@ impl ClickPanel {
             max_distance_px: max,
             jump_distances: self.liftoff_jump_events.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Run the stickiness panel over left clicks with the given hold times
+    /// (ms), 300 ms apart, through the raw-input path.
+    fn sticky_panel_with_holds(holds_ms: &[u64]) -> ClickPanel {
+        let ctx = egui::Context::default();
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        let mut t = Instant::now();
+        let mut events = Vec::new();
+        for &hold in holds_ms {
+            events.push(RawInputEvent {
+                kind: RawInputKind::ButtonPress(RawButton::Left),
+                timestamp: t,
+            });
+            events.push(RawInputEvent {
+                kind: RawInputKind::ButtonRelease(RawButton::Left),
+                timestamp: t + Duration::from_millis(hold),
+            });
+            t += Duration::from_millis(hold + 300);
+        }
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_sticky(ui, &ctx, &events, true);
+        });
+        panel
+    }
+
+    #[test]
+    fn deliberate_clicks_are_not_sticky() {
+        // A person clicking deliberately holds ~80-150 ms
+        let panel = sticky_panel_with_holds(&[90, 110, 150, 120, 100, 140]);
+        let export = panel.export_sticky().unwrap();
+        assert_eq!(export.left.click_count, 6);
+        assert_eq!(export.left.sticky_count, 0);
+        assert_eq!(
+            sticky_verdict(&panel.sticky_holds, None, &DiagConfig::default()),
+            StickyVerdict::NoSlowReleases
+        );
+    }
+
+    #[test]
+    fn switch_releasing_late_is_flagged() {
+        // Normal finger holds, but the switch keeps 3 of them closed 250+ ms longer
+        let panel = sticky_panel_with_holds(&[90, 380, 110, 420, 100, 350, 120]);
+        let export = panel.export_sticky().unwrap();
+        assert_eq!(export.left.sticky_count, 3);
+        assert!(matches!(
+            sticky_verdict(&panel.sticky_holds, None, &DiagConfig::default()),
+            StickyVerdict::SlowReleases { count: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn one_long_click_is_not_called_sticky() {
+        let cfg = DiagConfig::default();
+        let holds = [100.0, 120.0, 400.0, 90.0, 110.0, 130.0];
+        assert_eq!(
+            sticky_verdict(&holds, None, &cfg),
+            StickyVerdict::OneLongHold { held_ms: 400.0 }
+        );
+        // Exactly at the threshold is still a normal click
+        let holds = [250.0, 250.0, 100.0, 100.0, 100.0];
+        assert_eq!(
+            sticky_verdict(&holds, None, &cfg),
+            StickyVerdict::NoSlowReleases
+        );
+    }
+
+    #[test]
+    fn too_few_clicks_are_inconclusive() {
+        let cfg = DiagConfig::default();
+        assert_eq!(
+            sticky_verdict(&[400.0, 500.0], None, &cfg),
+            StickyVerdict::NeedMoreClicks { need: 5 }
+        );
+        assert_eq!(
+            sticky_verdict(&[], None, &cfg),
+            StickyVerdict::NeedMoreClicks { need: 5 }
+        );
+    }
+
+    #[test]
+    fn button_down_past_the_stuck_threshold_is_reported() {
+        let cfg = DiagConfig::default();
+        let holds = [100.0; 6];
+        assert_eq!(
+            sticky_verdict(&holds, Some(1500.0), &cfg),
+            StickyVerdict::HeldDown { held_ms: 1500.0 }
+        );
+        // A press in progress that is not yet long says nothing
+        assert_eq!(
+            sticky_verdict(&holds, Some(400.0), &cfg),
+            StickyVerdict::NoSlowReleases
+        );
+    }
+
+    #[test]
+    fn thresholds_match_auto_diagnostics() {
+        let cfg = DiagConfig::default();
+        assert_eq!(cfg.sticky_threshold_ms, 250.0);
+        assert_eq!(cfg.clicks_min_left, 5);
     }
 }
