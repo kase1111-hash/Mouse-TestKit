@@ -83,7 +83,7 @@ src/
 │   ├── mod.rs
 │   ├── polling.rs            # Real-time Hz measurement
 │   ├── stutter.rs            # Stutter detection
-│   ├── click_response.rs     # Button latency
+│   ├── click_response.rs     # Click reaction time
 │   ├── click_sticky.rs       # Stuck click detection
 │   ├── liftoff.rs            # Lift-off distance testing
 │   ├── dpi.rs                # DPI accuracy verification
