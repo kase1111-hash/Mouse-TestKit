@@ -39,6 +39,7 @@ use crate::analysis::liftoff::{
 use crate::analysis::polling::{
     estimate_hz, is_saturated_pair, median_in_place, nominal_rate, MAX_POLL_INTERVAL_MS,
 };
+use crate::analysis::scroll::{WheelCheck, SKIP_FAULT_COUNT};
 use crate::analysis::stutter::{
     is_freeze, CONFIRMED_FREEZES, MAX_FREEZE_MS, MIN_RELATIVE_REPORT_SIZE,
 };
@@ -454,7 +455,8 @@ pub struct AutoTest {
     holds_ms: Vec<f64>,
     min_press_interval_ms: Option<f64>,
     // Scroll
-    last_scroll: Option<(f64, i32)>,
+    /// The Scroll Wheel test's checker, so both count skips alike.
+    wheel: WheelCheck,
     // Lift
     /// Created when the lift step first sees input or time pass.
     lift: Option<LiftDetector>,
@@ -475,6 +477,7 @@ impl AutoTest {
         if cfg.include_lift && cfg.timing_reliable {
             phases.push(Phase::Lift);
         }
+        let wheel = WheelCheck::with_thresholds(cfg.scroll_reversal_ms, cfg.scroll_target_each);
         Self {
             cfg,
             phases,
@@ -498,7 +501,7 @@ impl AutoTest {
             buttons: (0..BUTTONS).map(|_| ButtonState::default()).collect(),
             holds_ms: Vec::new(),
             min_press_interval_ms: None,
-            last_scroll: None,
+            wheel,
             lift: None,
             lift_tally: LiftTally::default(),
         }
@@ -1374,26 +1377,15 @@ impl AutoTest {
     // ── Scroll ─────────────────────────────────────────────────────────
 
     fn feed_scroll(&mut self, t: f64, event: &MouseEvent) {
-        if let MouseEvent::Scroll { delta } = event {
-            if *delta == 0 {
-                return;
-            }
-            let sign = delta.signum();
-            let notches = delta.unsigned_abs() as usize;
-            if sign > 0 {
-                self.metrics.scroll_up += notches;
-            } else {
-                self.metrics.scroll_down += notches;
-            }
+        if let MouseEvent::Scroll { delta } = *event {
+            self.wheel.feed(t, delta);
+            self.metrics.scroll_up = self.wheel.up;
+            self.metrics.scroll_down = self.wheel.down;
             // A skip is a wrong-way notch within tens of ms, which frame-
             // quantised timestamps cannot resolve.
-            if let (Some((last_t, last_sign)), true) = (self.last_scroll, self.cfg.timing_reliable)
-            {
-                if last_sign != sign && (t - last_t) * 1000.0 < self.cfg.scroll_reversal_ms {
-                    self.metrics.scroll_reversals += 1;
-                }
+            if self.cfg.timing_reliable {
+                self.metrics.scroll_reversals = self.wheel.skips;
             }
-            self.last_scroll = Some((t, sign));
         }
     }
 
@@ -1456,7 +1448,7 @@ impl AutoTest {
         // Like switch bounce, judged on the count. Three are needed because a
         // healthy wheel let go just past a detent can spring back one notch.
         let rate = reversals as f64 / total as f64 * 100.0;
-        if reversals >= 3 {
+        if reversals >= SKIP_FAULT_COUNT {
             self.push(
                 Severity::Critical,
                 Phase::Scroll,
@@ -2344,6 +2336,46 @@ mod tests {
             .any(|f| f.title == "Scroll wheel skipping" && f.severity == Severity::Critical));
         // "up" notches did occur (the skips), so no one-direction warning here
         assert!(sim.at.metrics.scroll_reversals >= 5);
+    }
+
+    #[test]
+    fn test_one_wrong_way_notch_is_one_skip() {
+        // Scrolling down a notch every 40 ms; the encoder bounces and sends
+        // one wrong-way notch 2 ms after a real one. The next real notch,
+        // 38 ms later, is the hand carrying on, not a second skip.
+        let glitches = |n: usize| {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            sim.good_movement();
+            sim.good_clicks();
+            assert_eq!(sim.phase(), Some(Phase::Scroll));
+            for i in 0..12 {
+                sim.scroll(-1, if i % 5 == 2 && i / 5 < n { 2.0 } else { 40.0 });
+                if i % 5 == 2 && i / 5 < n {
+                    sim.scroll(1, 38.0);
+                }
+            }
+            sim.idle(0.5);
+            for _ in 0..10 {
+                sim.scroll(1, 90.0);
+            }
+            sim.idle(13.0);
+            sim
+        };
+        let sim = glitches(1);
+        assert_eq!(sim.at.metrics.scroll_reversals, 1);
+        let f = sim.at.findings_so_far();
+        assert!(f
+            .iter()
+            .any(|f| f.title == "Possible scroll wheel skip" && f.detail.starts_with("1 notch")));
+        // Two glitches are two skips: a re-test, as in the Scroll Wheel test
+        let sim = glitches(2);
+        assert_eq!(sim.at.metrics.scroll_reversals, 2);
+        assert!(!sim
+            .at
+            .findings_so_far()
+            .iter()
+            .any(|f| f.severity == Severity::Critical));
     }
 
     #[test]
