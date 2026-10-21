@@ -57,6 +57,7 @@ src/
 │   ├── angle_snap.rs         # Stroke straightness / snapping detection
 │   ├── coalesce.rs           # Merges evdev REL_X/REL_Y into one report
 │   ├── diagnostics.rs        # Auto Diagnostics engine (phases, findings, report)
+│   ├── dpi.rs                # DPI accuracy rules shared by GUI and CLI
 │   ├── liftoff.rs            # Lift-off jump detection
 │   ├── polling.rs            # Polling rate statistics and median-based Hz estimate
 │   ├── scroll.rs             # Scroll wheel skip and dead-direction checks (WheelCheck)

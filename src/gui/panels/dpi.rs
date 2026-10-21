@@ -13,6 +13,7 @@ use super::polling::raw_input_required_notice;
 use crate::config::{DPI_DISTANCE_RANGE, DPI_TARGET_RANGE};
 use crate::export::{DpiExport, DpiSampleExport};
 use crate::input_bridge::{RawInputEvent, RawInputKind};
+use mouse_testkit::analysis::dpi::{is_setup_error, SETUP_ERROR_FRACTION};
 
 /// Selectable target DPI and distance (inches): the ranges saved settings
 /// are clamped to on load, so a value set here survives a restart.
@@ -21,10 +22,6 @@ const MAX_TARGET_DPI: u32 = *DPI_TARGET_RANGE.end();
 const CM_PER_INCH: f32 = 2.54;
 const MAX_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.end();
 const MIN_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.start();
-/// A result this far off the target (fraction) is almost always a setup
-/// mistake (a different DPI stage, a wrong distance, a missed SPACE press)
-/// rather than the sensor: real sensors deviate by a few percent.
-const SETUP_ERROR_FRACTION: f32 = 0.25;
 
 /// Measured DPI from the net displacement in counts over a known distance.
 fn measured_dpi(net_dx: i64, net_dy: i64, distance_inches: f32) -> f32 {
@@ -41,9 +38,8 @@ fn accuracy_percent(measured: f32, target: u32) -> f32 {
 
 /// Rating label for one measurement.
 fn dpi_rating(measured: f32, target: u32) -> &'static str {
-    let deviation = (measured / target as f32 - 1.0).abs();
     let accuracy = accuracy_percent(measured, target);
-    if deviation > SETUP_ERROR_FRACTION {
+    if is_setup_error(measured as f64, target as f64) {
         "Check setup"
     } else if accuracy >= 98.0 {
         "Excellent"
