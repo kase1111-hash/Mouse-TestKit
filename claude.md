@@ -150,8 +150,10 @@ loop instead of the mouse. CLI tests read input with
 (`time` + `event`): the kernel evdev timestamp on Linux, the `WM_INPUT`
 receive time on Windows (Raw Input carries no hardware timestamp). GUI panels
 use `RawInputEvent::timestamp` from the input bridge. Without raw input
-(framework input, always on macOS) events only carry the frame time, so
-timing checks must say they were not measured rather than show a number.
+(framework input, always on macOS) events only carry the frame time (steps
+of about 16 ms), so a check that needs finer timing than that (polling rate,
+stutters, switch bounce, very short presses) must say it was not measured
+rather than show a number.
 
 ### Error Handling
 
