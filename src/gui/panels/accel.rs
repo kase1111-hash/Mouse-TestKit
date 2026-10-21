@@ -51,6 +51,24 @@ pub struct AccelPanel {
     /// Cumulative path for visualisation (plot coordinates: y up).
     angle_points: VecDeque<(f64, f64)>,
     angle_accumulated_pos: (f64, f64),
+
+    /// Pointer movement (points) not yet passed on as whole points in the
+    /// framework-input fallback.
+    pointer_remainder: (f32, f32),
+}
+
+/// Add a frame's pointer movement to `remainder` and take out the whole
+/// points. Rounding each frame on its own would lose or add up to half a
+/// point per frame, and a slow pass moves only a point or two per frame on a
+/// high-refresh display: the counts of slow passes would be off by tens of
+/// percent and look like acceleration.
+fn take_whole_points(remainder: &mut (f32, f32), delta: egui::Vec2) -> (i32, i32) {
+    remainder.0 += delta.x;
+    remainder.1 += delta.y;
+    let (dx, dy) = (remainder.0.round(), remainder.1.round());
+    remainder.0 -= dx;
+    remainder.1 -= dy;
+    (dx as i32, dy as i32)
 }
 
 impl AccelPanel {
@@ -68,6 +86,7 @@ impl AccelPanel {
             angle_result: None,
             angle_points: VecDeque::new(),
             angle_accumulated_pos: (0.0, 0.0),
+            pointer_remainder: (0.0, 0.0),
         }
     }
 
@@ -82,7 +101,7 @@ impl AccelPanel {
     /// Collect (time, dx, dy) motion for this frame from raw input or the
     /// egui fallback.
     fn frame_motion(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         raw_events: &[RawInputEvent],
         has_bridge: bool,
@@ -97,12 +116,9 @@ impl AccelPanel {
                 .collect()
         } else {
             let delta = ctx.input(|i| i.pointer.delta());
-            if delta.x != 0.0 || delta.y != 0.0 {
-                vec![(
-                    self.secs(Instant::now()),
-                    delta.x.round() as i32,
-                    delta.y.round() as i32,
-                )]
+            let (dx, dy) = take_whole_points(&mut self.pointer_remainder, delta);
+            if dx != 0 || dy != 0 {
+                vec![(self.secs(Instant::now()), dx, dy)]
             } else {
                 Vec::new()
             }
@@ -381,6 +397,7 @@ impl AccelPanel {
 
     fn start_accel(&mut self) {
         self.is_running = true;
+        self.pointer_remainder = (0.0, 0.0);
         self.accel_segmenter.reset();
         self.accel_strokes.clear();
         self.accel_result = None;
@@ -578,6 +595,7 @@ impl AccelPanel {
 
     fn start_angle(&mut self) {
         self.angle_running = true;
+        self.pointer_remainder = (0.0, 0.0);
         self.angle_segmenter.reset();
         self.angle_shapes.clear();
         self.angle_short_strokes = 0;
@@ -647,5 +665,24 @@ impl AccelPanel {
             near_axis_stroke_count: result.near_axis_strokes,
             snapped_stroke_count: result.snapped_strokes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_pointer_movement_is_not_lost_to_rounding() {
+        // A slow pass on a 240 Hz display: 1.3 points per frame
+        let mut remainder = (0.0, 0.0);
+        let (mut x, mut y) = (0, 0);
+        for _ in 0..100 {
+            let (dx, dy) = take_whole_points(&mut remainder, egui::vec2(1.3, -0.4));
+            x += dx;
+            y += dy;
+        }
+        // (rounding every frame on its own would give 100 and 0)
+        assert_eq!((x, y), (130, -40));
     }
 }
