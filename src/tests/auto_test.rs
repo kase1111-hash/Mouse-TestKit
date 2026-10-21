@@ -206,9 +206,11 @@ fn print_report(report: &Report, total_phases: usize) {
     );
     match m.polling_hz {
         Some(hz) => println!(
-            "  Movement: {} Hz (nominal {} Hz), {} fast intervals, {} stutter(s) ({:.2}%), worst gap {:.1} ms",
+            "  Movement: {} Hz{}, {} fast intervals, {} stutter(s) ({:.2}%), worst gap {:.1} ms",
             hz,
-            m.polling_nominal_hz.unwrap_or(hz),
+            m.polling_nominal_hz
+                .map(|n| format!(" (nominal {} Hz)", n))
+                .unwrap_or_default(),
             m.move_intervals,
             m.stutter_count,
             m.stutter_rate_percent,

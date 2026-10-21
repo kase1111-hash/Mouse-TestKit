@@ -591,15 +591,13 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Movement: polling rate",
-                                    m.polling_hz
-                                        .map(|h| {
-                                            format!(
-                                                "{} Hz (nominal {} Hz)",
-                                                h,
-                                                m.polling_nominal_hz.unwrap_or(h)
-                                            )
-                                        })
-                                        .unwrap_or_else(|| "n/a".to_string()),
+                                    match (m.polling_hz, m.polling_nominal_hz) {
+                                        (Some(h), Some(n)) => {
+                                            format!("{} Hz (nominal {} Hz)", h, n)
+                                        }
+                                        (Some(h), None) => format!("{} Hz", h),
+                                        (None, _) => "n/a".to_string(),
+                                    },
                                 ),
                                 (
                                     "Movement: stutters",

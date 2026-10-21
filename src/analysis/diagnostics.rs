@@ -136,6 +136,9 @@ pub struct Metrics {
     /// sent while the mouse moved fast enough to report on every poll.
     pub move_intervals: usize,
     pub polling_hz: Option<u32>,
+    /// The standard USB rate (125, 250, 500, 1000 ... Hz) nearest
+    /// `polling_hz`. None below 110 Hz, where no USB rate fits: that is the
+    /// Bluetooth range or a USB mouse running slow.
     pub polling_nominal_hz: Option<u32>,
     pub stutter_count: usize,
     pub stutter_rate_percent: f64,
@@ -954,7 +957,9 @@ impl AutoTest {
         let mut sorted = usable.clone();
         let period = median_in_place(&mut sorted).unwrap_or(0.0);
         let hz = estimate_hz(&usable, self.cfg.movement_min_intervals);
-        let nominal = hz.map(|h| nominal_rate(h as f64));
+        let nominal = hz
+            .filter(|&h| h >= USB_MIN_POLLING_HZ)
+            .map(|h| nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
         self.metrics.max_interval_ms = usable.iter().copied().fold(0.0, f64::max);
@@ -980,16 +985,19 @@ impl AutoTest {
         let lost_percent =
             late.iter().map(|i| i - period).sum::<f64>() / (usable_secs * 1000.0) * 100.0;
 
-        if let (Some(hz), Some(nominal)) = (hz, nominal) {
+        if let Some(hz) = hz {
+            let looks_like = nominal
+                .map(|n| format!(" (looks like a {} Hz mouse)", n))
+                .unwrap_or_default();
             self.push(
                 Severity::Info,
                 Phase::Movement,
                 "Polling rate measured",
                 format!(
-                    "Typical report interval {:.3} ms = {} Hz (looks like a {} Hz mouse), from {} reports sent while moving fast.",
+                    "Typical report interval {:.3} ms = {} Hz{}, from {} reports sent while moving fast.",
                     period,
                     hz,
-                    nominal,
+                    looks_like,
                     usable.len()
                 ),
             );
@@ -1773,6 +1781,18 @@ mod tests {
         assert!(movement
             .iter()
             .any(|(_, t)| t == "Low polling rate (normal for Bluetooth)"));
+        // No USB rate fits 89 Hz, so none is named: "looks like a 125 Hz
+        // mouse" would read as a USB mouse running slow
+        assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        let measured = sim
+            .at
+            .findings_so_far()
+            .iter()
+            .find(|f| f.title == "Polling rate measured")
+            .map(|f| f.detail.clone())
+            .unwrap();
+        assert!(measured.contains("= 89 Hz,"), "{}", measured);
+        assert!(!measured.contains("looks like"), "{}", measured);
         sim.good_clicks();
         sim.good_scroll();
         sim.good_lift();
