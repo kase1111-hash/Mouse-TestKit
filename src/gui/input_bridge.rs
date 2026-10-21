@@ -362,6 +362,7 @@ impl InputBridge {
     /// Drain pending messages (non-blocking) and return the events of the
     /// measured device. Call once per frame in the GUI update loop.
     pub fn poll(&mut self) -> Vec<RawInputEvent> {
+        let measured_before = self.selector.active();
         let mut events = Vec::new();
         while let Ok(message) = self.receiver.try_recv() {
             match message {
@@ -382,6 +383,13 @@ impl InputBridge {
                     }
                 }
             }
+        }
+        // Pointer evidence is about the device it was gathered against: a
+        // mouse the user has just clicked or moved starts with a clean record
+        // instead of inheriting the touchpad's mismatch (which would show a
+        // false warning and release it on the next stray pointer frame).
+        if self.selector.active() != measured_before {
+            self.cross_check = PointerCrossCheck::new();
         }
         events
     }
@@ -413,8 +421,9 @@ impl InputBridge {
         }
     }
 
-    /// Whether the pointer has been moving while the measured device (or, if
-    /// none is measured, every readable device) reported no motion.
+    /// Whether the pointer has been moving while the measured device reported
+    /// no motion (or, if none is measured, while no readable device was
+    /// deliberately used).
     pub fn pointer_mismatch(&self) -> bool {
         self.cross_check.mismatch()
     }
@@ -1534,6 +1543,46 @@ mod tests {
         now += Duration::from_millis(16);
         bridge.cross_check_pointer(now, true, &[]);
         assert!(!bridge.is_delivering());
+    }
+
+    #[test]
+    fn a_newly_selected_mouse_does_not_inherit_the_touchpads_warning() {
+        let (mut bridge, sender) = InputBridge::for_test();
+        let t = Instant::now();
+        sender
+            .send(BridgeMessage::Added(device(5, "USB Mouse", "event5")))
+            .unwrap();
+        bridge.poll();
+        // A laptop user moves the pointer with the (unreadable) touchpad
+        let mut now = t;
+        for _ in 0..90 {
+            now += Duration::from_millis(16);
+            bridge.cross_check_pointer(now, true, &[]);
+        }
+        assert!(bridge.pointer_mismatch());
+
+        // Then clicks the USB mouse without moving it (e.g. the Click test)
+        sender
+            .send(BridgeMessage::Event(
+                5,
+                ev(RawInputKind::ButtonPress(RawButton::Left), now),
+            ))
+            .unwrap();
+        let events = bridge.poll();
+        now += Duration::from_millis(16);
+        bridge.cross_check_pointer(now, false, &events);
+        assert!(bridge.is_delivering());
+        assert!(
+            !bridge.pointer_mismatch(),
+            "the mismatch was the touchpad's, not this mouse's"
+        );
+
+        // A brushed touchpad moving the pointer for one frame does not
+        // release the mouse the user just chose
+        now += Duration::from_millis(16);
+        bridge.cross_check_pointer(now, true, &[]);
+        assert!(bridge.is_delivering());
+        assert!(!bridge.pointer_mismatch());
     }
 
     #[test]
