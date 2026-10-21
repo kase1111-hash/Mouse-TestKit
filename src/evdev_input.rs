@@ -255,7 +255,8 @@ impl EvdevMouse {
     }
 
     /// Sleep until the device has input or has failed, for at most
-    /// `timeout` (`None`: no limit). Returns whether it is worth reading.
+    /// `timeout` (`None`: no limit). Returns whether it is worth reading
+    /// (`false` on a timeout or a signal).
     pub fn wait(&self, timeout: Option<Duration>) -> bool {
         if self.gone {
             return true;
@@ -272,8 +273,13 @@ impl EvdevMouse {
         };
         // SAFETY: one valid pollfd for the duration of the call.
         let ready = unsafe { libc::poll(&mut fds, 1, ms) };
-        // Interrupted by a signal: nothing to read yet
-        ready > 0
+        match ready {
+            0 => false,
+            // Interrupted by a signal: nothing to read yet. Any other error
+            // is left for the read to report, so a caller never spins.
+            _ if ready < 0 => io::Error::last_os_error().kind() != ErrorKind::Interrupted,
+            _ => true,
+        }
     }
 
     /// Read everything the device has queued, without waiting. Returns the
