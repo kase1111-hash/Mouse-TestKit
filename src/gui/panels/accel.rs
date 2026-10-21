@@ -4,6 +4,12 @@
 //! pauses) rather than individual reports. See
 //! `mouse_testkit::analysis::{strokes, acceleration, angle_snap}` for the
 //! analysis; this module only collects input and draws the results.
+//!
+//! With raw input the acceleration test sees the mouse's own counts, before
+//! the OS applies pointer acceleration, so it covers sensor/firmware
+//! acceleration only and must not be read as a verdict on the OS setting.
+//! Without raw input it sees the on-screen pointer, which includes OS
+//! acceleration.
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
@@ -114,13 +120,24 @@ impl AccelPanel {
     ) {
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
-        ui.label(
-            "Detects mouse acceleration (more counts for the same distance when you move faster).",
-        );
-        if !has_bridge {
+        if has_bridge {
+            ui.label(
+                "Detects acceleration in the mouse's sensor or firmware (more counts for the same distance when you move faster).",
+            );
             ui.label(
                 egui::RichText::new(
-                    "Note: Raw input unavailable — using framework input (reduced accuracy)",
+                    "Covers sensor/firmware acceleration only. OS pointer acceleration (Windows \"Enhance pointer precision\", macOS or libinput acceleration) is applied after the raw counts this test reads, so it cannot be seen here - check that setting separately.",
+                )
+                .weak()
+                .size(11.0),
+            );
+        } else {
+            ui.label(
+                "Detects acceleration in the on-screen pointer (more movement for the same distance when you move faster).",
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Note: Raw input unavailable - measuring the pointer after OS processing, so OS pointer acceleration is included. Keep the pointer inside this window: the screen edge stops it and spoils a pass.",
                 )
                 .color(egui::Color32::YELLOW)
                 .size(11.0),
@@ -248,9 +265,15 @@ impl AccelPanel {
                     let (status, color) = if !result.conclusive {
                         ("Inconclusive - vary your speed more", egui::Color32::YELLOW)
                     } else if result.has_acceleration {
-                        ("Acceleration DETECTED", egui::Color32::RED)
+                        if has_bridge {
+                            ("Sensor/Firmware Acceleration DETECTED", egui::Color32::RED)
+                        } else {
+                            ("Pointer Acceleration DETECTED", egui::Color32::RED)
+                        }
+                    } else if has_bridge {
+                        ("No Sensor/Firmware Acceleration", egui::Color32::GREEN)
                     } else {
-                        ("No Acceleration Detected", egui::Color32::GREEN)
+                        ("No Pointer Acceleration Detected", egui::Color32::GREEN)
                     };
                     ui.label(egui::RichText::new(status).size(24.0).strong().color(color));
                     ui.add_space(15.0);
@@ -299,10 +322,22 @@ impl AccelPanel {
                     } else if result.has_acceleration {
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Recommendation: disable pointer acceleration / \"enhance pointer precision\" in your OS and mouse software",
-                            )
+                            egui::RichText::new(if has_bridge {
+                                "Recommendation: turn off acceleration, \"enhanced\" or smoothing modes in the mouse's own software or on-board settings"
+                            } else {
+                                "Recommendation: disable pointer acceleration / \"enhance pointer precision\" in your OS and mouse software"
+                            })
                             .color(egui::Color32::YELLOW),
+                        );
+                    }
+                    if result.conclusive && has_bridge {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "This result does not tell you whether OS pointer acceleration is on: the OS applies it after the raw counts measured here.",
+                            )
+                            .weak()
+                            .size(11.0),
                         );
                     }
                 });

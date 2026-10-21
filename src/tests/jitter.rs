@@ -63,17 +63,12 @@ pub fn run() {
             }
         }
 
-        if let Ok(events) = device.fetch_events() {
-            for ev in events {
-                #[cfg(target_os = "linux")]
-                let parsed = input::parse_event(&ev);
-                #[cfg(target_os = "windows")]
-                let parsed = Some(ev);
-
-                if let Some(MouseEvent::Move { dx, dy }) = parsed {
-                    if sampling {
-                        current_movements.push((dx, dy));
-                    }
+        // One Move per hardware report (evdev's separate REL_X/REL_Y events
+        // merged), so a diagonal twitch counts as one event, not two.
+        for timed in input::fetch_timed_events(&mut device) {
+            if let MouseEvent::Move { dx, dy } = timed.event {
+                if sampling {
+                    current_movements.push((dx, dy));
                 }
             }
         }
