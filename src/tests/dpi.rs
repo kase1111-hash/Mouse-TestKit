@@ -327,14 +327,26 @@ fn moves(events: Vec<input::TimedEvent>) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Parse a DPI value typed by the user, e.g. "1600", "1,600", "1.6k" or
-/// "1600 DPI" (CPI is accepted too). Accepts 50 to 100000.
+/// Parse a DPI value typed by the user, e.g. "1600", "1,600", "1.6k",
+/// "1,6k" or "1600 DPI" (CPI is accepted too). Accepts 50 to 100000.
 pub fn parse_dpi(input: &str) -> Option<f64> {
-    let s: String = input
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|&c| c != ',' && c != '_')
+    let chars: Vec<char> = input.trim().to_ascii_lowercase().chars().collect();
+    // A comma before a group of three digits separates thousands ("1,600");
+    // any other comma is a decimal comma ("1,6k" is 1600, not 16000)
+    let s: String = chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| match c {
+            '_' => None,
+            ',' => {
+                let digits = chars[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_digit())
+                    .count();
+                (digits != 3).then_some('.')
+            }
+            c => Some(c),
+        })
         .collect();
     let number = s
         .strip_suffix("dpi")
@@ -531,6 +543,10 @@ mod tests {
         assert_eq!(parse_dpi("1,600"), Some(1600.0));
         assert_eq!(parse_dpi("1.6k"), Some(1600.0));
         assert_eq!(parse_dpi("26K DPI"), Some(26000.0));
+        // A decimal comma, as typed in much of Europe
+        assert_eq!(parse_dpi("3,2k"), Some(3200.0));
+        assert_eq!(parse_dpi("12,000"), Some(12000.0));
+        assert_eq!(parse_dpi("1,60"), None);
         assert_eq!(parse_dpi(""), None);
         assert_eq!(parse_dpi("3200dpi"), Some(3200.0));
         assert_eq!(parse_dpi("400 cpi"), Some(400.0));
