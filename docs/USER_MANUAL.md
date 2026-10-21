@@ -18,14 +18,16 @@ A one-minute guided check-up that looks for faults by itself. Available from the
 
 1. Click **Start Diagnostics**, then take your hand off the mouse
 2. Follow the instruction shown for each step. Every step ends on its own once enough data is collected or its time runs out:
-   - **Sensor at rest** (5 s) - do not touch the mouse. Any movement, click or scroll here is phantom input
-   - **Continuous movement** (up to 12 s) - move in smooth circles. Measures polling rate, stutters, unstable rate, dropouts
-   - **Button clicks** (up to 20 s) - about 20 normal left clicks, then a few right clicks. Looks for switch bounce (accidental double clicks), presses too short for a finger, sticky releases, buttons that never release
-   - **Scroll wheel** (up to 12 s) - about 10 notches down, then 10 up. Looks for notches reported in the wrong direction (encoder skipping) and a dead direction
+   - **Sensor at rest** (about 7 s: 2 s to let go, then 5 s) - do not touch the mouse or the desk. Clicks or scrolls here are phantom input; movement counts as drift or jitter only when it keeps showing up (in 3 or more separate seconds). A single bump is noted but is not a fault
+   - **Continuous movement** (up to 12 s) - move in brisk, wide circles. A mouse only sends a report when it has moved, so only reports sent while it moves fast enough to report on every poll are timed. If your movement is too slow to time (common at 2-8 kHz or low DPI) the step shows "move faster" and the polling checks are inconclusive rather than flagged. Measures polling rate, stutters (judged by the share of movement time lost to late reports), unstable rate, dropouts
+   - **Button clicks** (up to 20 s) - point at the box shown and click: about 20 normal left clicks, then a few right clicks. Looks for switch bounce (accidental double clicks: one is a warning, a repeat is a fault), presses too short for a finger, sticky releases, buttons that never release (reported however few clicks were made)
+   - **Scroll wheel** (up to 12 s) - about 10 notches down, then 10 up. Looks for notches reported in the wrong direction (encoder skipping)
    - **Lift-off** (10 s) - move, lift the mouse about 1 cm, set it down, move again, three times. Looks for cursor jumps when the sensor re-acquires the surface
-3. Read the verdict: **Healthy**, **Needs attention** (warnings), **Fault detected** (a critical finding), or **Inconclusive** (not enough data - re-run and follow the instructions for the whole step)
+3. Read the verdict: **Healthy**, **Needs attention** (warnings), **Fault detected** (a critical finding), or **Inconclusive** (a step did not collect enough data, or a button or wheel direction registered nothing - if you did use it, it may be dead; if you skipped it, re-run and follow the instructions for the whole step). A run is only Healthy when every step completed
 4. Each finding explains what was measured and what it usually means. Tick **Show raw measurements** for the numbers behind it
-5. Press **Abort** to stop early (a partial report is still produced) or **Run Again** to repeat
+5. Press **Abort** (top right) or **Esc** to stop early (a partial report is still produced) or **Run Again** to repeat. During the click step only Esc stops the run, so stray clicks cannot end it, and the sidebar export buttons stay disabled until the run ends
+
+Without raw input (FRAMEWORK input source) the movement and lift-off steps are left out, and switch bounce, very short presses and scroll skips are not judged, because window-system events are frame-rate limited and pointer movement is accelerated. The report is marked "Limited check". Keep the pointer inside the window: clicks and scrolls outside it are not seen.
 
 The report is included in the JSON/CSV export. If a warning appears once, re-run: a fault that repeats is real, a one-off is often the hand.
 

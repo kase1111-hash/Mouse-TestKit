@@ -155,15 +155,15 @@ mod smoke_tests {
         let epoch = auto.epoch_for_test();
         let at = |t: f64| epoch + Duration::from_secs_f64(t);
 
-        // Rest phase: nothing happens, wait it out
-        auto.tick_for_test(6.2);
+        // Rest phase (2 s settle + 5 s): nothing happens, wait it out
+        auto.tick_for_test(7.2);
         frame(&ctx, |ui, ctx| {
             auto.process_input(ctx, &[], true);
             auto.ui(ui, ctx, true);
         });
 
         // Movement: 1000 Hz with a stall every 25th report (4% stutters)
-        let mut t = 6.3;
+        let mut t = 7.3;
         let mut events = Vec::new();
         for i in 0..3100 {
             t += if i % 25 == 0 { 0.008 } else { 0.001 };

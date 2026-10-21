@@ -5,7 +5,10 @@
 //! 1. **Rest** - the mouse must not be touched. Any movement, click or scroll
 //!    is a phantom event (sensor jitter, drift, a failing switch).
 //! 2. **Movement** - continuous motion. Measures the report rate and looks
-//!    for stutters (late reports), unstable rates and dropouts.
+//!    for stutters (late reports), unstable rates and dropouts. Only reports
+//!    sent while the mouse moves fast enough to have counts on every poll are
+//!    timed: a slowly moving mouse skips polls that carry no motion, which is
+//!    normal and says nothing about the link.
 //! 3. **Clicks** - normal clicking. Looks for switch bounce (accidental
 //!    double clicks), extremely short presses, sticky releases and buttons
 //!    that never release.
@@ -17,6 +20,12 @@
 //! The engine is pure: it is driven by `feed(time, event)` and `tick(time)`
 //! with timestamps in seconds, so it can be exercised with synthetic input
 //! streams in unit tests and reused by both the GUI and the CLI.
+//!
+//! A **Healthy** verdict needs every step to have collected enough data. A
+//! button or wheel direction that registered nothing makes the run
+//! Inconclusive, because a dead part and a skipped instruction look the same.
+//! Without raw input (`Config::timing_reliable == false`) only the checks
+//! that need neither precise report timing nor raw sensor counts are run.
 
 use serde::Serialize;
 
@@ -46,9 +55,9 @@ impl Phase {
 
     pub fn instruction(self) -> &'static str {
         match self {
-            Phase::Rest => "Take your hand off the mouse and do not touch it.",
+            Phase::Rest => "Take your hand off the mouse and do not touch it or the desk.",
             Phase::Movement => {
-                "Move the mouse continuously in smooth circles. Keep it moving until this step ends."
+                "Move the mouse continuously in brisk, wide circles. Keep it moving until this step ends."
             }
             Phase::Clicks => {
                 "Click the left button at a normal pace (about 20 times), then the right button a few times. Do not hold the buttons."
@@ -120,7 +129,11 @@ pub struct Metrics {
     pub rest_distance_counts: f64,
     pub rest_clicks: usize,
     pub rest_scroll_events: usize,
+    /// Separate one-second windows of the rest phase that saw movement.
+    pub rest_motion_seconds: usize,
     // Movement
+    /// Report intervals used for the timing checks: those between reports
+    /// sent while the mouse moved fast enough to report on every poll.
     pub move_intervals: usize,
     pub polling_hz: Option<u32>,
     pub polling_nominal_hz: Option<u32>,
@@ -175,17 +188,32 @@ impl Report {
 /// Tunable thresholds and durations.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Whether event timestamps are precise enough for timing checks.
+    /// Whether event timestamps are precise enough for timing checks. When
+    /// false (frame-rate-limited window-system input with accelerated pointer
+    /// deltas) the movement and lift-off steps are left out, and switch
+    /// bounce, very short presses and scroll skips are not judged.
     pub timing_reliable: bool,
     /// Seconds ignored at the start of the rest phase so the click that
     /// started the run and the hand leaving the mouse do not count.
     pub rest_settle_secs: f64,
     pub rest_secs: f64,
     pub movement_secs: f64,
-    /// The movement phase ends early once this many intervals are recorded.
+    /// The movement phase ends early once this many fast-movement intervals
+    /// (see `saturated_report_counts`) are recorded...
     pub movement_target_intervals: usize,
-    /// Below this many intervals the movement phase is inconclusive.
+    /// ... and once this many seconds of fast movement are recorded, so a
+    /// 2-8 kHz mouse is not judged on a fraction of a second.
+    pub movement_target_secs: f64,
+    /// Below this many fast-movement intervals the movement phase is
+    /// inconclusive...
     pub movement_min_intervals: usize,
+    /// ... and below this many seconds of fast movement.
+    pub movement_min_secs: f64,
+    /// A report whose larger axis carries at least this many counts shows the
+    /// mouse moving more than one count per poll, so the next poll is certain
+    /// to carry motion too. Only intervals between two such reports are timed;
+    /// slower motion skips empty polls and its gaps are not stutters.
+    pub saturated_report_counts: i32,
     pub clicks_secs: f64,
     pub clicks_target_left: usize,
     pub clicks_target_right: usize,
@@ -204,10 +232,24 @@ pub struct Config {
     pub sticky_threshold_ms: f64,
     /// A button still down for this long at the end of the phase is stuck.
     pub stuck_threshold_ms: f64,
-    /// An interval longer than this multiple of the median is a stutter.
+    /// An interval longer than this multiple of the poll period (the median
+    /// fast-movement interval) is a stutter...
     pub stutter_multiplier: f64,
-    /// Intervals this far from the median (fraction) count as unstable.
+    /// ... and never shorter than this (ms). At 2-8 kHz the host's own
+    /// timestamping (USB interrupt moderation, batched delivery) moves reports
+    /// by a few hundred microseconds, and a gap this short is well under one
+    /// display frame (4 ms at 240 Hz), so it is not a visible hitch.
+    pub min_stutter_gap_ms: f64,
+    /// Intervals this far from the poll period (fraction) count as unstable...
     pub unstable_fraction: f64,
+    /// ... but deviations under this many ms are host timestamp jitter and
+    /// never count as unstable (only matters at 2 kHz and above).
+    pub timing_jitter_ms: f64,
+    /// Rest movement only counts as jitter or drift when it appears in at
+    /// least this many separate one-second windows. Bumping the mouse or desk
+    /// (or the hand leaving late) is one burst well under a second long; a
+    /// drifting or noisy sensor keeps reporting.
+    pub rest_spread_windows: usize,
     /// A direction change within this many ms of the previous notch is a skip.
     pub scroll_reversal_ms: f64,
     /// Idle gap (ms) after which the next report is checked for a jump.
@@ -222,11 +264,15 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             timing_reliable: true,
-            rest_settle_secs: 1.0,
+            // Pressing Start and taking the hand away takes about 1-2 s.
+            rest_settle_secs: 2.0,
             rest_secs: 5.0,
             movement_secs: 12.0,
             movement_target_intervals: 3000,
+            movement_target_secs: 3.0,
             movement_min_intervals: 200,
+            movement_min_secs: 1.0,
+            saturated_report_counts: 2,
             clicks_secs: 20.0,
             clicks_target_left: 20,
             clicks_target_right: 5,
@@ -240,7 +286,10 @@ impl Default for Config {
             sticky_threshold_ms: 250.0,
             stuck_threshold_ms: 1000.0,
             stutter_multiplier: 2.5,
+            min_stutter_gap_ms: 2.0,
             unstable_fraction: 0.5,
+            timing_jitter_ms: 0.5,
+            rest_spread_windows: 3,
             scroll_reversal_ms: 60.0,
             lift_idle_ms: 80.0,
             lift_jump_counts: 50.0,
@@ -311,11 +360,21 @@ pub struct AutoTest {
     metrics: Metrics,
     phases_completed: Vec<Phase>,
     report: Option<Report>,
+    /// Phases whose data was too thin to judge (or that found a part which
+    /// registered nothing); any entry rules out a Healthy verdict.
+    untested: Vec<Phase>,
     // Rest
     rest_distance: f64,
+    rest_motion_windows: Vec<bool>,
     // Movement
-    last_move_t: Option<f64>,
-    intervals_ms: Vec<f64>,
+    /// Time and larger-axis counts of the previous motion report.
+    last_move: Option<(f64, i32)>,
+    /// Intervals between consecutive reports that were both saturated.
+    fast_intervals_ms: Vec<f64>,
+    /// Running sum of `fast_intervals_ms`, checked on every report.
+    fast_total_ms: f64,
+    /// All report intervals, for the "move faster" hint.
+    all_intervals: usize,
     movement_pauses: usize,
     // Clicks
     buttons: Vec<ButtonState>,
@@ -325,6 +384,7 @@ pub struct AutoTest {
     last_scroll: Option<(f64, i32)>,
     // Lift
     lift_last_move_t: Option<f64>,
+    lift_resumes: usize,
     lift_jumps: Vec<f64>,
 }
 
@@ -336,7 +396,10 @@ impl AutoTest {
         }
         phases.push(Phase::Clicks);
         phases.push(Phase::Scroll);
-        if cfg.include_lift {
+        // Lift-off compares the size of single reports with a threshold in
+        // sensor counts; per-frame, OS-accelerated pointer deltas cannot be
+        // judged that way.
+        if cfg.include_lift && cfg.timing_reliable {
             phases.push(Phase::Lift);
         }
         Self {
@@ -349,15 +412,20 @@ impl AutoTest {
             metrics: Metrics::default(),
             phases_completed: Vec::new(),
             report: None,
+            untested: Vec::new(),
             rest_distance: 0.0,
-            last_move_t: None,
-            intervals_ms: Vec::new(),
+            rest_motion_windows: Vec::new(),
+            last_move: None,
+            fast_intervals_ms: Vec::new(),
+            fast_total_ms: 0.0,
+            all_intervals: 0,
             movement_pauses: 0,
             buttons: (0..BUTTONS).map(|_| ButtonState::default()).collect(),
             holds_ms: Vec::new(),
             min_press_interval_ms: None,
             last_scroll: None,
             lift_last_move_t: None,
+            lift_resumes: 0,
             lift_jumps: Vec::new(),
         }
     }
@@ -488,14 +556,20 @@ impl AutoTest {
                 },
             ),
             Phase::Movement => {
-                let n = self.intervals_ms.len();
-                let hz = estimate_hz(&self.intervals_ms, 20)
+                let n = self.fast_intervals_ms.len();
+                let progress = (n as f64 / self.cfg.movement_target_intervals as f64)
+                    .min(self.fast_secs() / self.cfg.movement_target_secs);
+                let hz = estimate_hz(&self.fast_intervals_ms, 20)
                     .map(|h| format!("~{} Hz", h))
                     .unwrap_or_else(|| "measuring...".to_string());
-                (
-                    n as f64 / self.cfg.movement_target_intervals as f64,
-                    format!("{} reports, {}", n, hz),
-                )
+                // Most reports too slow to time: tell the user while they can
+                // still do something about it.
+                let hint = if self.all_intervals >= 50 && n * 2 < self.all_intervals {
+                    " - move faster"
+                } else {
+                    ""
+                };
+                (progress, format!("{} fast reports, {}{}", n, hz, hint))
             }
             Phase::Clicks => {
                 let l = self.buttons[0].releases;
@@ -530,7 +604,10 @@ impl AutoTest {
     fn phase_criteria_met(&self, phase: Phase) -> bool {
         match phase {
             Phase::Rest | Phase::Lift => false,
-            Phase::Movement => self.intervals_ms.len() >= self.cfg.movement_target_intervals,
+            Phase::Movement => {
+                self.fast_intervals_ms.len() >= self.cfg.movement_target_intervals
+                    && self.fast_secs() >= self.cfg.movement_target_secs
+            }
             Phase::Clicks => {
                 self.buttons[0].releases >= self.cfg.clicks_target_left
                     && self.buttons[1].releases >= self.cfg.clicks_target_right
@@ -571,12 +648,13 @@ impl AutoTest {
             .findings
             .iter()
             .any(|f| f.severity == Severity::Warning);
-        let core_done = self.phases_completed.contains(&Phase::Clicks)
-            && (!self.cfg.timing_reliable || self.phases_completed.contains(&Phase::Movement));
-        let enough_data = core_done
-            && self.buttons[0].releases >= self.cfg.clicks_min_left
-            && (!self.cfg.timing_reliable
-                || self.metrics.move_intervals >= self.cfg.movement_min_intervals);
+        // Healthy means every step ran and had something to judge; a skipped
+        // step or a part that registered nothing leaves the run Inconclusive.
+        let all_done = self
+            .phases
+            .iter()
+            .all(|p| self.phases_completed.contains(p));
+        let enough_data = all_done && self.untested.is_empty();
         let verdict = if has_critical {
             Verdict::Faulty
         } else if has_warning {
@@ -591,7 +669,7 @@ impl AutoTest {
                 severity: Severity::Info,
                 phase: Phase::Movement,
                 title: "Timing checks skipped".to_string(),
-                detail: "Raw input is not available on this platform, so polling rate and stutter checks were not run.".to_string(),
+                detail: "Raw input is not available, so only checks that need neither precise report timing nor raw sensor counts were run (phantom input at rest, buttons and wheel directions registering, stuck or sticky buttons). Polling rate, stutters, switch bounce, very short presses, scroll-wheel skips and lift-off jumps were NOT tested.".to_string(),
             });
         }
         let mut findings = self.findings.clone();
@@ -606,6 +684,21 @@ impl AutoTest {
             duration_secs: self.now - self.started_at,
         });
         self.state = State::Finished;
+    }
+
+    /// Seconds of fast movement timed so far.
+    fn fast_secs(&self) -> f64 {
+        self.fast_total_ms / 1000.0
+    }
+
+    /// Unit of rest-phase movement: raw sensor counts, or pointer points when
+    /// only the window system's (accelerated) pointer deltas are available.
+    fn move_unit(&self) -> &'static str {
+        if self.cfg.timing_reliable {
+            "counts"
+        } else {
+            "pointer units"
+        }
     }
 
     fn push(&mut self, severity: Severity, phase: Phase, title: &str, detail: String) {
@@ -628,6 +721,12 @@ impl AutoTest {
                 if *dx != 0 || *dy != 0 {
                     self.metrics.rest_move_events += 1;
                     self.rest_distance += ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
+                    let window = ((elapsed - self.cfg.rest_settle_secs).floor() as usize)
+                        .min(self.cfg.rest_secs.ceil() as usize);
+                    if self.rest_motion_windows.len() <= window {
+                        self.rest_motion_windows.resize(window + 1, false);
+                    }
+                    self.rest_motion_windows[window] = true;
                 }
             }
             MouseEvent::ButtonPress(_) => self.metrics.rest_clicks += 1,
@@ -638,8 +737,11 @@ impl AutoTest {
 
     fn finalize_rest(&mut self) {
         self.metrics.rest_distance_counts = self.rest_distance;
+        let windows = self.rest_motion_windows.iter().filter(|&&w| w).count();
+        self.metrics.rest_motion_seconds = windows;
         let n = self.metrics.rest_move_events;
         let d = self.rest_distance;
+        let unit = self.move_unit();
         if n == 0 {
             self.push(
                 Severity::Info,
@@ -653,8 +755,18 @@ impl AutoTest {
                 Phase::Rest,
                 "Slight sensor noise at rest",
                 format!(
-                    "{} movement report(s) totalling {:.1} counts in {:.0} s. This is within normal sensor noise.",
-                    n, d, self.cfg.rest_secs
+                    "{} movement report(s) totalling {:.1} {} in {:.0} s. This is within normal sensor noise.",
+                    n, d, unit, self.cfg.rest_secs
+                ),
+            );
+        } else if windows < self.cfg.rest_spread_windows {
+            self.push(
+                Severity::Info,
+                Phase::Rest,
+                "Brief movement at rest",
+                format!(
+                    "{} movement report(s) totalling {:.1} {}, all within {} second(s), as when the mouse or desk is nudged or the hand leaves late. The sensor was still the rest of the time; a drifting sensor keeps moving. Re-run without touching the mouse or desk if unsure.",
+                    n, d, unit, windows
                 ),
             );
         } else if d < 20.0 {
@@ -663,8 +775,8 @@ impl AutoTest {
                 Phase::Rest,
                 "Sensor jitter at rest",
                 format!(
-                    "{} movement report(s) totalling {:.1} counts while untouched. Try a different surface or clean the sensor lens; if it persists the sensor is noisy.",
-                    n, d
+                    "{} movement report(s) totalling {:.1} {} in {} separate seconds while untouched. Try a different surface or clean the sensor lens; if it persists the sensor is noisy.",
+                    n, d, unit, windows
                 ),
             );
         } else {
@@ -673,8 +785,8 @@ impl AutoTest {
                 Phase::Rest,
                 "Sensor moves on its own",
                 format!(
-                    "{} movement report(s) totalling {:.1} counts while untouched. The sensor is drifting or the surface is unsuitable (glass, glossy, or patterned).",
-                    n, d
+                    "{} movement report(s) totalling {:.1} {} in {} separate seconds while untouched. The sensor is drifting or the surface is unsuitable (glass, glossy, or patterned). If your hand was on the mouse, re-run without touching it.",
+                    n, d, unit, windows
                 ),
             );
         }
@@ -709,61 +821,86 @@ impl AutoTest {
             if *dx == 0 && *dy == 0 {
                 return;
             }
-            if let Some(last) = self.last_move_t {
-                let interval_ms = (t - last) * 1000.0;
+            let counts = dx.abs().max(dy.abs());
+            if let Some((last_t, last_counts)) = self.last_move {
+                let interval_ms = (t - last_t) * 1000.0;
                 if interval_ms > 1000.0 {
                     self.movement_pauses += 1;
                 } else if interval_ms > 0.0 {
-                    self.intervals_ms.push(interval_ms);
+                    self.all_intervals += 1;
+                    let fast = self.cfg.saturated_report_counts;
+                    // Longer gaps are a lift or a pause, not a poll (as in
+                    // `estimate_hz`), and must not count as timed movement.
+                    if last_counts >= fast && counts >= fast && interval_ms <= MAX_POLL_INTERVAL_MS
+                    {
+                        self.fast_intervals_ms.push(interval_ms);
+                        self.fast_total_ms += interval_ms;
+                    }
                 }
             }
-            self.last_move_t = Some(t);
+            self.last_move = Some((t, counts));
         }
     }
 
     fn finalize_movement(&mut self) {
-        let usable: Vec<f64> = self
-            .intervals_ms
-            .iter()
-            .copied()
-            .filter(|&i| i > 0.0 && i <= MAX_POLL_INTERVAL_MS)
-            .collect();
+        let usable = self.fast_intervals_ms.clone();
+        let usable_secs = self.fast_secs();
         self.metrics.move_intervals = usable.len();
         self.metrics.movement_pauses = self.movement_pauses;
 
-        if usable.len() < self.cfg.movement_min_intervals {
+        if usable.len() < self.cfg.movement_min_intervals
+            || usable_secs < self.cfg.movement_min_secs
+        {
+            self.untested.push(Phase::Movement);
             self.push(
                 Severity::Info,
                 Phase::Movement,
-                "Not enough movement recorded",
+                "Not enough fast movement recorded",
                 format!(
-                    "Only {} motion reports were captured (need {}). Polling rate and stutter checks are inconclusive; keep the mouse moving for the whole step.",
+                    "Only {} of {} report intervals ({:.1} s) were captured while the mouse moved fast enough to report on every poll (need {} over {:.0} s). A slowly moving mouse skips polls that carry no motion, so its gaps say nothing about polling. Polling rate and stutter checks are inconclusive; move in brisk, wide circles for the whole step.",
                     usable.len(),
-                    self.cfg.movement_min_intervals
+                    self.all_intervals,
+                    usable_secs,
+                    self.cfg.movement_min_intervals,
+                    self.cfg.movement_min_secs
                 ),
             );
+            if self.movement_pauses > 0 {
+                self.push_movement_pauses();
+            }
             return;
         }
 
+        // Saturated reports come once per poll, so their typical interval is
+        // the poll period itself.
         let mut sorted = usable.clone();
-        let median = median_in_place(&mut sorted).unwrap_or(0.0);
+        let period = median_in_place(&mut sorted).unwrap_or(0.0);
         let hz = estimate_hz(&usable, self.cfg.movement_min_intervals);
         let nominal = hz.map(|h| nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
         self.metrics.max_interval_ms = usable.iter().copied().fold(0.0, f64::max);
 
-        let stutters = usable
+        let stutter_gap = (period * self.cfg.stutter_multiplier).max(self.cfg.min_stutter_gap_ms);
+        let unstable_dev = (period * self.cfg.unstable_fraction).max(self.cfg.timing_jitter_ms);
+        let late: Vec<f64> = usable
             .iter()
-            .filter(|&&i| i > median * self.cfg.stutter_multiplier)
-            .count();
+            .copied()
+            .filter(|&i| i > stutter_gap)
+            .collect();
+        let stutters = late.len();
         let unstable = usable
             .iter()
-            .filter(|&&i| (i - median).abs() > median * self.cfg.unstable_fraction)
+            .filter(|&&i| (i - period).abs() > unstable_dev)
             .count();
         self.metrics.stutter_count = stutters;
         self.metrics.stutter_rate_percent = stutters as f64 / usable.len() as f64 * 100.0;
         self.metrics.unstable_interval_percent = unstable as f64 / usable.len() as f64 * 100.0;
+        // Severity is judged on the share of movement time spent waiting for
+        // late reports, which means the same at 125 Hz and at 8 kHz (a count
+        // of late reports would need 64x more hitches at 8 kHz to register).
+        let lost_percent =
+            late.iter().map(|i| i - period).sum::<f64>() / (usable_secs * 1000.0) * 100.0;
 
         if let (Some(hz), Some(nominal)) = (hz, nominal) {
             self.push(
@@ -771,8 +908,8 @@ impl AutoTest {
                 Phase::Movement,
                 "Polling rate measured",
                 format!(
-                    "Median report interval {:.2} ms = {} Hz (looks like a {} Hz mouse), from {} reports.",
-                    median,
+                    "Typical report interval {:.3} ms = {} Hz (looks like a {} Hz mouse), from {} reports sent while moving fast.",
+                    period,
                     hz,
                     nominal,
                     usable.len()
@@ -791,58 +928,61 @@ impl AutoTest {
             }
         }
 
-        let rate = self.metrics.stutter_rate_percent;
-        if rate > 5.0 {
+        if lost_percent > 5.0 {
             self.push(
                 Severity::Critical,
                 Phase::Movement,
                 "Frequent stutters",
                 format!(
-                    "{} of {} reports ({:.1}%) arrived more than {:.1}x later than normal (worst gap {:.1} ms). Expect visible hitching. Check the USB port/hub, wireless interference, and CPU load.",
+                    "{} of {} reports arrived more than {:.1} ms after the previous one (normal {:.2} ms, worst gap {:.1} ms), costing {:.1}% of the movement time. Expect visible hitching. Check the USB port/hub, wireless interference, and CPU load.",
                     stutters,
                     usable.len(),
-                    rate,
-                    self.cfg.stutter_multiplier,
-                    self.metrics.max_interval_ms
+                    stutter_gap,
+                    period,
+                    self.metrics.max_interval_ms,
+                    lost_percent
                 ),
             );
-        } else if rate > 1.0 {
+        } else if lost_percent > 1.0 {
             self.push(
                 Severity::Warning,
                 Phase::Movement,
                 "Occasional stutters",
                 format!(
-                    "{} of {} reports ({:.1}%) arrived late (worst gap {:.1} ms). Usually a busy USB hub, wireless interference, or background load.",
+                    "{} of {} reports arrived late (worst gap {:.1} ms), costing {:.1}% of the movement time. Usually a busy USB hub, wireless interference, or background load.",
                     stutters,
                     usable.len(),
-                    rate,
-                    self.metrics.max_interval_ms
+                    self.metrics.max_interval_ms,
+                    lost_percent
                 ),
             );
         }
-        if self.metrics.unstable_interval_percent > 10.0 && rate <= 5.0 {
+        if self.metrics.unstable_interval_percent > 10.0 && lost_percent <= 5.0 {
             self.push(
                 Severity::Warning,
                 Phase::Movement,
                 "Unstable polling interval",
                 format!(
-                    "{:.1}% of report intervals were more than {:.0}% away from the median. The report rate is not steady.",
-                    self.metrics.unstable_interval_percent,
-                    self.cfg.unstable_fraction * 100.0
+                    "{:.1}% of report intervals while moving fast were more than {:.2} ms away from the typical {:.3} ms. The report rate is not steady.",
+                    self.metrics.unstable_interval_percent, unstable_dev, period
                 ),
             );
         }
         if self.movement_pauses > 0 {
-            self.push(
-                Severity::Info,
-                Phase::Movement,
-                "Pauses during movement",
-                format!(
-                    "{} gap(s) longer than 1 s were seen while you were asked to keep moving. If you did not stop, the connection is dropping out.",
-                    self.movement_pauses
-                ),
-            );
+            self.push_movement_pauses();
         }
+    }
+
+    fn push_movement_pauses(&mut self) {
+        self.push(
+            Severity::Info,
+            Phase::Movement,
+            "Pauses during movement",
+            format!(
+                "{} gap(s) longer than 1 s were seen while you were asked to keep moving. If you did not stop, the connection is dropping out.",
+                self.movement_pauses
+            ),
+        );
     }
 
     // ── Clicks ─────────────────────────────────────────────────────────
@@ -852,10 +992,13 @@ impl AutoTest {
             MouseEvent::ButtonPress(b) => {
                 let i = button_index(*b);
                 let (cfg_bounce, cfg_gap) = (self.cfg.bounce_threshold_ms, self.cfg.bounce_gap_ms);
+                // Bounce lives on a 1-50 ms scale; frame-quantised timestamps
+                // put a quick click's press and release in the same frame.
+                let timed = self.cfg.timing_reliable;
                 let st = &mut self.buttons[i];
                 st.presses += 1;
                 let mut bounced = false;
-                if let Some(last) = st.last_press {
+                if let (Some(last), true) = (st.last_press, timed) {
                     let interval_ms = (t - last) * 1000.0;
                     if interval_ms < cfg_bounce {
                         bounced = true;
@@ -865,7 +1008,7 @@ impl AutoTest {
                             .map_or(interval_ms, |m: f64| m.min(interval_ms)),
                     );
                 }
-                if let Some(last_release) = st.last_release {
+                if let (Some(last_release), true) = (st.last_release, timed) {
                     if (t - last_release) * 1000.0 < cfg_gap {
                         bounced = true;
                     }
@@ -879,12 +1022,13 @@ impl AutoTest {
             MouseEvent::ButtonRelease(b) => {
                 let i = button_index(*b);
                 let (micro, sticky) = (self.cfg.micro_press_ms, self.cfg.sticky_threshold_ms);
+                let timed = self.cfg.timing_reliable;
                 let st = &mut self.buttons[i];
                 if let Some(pressed_at) = st.pressed_at.take() {
                     let hold_ms = (t - pressed_at) * 1000.0;
                     st.releases += 1;
                     st.last_release = Some(t);
-                    if hold_ms < micro {
+                    if timed && hold_ms < micro {
                         st.micro_presses += 1;
                     }
                     if hold_ms > sticky {
@@ -933,35 +1077,62 @@ impl AutoTest {
             self.metrics.max_hold_ms = self.holds_ms.iter().copied().fold(0.0, f64::max);
         }
 
-        if left < self.cfg.clicks_min_left {
+        // A button that never came back up is a fault however few clicks
+        // happened: once it sticks, further clicks cannot register.
+        if stuck > 0 {
+            self.push(
+                Severity::Critical,
+                Phase::Clicks,
+                "Button stuck down",
+                format!(
+                    "The {} button was still reported as pressed at the end of the step. The switch is not releasing.",
+                    stuck_names.join(" and ")
+                ),
+            );
+        }
+
+        let left_stuck = stuck_names.contains(&"left");
+        if left >= self.cfg.clicks_min_left {
             self.push(
                 Severity::Info,
                 Phase::Clicks,
-                "Not enough clicks recorded",
+                "Clicks recorded",
                 format!(
-                    "Only {} left click(s) were recorded (need at least {}). Switch checks are inconclusive.",
-                    left, self.cfg.clicks_min_left
+                    "Left {}, right {}, other {}. Average hold {:.0} ms, longest {:.0} ms.",
+                    left, right, other, self.metrics.avg_hold_ms, self.metrics.max_hold_ms
                 ),
             );
-            return;
+        } else {
+            self.untested.push(Phase::Clicks);
+            // A stuck left button explains the low count by itself.
+            if !left_stuck {
+                let detail = if left == 0 {
+                    "No left-button clicks were registered. If you clicked the left button, it may be dead; if you did not, the switch checks were not run.".to_string()
+                } else {
+                    format!(
+                        "Only {} left click(s) were registered (need at least {}). If you clicked more often than that, the button is missing clicks; otherwise the switch checks are inconclusive.",
+                        left, self.cfg.clicks_min_left
+                    )
+                };
+                let title = if left == 0 {
+                    "No left clicks registered"
+                } else {
+                    "Not enough clicks recorded"
+                };
+                self.push(Severity::Info, Phase::Clicks, title, detail);
+            }
         }
 
-        self.push(
-            Severity::Info,
-            Phase::Clicks,
-            "Clicks recorded",
-            format!(
-                "Left {}, right {}, other {}. Average hold {:.0} ms, longest {:.0} ms.",
-                left, right, other, self.metrics.avg_hold_ms, self.metrics.max_hold_ms
-            ),
-        );
-
+        // Bounce evidence counts even in a short run. Neither a finger nor a
+        // healthy switch can re-press within these gaps, so severity follows
+        // the number of bounces, not their share: one could be a fluke worth
+        // a re-run, a repeat in the same run is a failing switch.
         let bounce_rate = if total_presses > 0 {
             bounces as f64 / total_presses as f64 * 100.0
         } else {
             0.0
         };
-        if bounces >= 3 || bounce_rate > 5.0 {
+        if bounces >= 2 {
             self.push(
                 Severity::Critical,
                 Phase::Clicks,
@@ -971,14 +1142,14 @@ impl AutoTest {
                     bounces, self.cfg.bounce_gap_ms, self.cfg.bounce_threshold_ms, bounce_rate
                 ),
             );
-        } else if bounces > 0 {
+        } else if bounces == 1 {
             self.push(
                 Severity::Warning,
                 Phase::Clicks,
                 "Possible switch bounce",
                 format!(
-                    "{} press(es) came within {:.0} ms of the previous release of the same button. Re-run the test; a repeat means the switch is starting to fail.",
-                    bounces, self.cfg.bounce_gap_ms
+                    "One press came within {:.0} ms of the previous release, or within {:.0} ms of the previous press, of the same button. Re-run the test; a repeat means the switch is starting to fail.",
+                    self.cfg.bounce_gap_ms, self.cfg.bounce_threshold_ms
                 ),
             );
         }
@@ -1014,23 +1185,13 @@ impl AutoTest {
                 ),
             );
         }
-        if stuck > 0 {
-            self.push(
-                Severity::Critical,
-                Phase::Clicks,
-                "Button stuck down",
-                format!(
-                    "The {} button was still reported as pressed at the end of the step. The switch is not releasing.",
-                    stuck_names.join(" and ")
-                ),
-            );
-        }
-        if right == 0 {
+        if right == 0 && !stuck_names.contains(&"right") {
+            self.untested.push(Phase::Clicks);
             self.push(
                 Severity::Info,
                 Phase::Clicks,
-                "No right clicks recorded",
-                "The right button was not tested. Click it a few times next run to check it."
+                "No right clicks registered",
+                "No right-button clicks were registered. If you clicked the right button, it may be dead; if you did not, it was not tested."
                     .to_string(),
             );
         }
@@ -1050,7 +1211,10 @@ impl AutoTest {
             } else {
                 self.metrics.scroll_down += notches;
             }
-            if let Some((last_t, last_sign)) = self.last_scroll {
+            // A skip is a wrong-way notch within tens of ms, which frame-
+            // quantised timestamps cannot resolve.
+            if let (Some((last_t, last_sign)), true) = (self.last_scroll, self.cfg.timing_reliable)
+            {
                 if last_sign != sign && (t - last_t) * 1000.0 < self.cfg.scroll_reversal_ms {
                     self.metrics.scroll_reversals += 1;
                 }
@@ -1065,14 +1229,19 @@ impl AutoTest {
         let total = up + down;
         let reversals = self.metrics.scroll_reversals;
         if total < 5 {
+            self.untested.push(Phase::Scroll);
             self.push(
                 Severity::Info,
                 Phase::Scroll,
                 "Not enough scrolling recorded",
-                format!(
-                    "Only {} notch(es) were recorded. Scroll wheel checks are inconclusive.",
-                    total
-                ),
+                if total == 0 {
+                    "No scroll notches were registered. If you turned the wheel, it may be dead; if you did not, the wheel was not tested.".to_string()
+                } else {
+                    format!(
+                        "Only {} notch(es) were registered (need 5). If you scrolled more than that, the wheel is missing notches; otherwise the wheel checks are inconclusive.",
+                        total
+                    )
+                },
             );
             return;
         }
@@ -1083,18 +1252,26 @@ impl AutoTest {
             format!("{} notches down, {} notches up.", down, up),
         );
         if up == 0 || down == 0 {
+            let (seen, missing) = if up == 0 {
+                ("down", "up")
+            } else {
+                ("up", "down")
+            };
+            self.untested.push(Phase::Scroll);
             self.push(
-                Severity::Warning,
+                Severity::Info,
                 Phase::Scroll,
                 "Wheel only registered one direction",
                 format!(
-                    "{} notches in one direction and none in the other. If you scrolled both ways, one direction of the encoder is dead.",
-                    total
+                    "{} notches {} and none {}. If you also scrolled {}, that direction of the wheel may be dead; if you did not, it was not tested.",
+                    total, seen, missing, missing
                 ),
             );
         }
+        // Like switch bounce, judged on the count. Three are needed because a
+        // healthy wheel let go just past a detent can spring back one notch.
         let rate = reversals as f64 / total as f64 * 100.0;
-        if reversals >= 3 || rate > 5.0 {
+        if reversals >= 3 {
             self.push(
                 Severity::Critical,
                 Phase::Scroll,
@@ -1127,8 +1304,11 @@ impl AutoTest {
             let distance = ((*dx as f64).powi(2) + (*dy as f64).powi(2)).sqrt();
             if let Some(last) = self.lift_last_move_t {
                 let gap_ms = (t - last) * 1000.0;
-                if gap_ms > self.cfg.lift_idle_ms && distance > self.cfg.lift_jump_counts {
-                    self.lift_jumps.push(distance);
+                if gap_ms > self.cfg.lift_idle_ms {
+                    self.lift_resumes += 1;
+                    if distance > self.cfg.lift_jump_counts {
+                        self.lift_jumps.push(distance);
+                    }
                 }
             }
             self.lift_last_move_t = Some(t);
@@ -1140,7 +1320,17 @@ impl AutoTest {
         let max = self.lift_jumps.iter().copied().fold(0.0, f64::max);
         self.metrics.lift_jumps = n;
         self.metrics.lift_max_jump_counts = max;
-        if n == 0 {
+        if self.lift_resumes == 0 {
+            // Without a pause followed by movement there was no set-down to
+            // check, so "no jumps" would claim something never measured.
+            self.untested.push(Phase::Lift);
+            self.push(
+                Severity::Info,
+                Phase::Lift,
+                "Lift-off not tested",
+                "No movement after a pause was recorded, so cursor jumps on set-down could not be checked. Lift the mouse, set it down and move it again during this step.".to_string(),
+            );
+        } else if n == 0 {
             self.push(
                 Severity::Info,
                 Phase::Lift,
@@ -1238,7 +1428,8 @@ mod tests {
 
         fn good_rest(&mut self) {
             assert_eq!(self.phase(), Some(Phase::Rest));
-            self.idle(6.1);
+            let cfg = self.at.config();
+            self.idle(cfg.rest_settle_secs + cfg.rest_secs + 0.1);
         }
 
         fn good_movement(&mut self) {
@@ -1277,6 +1468,64 @@ mod tests {
             }
             self.idle(10.5);
         }
+    }
+
+    /// Feeds `secs` of circular motion the way a real mouse reports it: the
+    /// sensor moves `speed` counts/s along a circle, the host polls at
+    /// `poll_hz`, and a report is sent only on polls where a whole count
+    /// accrued. `drop_every`/`drop_len` make the link lose `drop_len`
+    /// consecutive polls every `drop_every` polls (the counts carry over).
+    fn circle_stream(
+        sim: &mut Sim,
+        secs: f64,
+        poll_hz: f64,
+        speed: f64,
+        drop_every: usize,
+        drop_len: usize,
+    ) {
+        let period_s = 1.5;
+        let omega = 2.0 * std::f64::consts::PI / period_s;
+        let radius = speed / omega;
+        let t0 = sim.t;
+        let polls = (secs * poll_hz) as usize;
+        let pos = |t: f64| {
+            let a = omega * (t - t0);
+            (
+                (radius * a.cos()).floor() as i64,
+                (radius * a.sin()).floor() as i64,
+            )
+        };
+        let (mut rx, mut ry) = pos(t0);
+        for k in 1..=polls {
+            let t = t0 + k as f64 / poll_hz;
+            if drop_every > 0 && k % drop_every < drop_len {
+                continue;
+            }
+            let (x, y) = pos(t);
+            if x != rx || y != ry {
+                sim.t = t;
+                sim.at.feed(
+                    t,
+                    &MouseEvent::Move {
+                        dx: (x - rx) as i32,
+                        dy: (y - ry) as i32,
+                    },
+                );
+                rx = x;
+                ry = y;
+            }
+        }
+        sim.t = t0 + secs;
+        sim.at.tick(sim.t);
+    }
+
+    fn movement_findings(sim: &Sim) -> Vec<(Severity, String)> {
+        sim.at
+            .findings_so_far()
+            .iter()
+            .filter(|f| f.phase == Phase::Movement)
+            .map(|f| (f.severity, f.title.clone()))
+            .collect()
     }
 
     fn titles(report: &Report) -> Vec<&str> {
@@ -1345,30 +1594,33 @@ mod tests {
     #[test]
     fn test_rest_phase_ignores_settle_window_but_flags_jitter_after() {
         let mut sim = Sim::new(cfg());
-        // Within the 1 s settle window: ignored
+        // Within the 2 s settle window: ignored
         sim.t = 0.5;
         sim.at.feed(sim.t, &MouseEvent::Move { dx: 30, dy: 30 });
         sim.at
             .feed(sim.t, &MouseEvent::ButtonRelease(MouseButton::Left));
-        // After settle: jitter
-        sim.t = 2.0;
+        sim.t = 1.9;
+        sim.at.feed(sim.t, &MouseEvent::Move { dx: -40, dy: 5 });
+        // After settle: single-count jitter throughout the rest window
+        sim.t = 2.2;
         for _ in 0..10 {
             sim.at.feed(sim.t, &MouseEvent::Move { dx: 1, dy: 0 });
-            sim.t += 0.1;
+            sim.t += 0.45;
         }
-        sim.idle(6.0);
+        sim.idle(3.0);
         assert_eq!(sim.phase(), Some(Phase::Movement));
         let f = sim.at.findings_so_far();
         assert!(f
             .iter()
             .any(|f| f.title == "Sensor jitter at rest" && f.severity == Severity::Warning));
         assert_eq!(sim.at.metrics.rest_move_events, 10);
+        assert_eq!(sim.at.metrics.rest_motion_seconds, 5);
     }
 
     #[test]
     fn test_rest_phantom_click_and_drift_are_critical() {
         let mut sim = Sim::new(cfg());
-        sim.t = 2.0;
+        sim.t = 2.5;
         sim.at
             .feed(sim.t, &MouseEvent::ButtonPress(MouseButton::Left));
         sim.at
@@ -1395,12 +1647,13 @@ mod tests {
     fn test_movement_stutters_detected() {
         let mut sim = Sim::new(cfg());
         sim.good_rest();
-        // 1000 Hz with a 10 ms stall every 20 reports (5% stutters)
+        // 1000 Hz moving fast (several counts per poll) with a 10 ms stall
+        // every 20 reports (5% stutters)
         let mut n = 0;
         while sim.at.current_phase() == Some(Phase::Movement) && n < 20_000 {
             n += 1;
             sim.t += if n % 20 == 0 { 0.010 } else { 0.001 };
-            sim.at.feed(sim.t, &MouseEvent::Move { dx: 1, dy: 1 });
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 4, dy: 3 });
         }
         let f = sim.at.findings_so_far();
         assert!(
@@ -1439,7 +1692,7 @@ mod tests {
             .at
             .findings_so_far()
             .iter()
-            .any(|f| f.title == "Not enough movement recorded"));
+            .any(|f| f.title == "Not enough fast movement recorded"));
         sim.good_clicks();
         sim.good_scroll();
         sim.good_lift();
@@ -1526,7 +1779,7 @@ mod tests {
         assert!(f
             .iter()
             .any(|f| f.title == "Button stuck down" && f.severity == Severity::Critical));
-        assert!(f.iter().any(|f| f.title == "No right clicks recorded"));
+        assert!(f.iter().any(|f| f.title == "No right clicks registered"));
         assert_eq!(sim.at.metrics.sticky_releases, 3);
         assert_eq!(sim.at.metrics.stuck_buttons, 1);
     }
@@ -1651,16 +1904,18 @@ mod tests {
         assert_eq!(s.index, 0);
         assert_eq!(s.total, 5);
         assert!(s.progress < 0.01);
-        sim.idle(3.0);
+        // Rest lasts 2 s settle + 5 s
+        sim.idle(3.5);
         let s = sim.at.status().unwrap();
         assert!(s.progress > 0.4 && s.progress < 0.6);
-        assert!(s.remaining_secs > 2.5 && s.remaining_secs < 3.5);
-        sim.idle(3.2);
+        assert!(s.remaining_secs > 3.0 && s.remaining_secs < 4.0);
+        sim.idle(3.7);
         sim.move_for(1.6, 1.0);
         let s = sim.at.status().unwrap();
         assert_eq!(s.phase, Phase::Movement);
         assert!(s.detail.contains("Hz"));
-        // data progress (1600/3000) beats time progress (1.6/12)
+        assert!(!s.detail.contains("move faster"));
+        // data progress (1600/3000 reports, 1.6/3 s) beats time progress (1.6/12)
         assert!(s.progress > 0.5, "{}", s.progress);
     }
 
@@ -1684,5 +1939,334 @@ mod tests {
         let json = serde_json::to_string(sim.at.report().unwrap()).unwrap();
         assert!(json.contains("\"verdict\":\"Inconclusive\""));
         assert!(json.contains("\"phases_completed\":[\"Rest\"]"));
+    }
+
+    // ── regression tests for audit findings ────────────────────────────
+
+    #[test]
+    fn test_slow_movement_on_healthy_1khz_mouse_is_not_flagged() {
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        // 300 counts/s: under one count per poll, so reports come every 2-5 ms
+        circle_stream(&mut sim, 2.0, 1000.0, 300.0, 0, 0);
+        let status = sim.at.status().unwrap();
+        assert!(status.detail.contains("move faster"), "{}", status.detail);
+        circle_stream(&mut sim, 10.5, 1000.0, 300.0, 0, 0);
+        assert_eq!(sim.phase(), Some(Phase::Clicks));
+        assert!(sim
+            .at
+            .findings_so_far()
+            .iter()
+            .any(|f| f.title == "Not enough fast movement recorded"));
+        let f = movement_findings(&sim);
+        assert!(
+            f.iter().all(|(s, _)| *s == Severity::Info),
+            "healthy mouse flagged: {:?}",
+            f
+        );
+        // Either measured correctly or honestly not measured
+        assert!(
+            matches!(sim.at.metrics.polling_hz, None | Some(990..=1010)),
+            "{:?}",
+            sim.at.metrics.polling_hz
+        );
+    }
+
+    #[test]
+    fn test_slow_movement_on_healthy_8khz_mouse_is_not_flagged() {
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        // 4000 counts/s at 8 kHz is half a count per poll
+        circle_stream(&mut sim, 12.5, 8000.0, 4000.0, 0, 0);
+        assert_eq!(sim.phase(), Some(Phase::Clicks));
+        let f = movement_findings(&sim);
+        assert!(
+            f.iter().all(|(s, _)| *s == Severity::Info),
+            "healthy mouse flagged: {:?}",
+            f
+        );
+        assert!(
+            matches!(sim.at.metrics.polling_hz, None | Some(7900..=8100)),
+            "{:?}",
+            sim.at.metrics.polling_hz
+        );
+    }
+
+    #[test]
+    fn test_normal_speed_circles_measure_the_true_rate() {
+        for (hz, speed) in [(1000.0, 2500.0), (8000.0, 24000.0), (125.0, 1500.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            circle_stream(&mut sim, 12.5, hz, speed, 0, 0);
+            assert_eq!(sim.phase(), Some(Phase::Clicks), "{} Hz", hz);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} Hz flagged: {:?}",
+                hz,
+                f
+            );
+            assert_eq!(
+                sim.at.metrics.polling_nominal_hz,
+                Some(hz as u32),
+                "{:?}",
+                f
+            );
+        }
+    }
+
+    #[test]
+    fn test_host_timestamp_jitter_is_not_flagged() {
+        // Fast movement, every poll carries counts, but the host stamps
+        // reports late by up to `jitter` and sometimes hands two over at once.
+        for (hz, jitter_ms) in [(1000.0, 0.3), (8000.0, 0.06)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let t0 = sim.t;
+            let mut seed: u32 = 12345;
+            for k in 1..=(12.5 * hz) as usize {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let noise = (seed >> 16) as f64 / 65_536.0 * jitter_ms / 1000.0;
+                // Every 40th report waits for the next one (batched delivery)
+                let late = if k % 40 == 0 { 1.0 / hz } else { 0.0 };
+                let t = t0 + k as f64 / hz + noise + late;
+                sim.t = sim.t.max(t);
+                sim.at.feed(sim.t, &MouseEvent::Move { dx: 5, dy: -3 });
+            }
+            sim.idle(12.5);
+            assert_eq!(sim.phase(), Some(Phase::Scroll), "{} Hz", hz);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} Hz flagged: {:?}",
+                hz,
+                f
+            );
+            assert_eq!(sim.at.metrics.polling_nominal_hz, Some(hz as u32));
+        }
+    }
+
+    #[test]
+    fn test_dropouts_during_fast_movement_are_flagged() {
+        // 1 kHz, fast circles, 6 polls lost every 50 polls
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        circle_stream(&mut sim, 12.5, 1000.0, 5000.0, 50, 6);
+        let f = movement_findings(&sim);
+        assert!(
+            f.iter()
+                .any(|(s, t)| *s >= Severity::Warning && t.contains("stutter")),
+            "{:?}",
+            f
+        );
+        assert_eq!(sim.at.metrics.polling_hz, Some(1000));
+
+        // 8 kHz, fast circles, 4 ms lost every 50 ms
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        circle_stream(&mut sim, 12.5, 8000.0, 30000.0, 400, 32);
+        let f = movement_findings(&sim);
+        assert!(
+            f.iter()
+                .any(|(s, t)| *s >= Severity::Warning && t.contains("stutter")),
+            "{:?}",
+            f
+        );
+    }
+
+    #[test]
+    fn test_single_bump_during_rest_is_not_a_fault() {
+        let mut sim = Sim::new(cfg());
+        // The hand leaves the mouse a little late and nudges it once
+        sim.idle(2.2);
+        for _ in 0..8 {
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 9, dy: -4 });
+            sim.t += 0.008;
+        }
+        sim.idle(6.0);
+        assert_eq!(sim.phase(), Some(Phase::Movement));
+        let f = sim.at.findings_so_far();
+        assert!(
+            f.iter().all(|f| f.severity == Severity::Info),
+            "{:?}",
+            f.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_stuck_button_reported_even_with_few_clicks() {
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        for _ in 0..2 {
+            sim.click(MouseButton::Left, 70.0, 200.0);
+        }
+        // The third press never comes back up; further clicks do nothing
+        sim.at
+            .feed(sim.t, &MouseEvent::ButtonPress(MouseButton::Left));
+        sim.idle(21.0);
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert!(
+            r.findings
+                .iter()
+                .any(|f| f.title == "Button stuck down" && f.severity == Severity::Critical),
+            "{:?}",
+            titles(r)
+        );
+        assert_eq!(r.verdict, Verdict::Faulty);
+    }
+
+    #[test]
+    fn test_dead_right_button_or_wheel_is_never_healthy() {
+        // No right clicks at all
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        for _ in 0..20 {
+            sim.click(MouseButton::Left, 70.0, 200.0);
+        }
+        sim.idle(21.0);
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Inconclusive, "{:?}", titles(r));
+
+        // No scrolling at all
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        sim.idle(12.5);
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Inconclusive, "{:?}", titles(r));
+    }
+
+    #[test]
+    fn test_skipped_lift_or_aborted_run_is_not_healthy() {
+        // Lift step without a single pause-then-move
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.idle(10.5);
+        let r = sim.at.report().unwrap();
+        assert!(titles(r).contains(&"Lift-off not tested"));
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+
+        // Stopped during the scroll step: scroll and lift never ran
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        sim.at.abort();
+        let r = sim.at.report().unwrap();
+        assert!(r.aborted);
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn test_one_scroll_direction_is_untested_not_a_fault() {
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        for _ in 0..12 {
+            sim.scroll(-1, 80.0);
+        }
+        sim.idle(13.0);
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.count(Severity::Warning), 0, "{:?}", titles(r));
+        assert_eq!(r.verdict, Verdict::Inconclusive, "{:?}", titles(r));
+    }
+
+    #[test]
+    fn test_bounce_severity_depends_on_count_not_sample_size() {
+        // One isolated bounce in a short run: a warning, not a fault
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        for i in 0..8 {
+            sim.click(MouseButton::Left, 70.0, 200.0);
+            if i == 3 {
+                sim.t -= 0.192;
+                sim.click(MouseButton::Left, 30.0, 200.0);
+            }
+        }
+        sim.idle(21.0);
+        let f = sim.at.findings_so_far();
+        assert_eq!(sim.at.metrics.bounce_events, 1);
+        assert!(
+            !f.iter().any(|f| f.severity == Severity::Critical),
+            "{:?}",
+            f.iter().map(|f| &f.title).collect::<Vec<_>>()
+        );
+        assert!(f
+            .iter()
+            .any(|f| f.title == "Possible switch bounce" && f.severity == Severity::Warning));
+
+        // Two bounces in a long run: a repeat, so a fault
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        for i in 0..40 {
+            sim.click(MouseButton::Left, 70.0, 150.0);
+            if i == 10 || i == 30 {
+                sim.t -= 0.142;
+                sim.click(MouseButton::Left, 30.0, 150.0);
+            }
+        }
+        for _ in 0..5 {
+            sim.click(MouseButton::Right, 80.0, 200.0);
+        }
+        let f = sim.at.findings_so_far();
+        assert_eq!(sim.at.metrics.bounce_events, 2);
+        assert!(f
+            .iter()
+            .any(|f| f.title.starts_with("Switch bounce") && f.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn test_framework_input_skips_timing_and_count_checks() {
+        let mut sim = Sim::new(Config {
+            timing_reliable: false,
+            ..cfg()
+        });
+        assert_eq!(
+            sim.at.phases(),
+            &[Phase::Rest, Phase::Clicks, Phase::Scroll]
+        );
+        sim.good_rest();
+        assert_eq!(sim.phase(), Some(Phase::Clicks));
+        // Frame-quantised: press and release of a quick click share a frame
+        for _ in 0..20 {
+            sim.click(MouseButton::Left, 0.0, 200.0);
+        }
+        for _ in 0..5 {
+            sim.click(MouseButton::Right, 0.0, 16.0);
+        }
+        assert_eq!(sim.phase(), Some(Phase::Scroll));
+        // Smooth scrolling turned into whole notches; two land in one frame
+        for _ in 0..10 {
+            sim.scroll(-1, 0.0);
+            sim.scroll(-1, 16.0);
+        }
+        sim.scroll(1, 16.0);
+        for _ in 0..10 {
+            sim.scroll(1, 90.0);
+        }
+        assert!(sim.at.is_finished());
+        let r = sim.at.report().unwrap();
+        assert!(
+            r.findings.iter().all(|f| f.severity == Severity::Info),
+            "{:?}",
+            titles(r)
+        );
+        assert_eq!(r.verdict, Verdict::Healthy, "{:?}", titles(r));
+        assert!(!r.timing_reliable);
     }
 }

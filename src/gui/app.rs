@@ -341,7 +341,9 @@ impl MouseTestKitApp {
 
                     ui.add_space(8.0);
 
-                    // Export buttons row
+                    // Export buttons row. Disabled during Auto Diagnostics: the
+                    // file dialog blocks the window while the step timer runs.
+                    let export_enabled = !self.auto_test_panel.is_running();
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
 
@@ -356,8 +358,9 @@ impl MouseTestKitApp {
                         .min_size(egui::vec2(50.0, 28.0));
 
                         if ui
-                            .add(json_btn)
+                            .add_enabled(export_enabled, json_btn)
                             .on_hover_text("Export all results to JSON")
+                            .on_disabled_hover_text("Finish or abort Auto Diagnostics first")
                             .clicked()
                         {
                             self.export_json();
@@ -374,8 +377,9 @@ impl MouseTestKitApp {
                         .min_size(egui::vec2(50.0, 28.0));
 
                         if ui
-                            .add(csv_btn)
+                            .add_enabled(export_enabled, csv_btn)
                             .on_hover_text("Export all results to CSV")
+                            .on_disabled_hover_text("Finish or abort Auto Diagnostics first")
                             .clicked()
                         {
                             self.export_csv();
