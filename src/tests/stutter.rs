@@ -25,7 +25,7 @@ const GRAPH_SAMPLES: usize = 60;
 /// count the test as run.
 pub fn run() -> bool {
     println!("\n=== Stutter Detection Test ===");
-    println!("Move your mouse quickly and continuously in circles.");
+    println!("Move your mouse quickly and continuously in circles, without lifting it.");
     println!("Only fast, steady movement is judged; slow movement, direction");
     println!("reversals and pauses are ignored because a mouse legitimately");
     println!("sends fewer reports then. At 4000-8000 Hz use 1600+ DPI or move faster.");
@@ -159,10 +159,23 @@ fn print_summary(detector: &StutterDetector) {
         println!("  Worst gap: {:.1} ms", detector.worst_gap_ms());
         if detector.freezes() > 0 {
             println!(
-                "  Freezes (0.1-1 s while moving the same way): {}",
-                detector.freezes()
+                "  Freezes (0.1-1 s while moving): {} ({} lost the movement)",
+                detector.freezes(),
+                detector.dropouts()
             );
         }
+    }
+    if let Some(b) = detector.batching() {
+        println!(
+            "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms (Bluetooth): rate and stutters are per delivery.",
+            b.reports_per_event, b.event_period_ms
+        );
+    }
+    if let Some(c) = detector.clipping() {
+        println!(
+            "Clipped at high speed: {} of {} fast reports held exactly {} counts on one axis, the most the mouse's reports carry. Faster movement is lost or sent late (not a stutter): lower the DPI or raise the polling rate.",
+            c.pinned, c.fast_reports, c.limit
+        );
     }
 
     println!("\nRating: {} - {}", rating.label(), rating.message());
@@ -174,7 +187,7 @@ fn print_summary(detector: &StutterDetector) {
         );
     }
     println!(
-        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s after which the held-back movement arrives at once; two or more rate the session at least Fair.)",
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms. A freeze is a stutter of 0.1-1 s while moving: the held-back movement then arrives at once, or the reports go on at full speed with it lost (judged at 1 kHz and up, where a hand's slowing down shows); two or more rate the session at least Fair.)",
         DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
     );
 }

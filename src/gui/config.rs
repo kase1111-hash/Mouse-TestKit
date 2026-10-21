@@ -3,6 +3,7 @@
 //! Saves and loads user preferences to a config file
 
 use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
+use mouse_testkit::analysis::stutter::DEFAULT_STUTTER_MULTIPLIER;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::ops::RangeInclusive;
@@ -24,9 +25,23 @@ pub const DPI_DISTANCE_RANGE: RangeInclusive<f32> = 0.5..=24.0;
 /// Double-click panel threshold field (ms).
 pub const DOUBLE_CLICK_THRESHOLD_RANGE: RangeInclusive<f64> = 10.0..=100.0;
 
+/// Version of the settings' defaults, saved with them. Files written before
+/// it existed read as 0.
+pub const CONFIG_VERSION: u32 = 1;
+
+/// The stutter sensitivity every file before [`CONFIG_VERSION`] 1 was saved
+/// with unless it was moved. At 2.0x a single missed poll at 125-500 Hz
+/// (exactly twice the interval) sat on the threshold, so timing noise
+/// decided whether it was a stutter; the CLI and Auto Diagnostics use 2.5x.
+const OLD_DEFAULT_STUTTER_MULTIPLIER: f64 = 2.0;
+
 /// User configuration that persists between sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// [`CONFIG_VERSION`] when saved; 0 for files from before it.
+    #[serde(default)]
+    pub version: u32,
+
     /// Stutter detection sensitivity (lower = more sensitive)
     pub stutter_threshold_multiplier: f64,
 
@@ -43,7 +58,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            stutter_threshold_multiplier: 2.0,
+            version: CONFIG_VERSION,
+            // Same multiplier as the CLI Stutter test and Auto Diagnostics
+            stutter_threshold_multiplier: DEFAULT_STUTTER_MULTIPLIER,
             dpi_target: 800,
             dpi_distance_inches: 2.0,
             // Same press-to-press bounce threshold as Auto Diagnostics
@@ -60,9 +77,18 @@ impl Config {
     }
 
     /// Clamp every value to the range its widget allows. A value that is not
-    /// a finite number falls back to the default.
+    /// a finite number falls back to the default. A file from before
+    /// [`CONFIG_VERSION`] 1 that still holds the old stutter default gets
+    /// the new one; a sensitivity the user moved is kept.
     pub fn sanitized(self) -> Self {
         let defaults = Self::default();
+        let stutter_threshold_multiplier = if self.version < 1
+            && self.stutter_threshold_multiplier == OLD_DEFAULT_STUTTER_MULTIPLIER
+        {
+            defaults.stutter_threshold_multiplier
+        } else {
+            self.stutter_threshold_multiplier
+        };
         let clamp = |v: f64, r: &RangeInclusive<f64>, d: f64| {
             if v.is_finite() {
                 v.clamp(*r.start(), *r.end())
@@ -71,8 +97,9 @@ impl Config {
             }
         };
         Self {
+            version: CONFIG_VERSION,
             stutter_threshold_multiplier: clamp(
-                self.stutter_threshold_multiplier,
+                stutter_threshold_multiplier,
                 &STUTTER_MULTIPLIER_RANGE,
                 defaults.stutter_threshold_multiplier,
             ),
@@ -181,7 +208,11 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.stutter_threshold_multiplier, 2.0);
+        assert_eq!(config.stutter_threshold_multiplier, 2.5);
+        assert_eq!(
+            config.stutter_threshold_multiplier,
+            DiagConfig::default().stutter_multiplier
+        );
         assert_eq!(config.dpi_target, 800);
         assert_eq!(config.dpi_distance_inches, 2.0);
         assert_eq!(config.double_click_threshold_ms, 50.0);
@@ -190,6 +221,7 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = Config {
+            version: CONFIG_VERSION,
             stutter_threshold_multiplier: 3.0,
             dpi_target: 1600,
             dpi_distance_inches: 4.0,
@@ -264,14 +296,43 @@ mod tests {
     #[test]
     fn test_non_finite_values_fall_back_to_defaults() {
         let c = Config {
+            version: CONFIG_VERSION,
             stutter_threshold_multiplier: f64::NAN,
             dpi_target: 800,
             dpi_distance_inches: f32::INFINITY,
             double_click_threshold_ms: f64::NAN,
         }
         .sanitized();
-        assert_eq!(c.stutter_threshold_multiplier, 2.0);
+        assert_eq!(c.stutter_threshold_multiplier, 2.5);
         assert_eq!(c.dpi_distance_inches, 2.0);
         assert_eq!(c.double_click_threshold_ms, 50.0);
+    }
+
+    #[test]
+    fn test_old_default_stutter_sensitivity_is_moved_to_the_new_one() {
+        // A file from before the version field, never touched: 2.0 was the
+        // default then
+        let old = r#"{"stutter_threshold_multiplier": 2.0, "dpi_target": 1600,
+            "dpi_distance_inches": 4.0, "double_click_threshold_ms": 50.0}"#;
+        let loaded = Config::parse(old).unwrap();
+        assert_eq!(loaded.stutter_threshold_multiplier, 2.5);
+        assert_eq!(loaded.version, CONFIG_VERSION);
+        assert_eq!(loaded.dpi_target, 1600);
+        // A sensitivity the user moved is kept
+        let moved = old.replace("2.0,", "3.2,");
+        assert_eq!(
+            Config::parse(&moved).unwrap().stutter_threshold_multiplier,
+            3.2
+        );
+        // 2.0 chosen and saved by this version is kept too
+        let chosen = Config {
+            stutter_threshold_multiplier: 2.0,
+            ..Config::default()
+        };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert_eq!(
+            Config::parse(&json).unwrap().stutter_threshold_multiplier,
+            2.0
+        );
     }
 }

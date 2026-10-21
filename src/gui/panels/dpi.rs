@@ -65,6 +65,8 @@ pub struct DpiPanel {
     samples: Vec<DpiSample>,
     last_saved_dpi: u32,
     last_saved_distance: f32,
+    /// The last measurement was cancelled because raw input stopped.
+    cancelled_for_input: bool,
 }
 
 struct DpiSample {
@@ -86,6 +88,7 @@ impl DpiPanel {
             samples: Vec::new(),
             last_saved_dpi: 800,
             last_saved_distance: 2.0,
+            cancelled_for_input: false,
         }
     }
 
@@ -145,9 +148,21 @@ impl DpiPanel {
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
         if !has_bridge {
+            // Counts seen so far are only part of the movement, and counts
+            // from whatever input comes next must not be added to them
+            self.cancelled_for_input |= self.is_running;
             ui.add_space(5.0);
             raw_input_required_notice(ui, "DPI (counts per inch)");
             self.is_running = false;
+        }
+        if self.cancelled_for_input {
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(
+                    "The last measurement was cancelled: raw input from the mouse stopped during it (it was unplugged, its receiver or link dropped out, or another input was chosen), so not all of its movement was counted. Press SPACE to measure again.",
+                )
+                .color(egui::Color32::LIGHT_RED),
+            );
         }
         ui.add_space(15.0);
 
@@ -361,6 +376,7 @@ impl DpiPanel {
 
     fn start_measurement(&mut self) {
         self.is_running = true;
+        self.cancelled_for_input = false;
         self.current_pos = (0, 0);
     }
 
@@ -520,6 +536,34 @@ mod tests {
             p.ui(ui, &c, &events, false);
         });
         assert!(!p.is_running());
+        assert_eq!(p.current_pos, (0, 0));
+    }
+
+    #[test]
+    fn losing_raw_input_cancels_the_measurement_without_mixing() {
+        // Half the movement from the measured mouse, then it is unplugged
+        // and another one is read: nothing of either is recorded, and the
+        // panel says why
+        let ctx = egui::Context::default();
+        let frame = |p: &mut DpiPanel, events: &[RawInputEvent], raw: bool| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let c = ui.ctx().clone();
+                p.ui(ui, &c, events, raw);
+            });
+        };
+        let mut p = DpiPanel::new();
+        p.start_measurement();
+        let half: Vec<_> = (0..400).map(|_| mv(2, 0)).collect();
+        frame(&mut p, &half, true);
+        assert_eq!(p.current_pos, (800, 0));
+        frame(&mut p, &[], false);
+        assert!(!p.is_running() && p.cancelled_for_input);
+        frame(&mut p, &half, true);
+        assert_eq!(p.current_pos, (800, 0));
+        assert!(p.export().is_none());
+        // The next measurement starts clean
+        p.start_measurement();
+        assert!(!p.cancelled_for_input);
         assert_eq!(p.current_pos, (0, 0));
     }
 }

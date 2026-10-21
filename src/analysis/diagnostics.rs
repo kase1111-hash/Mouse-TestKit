@@ -37,12 +37,13 @@ use crate::analysis::liftoff::{
     JUMP_WINDOW_MS,
 };
 use crate::analysis::polling::{
-    estimate_hz, is_saturated_pair, median_in_place, usb_nominal_rate, MAX_POLL_INTERVAL_MS,
-    USB_MIN_POLLING_HZ,
+    batched_delivery, estimate_hz, event_intervals_ms, is_saturated_pair, median_in_place, rate_hz,
+    usb_nominal_rate, MAX_POLL_INTERVAL_MS, USB_MIN_POLLING_HZ,
 };
 use crate::analysis::scroll::{WheelCheck, SKIP_FAULT_COUNT};
 use crate::analysis::stutter::{
-    is_freeze, CONFIRMED_FREEZES, MAX_FREEZE_MS, MIN_RELATIVE_REPORT_SIZE,
+    is_dropout, is_freeze, turned_gap, ClipCheck, GapEdgeTracker, GapEdges, CONFIRMED_FREEZES,
+    MAX_FREEZE_MS, MIN_RELATIVE_REPORT_SIZE,
 };
 use crate::types::{MouseButton, MouseEvent};
 
@@ -71,7 +72,7 @@ impl Phase {
         match self {
             Phase::Rest => "Take your hand off the mouse and do not touch it or the desk.",
             Phase::Movement => {
-                "Move the mouse continuously in brisk, wide circles. Keep it moving until this step ends."
+                "Move the mouse continuously in brisk, wide circles without lifting it. Keep it moving until this step ends."
             }
             Phase::Clicks => {
                 "Click the left button at a normal pace (about 20 times), then the right button a few times. Do not hold the buttons."
@@ -152,16 +153,30 @@ pub struct Metrics {
     pub polling_hz: Option<u32>,
     /// The standard USB rate (125, 250, 500, 1000 ... Hz) nearest
     /// `polling_hz`. None below 110 Hz, where no USB rate fits: that is the
-    /// Bluetooth range or a USB mouse running slow.
+    /// Bluetooth range or a USB mouse running slow. None too when reports
+    /// arrive batched (`batched_delivery`): the rate is then deliveries.
     pub polling_nominal_hz: Option<u32>,
+    /// Reports arrived several at a time, one Bluetooth connection event
+    /// apart (see `polling::batched_delivery`): the rate, stutter and
+    /// stability numbers are per delivery.
+    pub batched_delivery: bool,
     pub stutter_count: usize,
     pub stutter_rate_percent: f64,
     pub unstable_interval_percent: f64,
     pub max_interval_ms: f64,
     /// Gaps of 0.1-1 s while the mouse kept moving the same way, after
     /// which the held-back movement arrived at once (see
-    /// `analysis::stutter::is_freeze`).
+    /// `analysis::stutter::is_freeze`), or after which the reports went on
+    /// at full speed with the movement lost (see
+    /// `analysis::stutter::is_dropout`)...
     pub movement_freezes: usize,
+    /// ... of which this many lost the movement.
+    pub movement_dropouts: usize,
+    /// Fast reports pinned at the largest value the mouse's report format
+    /// holds (see `analysis::stutter::ClipCheck`), 0 when not clipping...
+    pub clipped_reports: usize,
+    /// ... and that value (counts).
+    pub clip_limit_counts: Option<i32>,
     pub movement_pauses: usize,
     // Clicks
     pub left_clicks: usize,
@@ -545,6 +560,15 @@ pub struct AutoTest {
     /// later one: a stop, a lift or a freeze, told apart by those sizes once
     /// the median is known (see `stutter::is_freeze`).
     long_gaps: Vec<(f64, f64, f64)>,
+    /// Motion reports seen in the movement step, numbering them for...
+    move_reports: usize,
+    /// ... the reports around each long gap, and the gaps whose four
+    /// reports are known, judged as dropouts once the median is known (see
+    /// `stutter::is_dropout`).
+    gap_edges: GapEdgeTracker,
+    dropout_gaps: Vec<GapEdges>,
+    /// Reports pinned at the report format's limit.
+    clip: ClipCheck,
     /// Running sum of `fast_intervals_ms`, checked on every report.
     fast_total_ms: f64,
     /// All report intervals, for the "move faster" hint.
@@ -595,6 +619,10 @@ impl AutoTest {
             fast_intervals_ms: Vec::new(),
             fast_sizes: Vec::new(),
             long_gaps: Vec::new(),
+            move_reports: 0,
+            gap_edges: GapEdgeTracker::new(),
+            dropout_gaps: Vec::new(),
+            clip: ClipCheck::new(),
             fast_total_ms: 0.0,
             all_intervals: 0,
             movement_pauses: 0,
@@ -789,7 +817,7 @@ impl AutoTest {
                 let n = self.fast_intervals_ms.len();
                 let progress = (n as f64 / self.cfg.movement_target_intervals as f64)
                     .min(self.fast_secs() / self.cfg.movement_target_secs);
-                let hz = estimate_hz(&self.fast_intervals_ms, 20)
+                let hz = rate_hz(&self.fast_intervals_ms, 20)
                     .map(|h| format!("~{} Hz", h))
                     .unwrap_or_else(|| "measuring...".to_string());
                 // Most reports too slow to time: tell the user while they can
@@ -1108,18 +1136,28 @@ impl AutoTest {
             if dx == 0 && dy == 0 {
                 return;
             }
+            self.clip.feed(dx, dy);
+            let index = self.move_reports;
+            self.move_reports += 1;
             if let Some((last_t, ldx, ldy)) = self.last_move {
                 let interval_ms = (t - last_t) * 1000.0;
                 if interval_ms > MAX_FREEZE_MS {
                     self.movement_pauses += 1;
                 } else if interval_ms > 0.0 {
                     self.all_intervals += 1;
+                    let size = (dx as f64).hypot(dy as f64);
+                    let last_size = (ldx as f64).hypot(ldy as f64);
+                    let saturated = is_saturated_pair((ldx, ldy), (dx, dy));
+                    // The reports around long gaps, as in the Stutter test
+                    if saturated || turned_gap((ldx, ldy), (dx, dy), interval_ms) {
+                        let done = self.gap_edges.pair(index, interval_ms, last_size, size);
+                        self.dropout_gaps.extend(done.map(|(_, edges)| edges));
+                    }
                     // Only fast movement in a steady direction is certain to
                     // report on every poll (a reversal inside one poll
                     // cancels its counts), as in the Stutter test.
-                    if is_saturated_pair((ldx, ldy), (dx, dy)) {
-                        let size = (dx as f64).hypot(dy as f64);
-                        let smaller = (ldx as f64).hypot(ldy as f64).min(size);
+                    if saturated {
+                        let smaller = last_size.min(size);
                         // Longer gaps are a stop or a freeze, not a poll (as
                         // in `estimate_hz`), and must not count as timed
                         // movement.
@@ -1139,14 +1177,15 @@ impl AutoTest {
 
     /// Fast-movement intervals to judge (those whose smaller report is not
     /// one of the small reports of a hand slowing to a stop, see
-    /// `stutter::MIN_RELATIVE_REPORT_SIZE`), and freezes (see
-    /// `stutter::is_freeze`).
-    fn judged_movement(&self) -> (Vec<f64>, Vec<f64>) {
+    /// `stutter::MIN_RELATIVE_REPORT_SIZE`), freezes after which the
+    /// held-back movement arrived (see `stutter::is_freeze`), and freezes
+    /// after which it was lost (see `stutter::is_dropout`).
+    fn judged_movement(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         let mut sizes: Vec<f64> = self.fast_sizes.iter().map(|&(_, size)| size).collect();
         let Some(median_size) = median_in_place(&mut sizes) else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         };
-        let intervals = self
+        let intervals: Vec<f64> = self
             .fast_intervals_ms
             .iter()
             .zip(&self.fast_sizes)
@@ -1159,18 +1198,54 @@ impl AutoTest {
             .filter(|&&(ms, smaller, after)| is_freeze(ms, smaller, after, median_size))
             .map(|&(ms, ..)| ms)
             .collect();
-        (intervals, freezes)
+        // Reports delivered in batches were made a sample period apart, not
+        // their arrival interval apart: judge them by the delivery period,
+        // which is far too long for a hand's slowing down to show
+        let period = match batched_delivery(&intervals) {
+            Some(b) => b.event_period_ms,
+            None => median_in_place(&mut intervals.clone()).unwrap_or(0.0),
+        };
+        let dropouts = self
+            .dropout_gaps
+            .iter()
+            .filter(|e| {
+                let smaller = e.sizes[1].min(e.sizes[2]);
+                // A gap that is also a freeze is counted once, as a freeze
+                !is_freeze(e.gap_ms, smaller, e.sizes[2], median_size)
+                    && is_dropout(e, period, median_size)
+            })
+            .map(|e| e.gap_ms)
+            .collect();
+        (intervals, freezes, dropouts)
     }
 
     fn finalize_movement(&mut self) {
-        let (usable, freezes) = self.judged_movement();
+        let (usable, freezes, dropouts) = self.judged_movement();
         let usable_secs = usable.iter().sum::<f64>() / 1000.0;
         self.metrics.move_intervals = usable.len();
         self.metrics.movement_pauses = self.movement_pauses;
-        self.metrics.movement_freezes = freezes.len();
+        self.metrics.movement_freezes = freezes.len() + dropouts.len();
+        self.metrics.movement_dropouts = dropouts.len();
         // A freeze is judged whether or not enough movement was timed: the
         // link dropping out may be why there was too little.
-        self.push_movement_freezes(&freezes);
+        self.push_movement_freezes(&freezes, &dropouts);
+        // So is clipping: it only shows in fast movement.
+        if let Some(c) = self.clip.clipping() {
+            self.metrics.clipped_reports = c.pinned;
+            self.metrics.clip_limit_counts = Some(c.limit);
+            self.push(
+                Severity::Warning,
+                Phase::Movement,
+                "Movement clipped at high speed",
+                format!(
+                    "{} of {} reports sent while moving fast ({:.0}%) held exactly {} counts on one axis, the most the mouse's reports can carry, and none held more. Moving faster than that, the mouse cannot report all of its movement: the rest is lost or sent late, so fast movements come up short or lag. This is not a stutter. Lower the DPI, or raise the polling rate if the mouse allows it (both make each report smaller).",
+                    c.pinned,
+                    c.fast_reports,
+                    c.percent(),
+                    c.limit
+                ),
+            );
+        }
 
         if usable.len() < self.cfg.movement_min_intervals
             || usable_secs < self.cfg.movement_min_secs
@@ -1195,36 +1270,52 @@ impl AutoTest {
             return;
         }
 
+        // A Bluetooth mouse can deliver several reports at once, one
+        // connection event apart: the cursor moves once per delivery, so
+        // rate and steadiness are judged per delivery.
+        let batching = batched_delivery(&usable);
+        let timed = match batching {
+            Some(_) => event_intervals_ms(&usable),
+            None => usable.clone(),
+        };
+        let timed_secs = timed.iter().sum::<f64>() / 1000.0;
+        let unit = if batching.is_some() {
+            "deliveries"
+        } else {
+            "reports"
+        };
         // Saturated reports come once per poll, so their typical interval is
         // the poll period itself.
-        let mut sorted = usable.clone();
+        let mut sorted = timed.clone();
         let period = median_in_place(&mut sorted).unwrap_or(0.0);
-        let hz = estimate_hz(&usable, self.cfg.movement_min_intervals);
-        let nominal = hz.and_then(|h| usb_nominal_rate(h as f64));
+        let hz = estimate_hz(&timed, 1);
+        // Deliveries 5+ ms apart are connection events, not a USB rate
+        let nominal = hz
+            .filter(|_| batching.is_none())
+            .and_then(|h| usb_nominal_rate(h as f64));
         self.metrics.polling_hz = hz;
         self.metrics.polling_nominal_hz = nominal;
-        self.metrics.max_interval_ms = usable.iter().copied().fold(0.0, f64::max);
+        self.metrics.batched_delivery = batching.is_some();
+        self.metrics.max_interval_ms = timed.iter().copied().fold(0.0, f64::max);
 
         let stutter_gap = (period * self.cfg.stutter_multiplier).max(self.cfg.min_stutter_gap_ms);
         let unstable_dev = (period * self.cfg.unstable_fraction).max(self.cfg.timing_jitter_ms);
-        let late: Vec<f64> = usable
-            .iter()
-            .copied()
-            .filter(|&i| i > stutter_gap)
-            .collect();
+        let late: Vec<f64> = timed.iter().copied().filter(|&i| i > stutter_gap).collect();
         let stutters = late.len();
-        let unstable = usable
+        let unstable = timed
             .iter()
             .filter(|&&i| (i - period).abs() > unstable_dev)
             .count();
         self.metrics.stutter_count = stutters;
-        self.metrics.stutter_rate_percent = stutters as f64 / usable.len() as f64 * 100.0;
-        self.metrics.unstable_interval_percent = unstable as f64 / usable.len() as f64 * 100.0;
+        self.metrics.stutter_rate_percent = stutters as f64 / timed.len().max(1) as f64 * 100.0;
+        self.metrics.unstable_interval_percent =
+            unstable as f64 / timed.len().max(1) as f64 * 100.0;
         // Severity is judged on the share of movement time spent waiting for
         // late reports, which means the same at 125 Hz and at 8 kHz (a count
         // of late reports would need 64x more hitches at 8 kHz to register).
-        let lost_percent =
-            late.iter().map(|i| i - period).sum::<f64>() / (usable_secs * 1000.0) * 100.0;
+        let lost_percent = late.iter().map(|i| i - period).sum::<f64>()
+            / (timed_secs * 1000.0).max(f64::MIN_POSITIVE)
+            * 100.0;
 
         if let Some(hz) = hz {
             let looks_like = nominal
@@ -1234,14 +1325,34 @@ impl AutoTest {
                 Severity::Info,
                 Phase::Movement,
                 "Polling rate measured",
-                format!(
-                    "Typical report interval {:.3} ms = {} Hz{}, from {} reports sent while moving fast.",
-                    period,
-                    hz,
-                    looks_like,
-                    usable.len()
-                ),
+                match batching {
+                    Some(_) => format!(
+                        "Typical interval between deliveries {:.3} ms = {} Hz{}, from {} reports sent while moving fast.",
+                        period,
+                        hz,
+                        looks_like,
+                        usable.len()
+                    ),
+                    None => format!(
+                        "Typical report interval {:.3} ms = {} Hz{}, from {} reports sent while moving fast.",
+                        period,
+                        hz,
+                        looks_like,
+                        usable.len()
+                    ),
+                },
             );
+            if let Some(b) = batching {
+                self.push(
+                    Severity::Info,
+                    Phase::Movement,
+                    "Reports arrive in batches",
+                    format!(
+                        "{:.1} reports arrive together per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate and steadiness here are judged per delivery ({} Hz), not per report.",
+                        b.reports_per_event, b.event_period_ms, hz
+                    ),
+                );
+            }
             if let Some((severity, title, detail)) = low_polling_finding(hz) {
                 self.push(severity, Phase::Movement, title, detail);
             }
@@ -1253,9 +1364,10 @@ impl AutoTest {
                 Phase::Movement,
                 "Frequent stutters",
                 format!(
-                    "{} of {} reports arrived more than {:.1} ms after the previous one (normal {:.2} ms, worst gap {:.1} ms), costing {:.1}% of the movement time. Expect visible hitching. Check the USB port/hub, wireless interference, and CPU load.",
+                    "{} of {} {} arrived more than {:.1} ms after the previous one (normal {:.2} ms, worst gap {:.1} ms), costing {:.1}% of the movement time. Expect visible hitching. Check the USB port/hub, wireless interference, and CPU load.",
                     stutters,
-                    usable.len(),
+                    timed.len(),
+                    unit,
                     stutter_gap,
                     period,
                     self.metrics.max_interval_ms,
@@ -1268,9 +1380,10 @@ impl AutoTest {
                 Phase::Movement,
                 "Occasional stutters",
                 format!(
-                    "{} of {} reports arrived late (worst gap {:.1} ms), costing {:.1}% of the movement time. Usually a busy USB hub, wireless interference, or background load.",
+                    "{} of {} {} arrived late (worst gap {:.1} ms), costing {:.1}% of the movement time. Usually a busy USB hub, wireless interference, or background load.",
                     stutters,
-                    usable.len(),
+                    timed.len(),
+                    unit,
                     self.metrics.max_interval_ms,
                     lost_percent
                 ),
@@ -1282,8 +1395,11 @@ impl AutoTest {
                 Phase::Movement,
                 "Unstable polling interval",
                 format!(
-                    "{:.1}% of report intervals while moving fast were more than {:.2} ms away from the typical {:.3} ms. The report rate is not steady.",
-                    self.metrics.unstable_interval_percent, unstable_dev, period
+                    "{:.1}% of the intervals between {} while moving fast were more than {:.2} ms away from the typical {:.3} ms. The report rate is not steady.",
+                    self.metrics.unstable_interval_percent,
+                    unit,
+                    unstable_dev,
+                    period
                 ),
             );
         }
@@ -1292,21 +1408,47 @@ impl AutoTest {
         }
     }
 
-    fn push_movement_freezes(&mut self, freezes: &[f64]) {
-        let longest = freezes.iter().copied().fold(0.0, f64::max);
-        if freezes.len() >= CONFIRMED_FREEZES {
+    /// Report freezes: `caught_up` ones after which the held-back movement
+    /// arrived at once, and `lost` ones after which the reports went on at
+    /// full speed without it (gap lengths, ms).
+    fn push_movement_freezes(&mut self, caught_up: &[f64], lost: &[f64]) {
+        let all: Vec<f64> = caught_up.iter().chain(lost).copied().collect();
+        let longest = all.iter().copied().fold(0.0, f64::max);
+        let shortest = all.iter().copied().fold(f64::MAX, f64::min);
+        const JUMPED: &str =
+            "the held-back movement arrived all at once: the cursor froze, then jumped";
+        const LOST: &str = "the reports went on at full speed with the movement in between lost: the cursor stopped, then carried on from where it stopped. No hand stops and sets off again that abruptly";
+        // A link that delays reports holds the movement back; one that drops
+        // them, or a sensor that loses track of the surface, loses it, and
+        // so does a mouse lifted while moving.
+        let causes = if lost.is_empty() {
+            "The connection is dropping out: move a wireless receiver closer and away from USB 3 ports and cables, re-pair a Bluetooth mouse, or try another USB port, hub or cable."
+        } else {
+            "The connection is dropping out, or the sensor is losing track of the surface: move a wireless receiver closer and away from USB 3 ports and cables, try another USB port or cable, and try another mouse pad or clean the sensor window. A mouse lifted while moving looks the same: if you lifted it, re-run without lifting it."
+        };
+        if all.len() >= CONFIRMED_FREEZES {
+            let what = match (caught_up.len(), lost.len()) {
+                (_, 0) => format!(", and then {}.", JUMPED),
+                (0, _) => format!(", and then {}.", LOST),
+                (c, l) => format!(
+                    ". {} times, then {}. {} times, then {}.",
+                    c, JUMPED, l, LOST
+                ),
+            };
             self.push(
                 Severity::Warning,
                 Phase::Movement,
                 "Movement froze",
                 format!(
-                    "{} times the reports stopped for {:.0}-{:.0} ms while the mouse kept moving the same way, and then the held-back movement arrived all at once: the cursor froze, then jumped. The connection is dropping out: move a wireless receiver closer and away from USB 3 ports and cables, re-pair a Bluetooth mouse, or try another USB port, hub or cable.",
-                    freezes.len(),
-                    freezes.iter().copied().fold(f64::MAX, f64::min),
-                    longest
+                    "{} times the reports stopped for {:.0}-{:.0} ms while the mouse kept moving{} {}",
+                    all.len(),
+                    shortest,
+                    longest,
+                    what,
+                    causes
                 ),
             );
-        } else if freezes.len() == 1 {
+        } else if caught_up.len() == 1 {
             self.push(
                 Severity::Info,
                 Phase::Movement,
@@ -1314,6 +1456,16 @@ impl AutoTest {
                 format!(
                     "Once, the reports stopped for {:.0} ms while the mouse kept moving the same way, and then the held-back movement arrived all at once: the connection dropped out briefly. A single dropout can be a moment of radio interference; re-run to check whether it repeats.",
                     longest
+                ),
+            );
+        } else if lost.len() == 1 {
+            self.push(
+                Severity::Info,
+                Phase::Movement,
+                "One freeze during movement",
+                format!(
+                    "Once, the reports stopped for {:.0} ms while the mouse was moving at full speed, and then {}: the connection dropped out or the sensor lost track of the surface briefly (a mouse lifted while moving looks the same). A single dropout can be a moment of interference; re-run to check whether it repeats.",
+                    longest, LOST
                 ),
             );
         }
@@ -2165,6 +2317,156 @@ mod tests {
         assert!(f.iter().any(|(_, t)| t == "One freeze during movement"));
     }
 
+    /// Like [`path_stream`], but the movement of lost polls is lost too
+    /// (`clamp` also limits each axis of a report, as a report format does).
+    fn lossy_stream(
+        sim: &mut Sim,
+        secs: f64,
+        poll_hz: f64,
+        pos: impl Fn(f64) -> (f64, f64),
+        lost: impl Fn(f64) -> bool,
+        clamp: i64,
+    ) {
+        let t0 = sim.t;
+        let (mut rx, mut ry) = (0i64, 0i64);
+        for k in 1..=(secs * poll_hz) as usize {
+            let t = k as f64 / poll_hz;
+            let (x, y) = pos(t);
+            let dx = ((x - rx as f64).trunc() as i64).clamp(-clamp, clamp);
+            let dy = ((y - ry as f64).trunc() as i64).clamp(-clamp, clamp);
+            if lost(t) {
+                rx = x.trunc() as i64;
+                ry = y.trunc() as i64;
+                continue;
+            }
+            if dx != 0 || dy != 0 {
+                rx += dx;
+                ry += dy;
+                sim.t = t0 + t;
+                sim.at.feed(
+                    sim.t,
+                    &MouseEvent::Move {
+                        dx: dx as i32,
+                        dy: dy as i32,
+                    },
+                );
+            }
+        }
+        sim.t = t0 + secs;
+        sim.at.tick(sim.t);
+    }
+
+    #[test]
+    fn test_dropouts_that_lose_the_movement_are_flagged() {
+        // Brisk circles while the link drops the reports (and their
+        // movement) for 150-400 ms every 2 s, at 1 and 8 kHz
+        let lost = |t: f64| {
+            let n = (t / 2.0).floor();
+            let start = n * 2.0 + 1.0;
+            (start..start + 0.15 + 0.05 * (n % 6.0)).contains(&t)
+        };
+        for (hz, radius) in [(1000.0, 600.0), (8000.0, 4800.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let circle = move |t: f64| {
+                let a = std::f64::consts::TAU * t;
+                (radius * a.cos(), radius * a.sin())
+            };
+            lossy_stream(&mut sim, 12.5, hz, circle, lost, i64::MAX);
+            let f = movement_findings(&sim);
+            assert!(
+                f.contains(&(Severity::Warning, "Movement froze".to_string())),
+                "{} Hz: {:?}",
+                hz,
+                f
+            );
+            let m = &sim.at.metrics;
+            assert!((2..=6).contains(&m.movement_freezes), "{} Hz: {:?}", hz, m);
+            assert_eq!(m.movement_dropouts, m.movement_freezes);
+            let detail = &sim
+                .at
+                .findings_so_far()
+                .iter()
+                .find(|f| f.title == "Movement froze")
+                .unwrap()
+                .detail;
+            assert!(detail.contains("movement in between lost"), "{}", detail);
+            assert!(detail.contains("lifted"), "{}", detail);
+        }
+        // One is only noted
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        let circle = |t: f64| {
+            let a = std::f64::consts::TAU * t;
+            (600.0 * a.cos(), 600.0 * a.sin())
+        };
+        lossy_stream(
+            &mut sim,
+            12.5,
+            1000.0,
+            circle,
+            |t| (2.0..2.3).contains(&t),
+            i64::MAX,
+        );
+        let f = movement_findings(&sim);
+        assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
+        assert!(f.iter().any(|(_, t)| t == "One freeze during movement"));
+        assert_eq!(sim.at.metrics.movement_dropouts, 1);
+    }
+
+    #[test]
+    fn test_hard_stops_at_high_rates_are_not_freezes() {
+        // Circles at 1 and 8 kHz, at about 400 and 26000 DPI, where the hand
+        // stops for 0.3 s once a second, slowing down and speeding up over
+        // 8 ms (a hard stop)
+        for (hz, radius) in [(1000.0, 600.0), (1000.0, 60_000.0), (8000.0, 60_000.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let circles = circles_with_stops_ramp(radius, 0.3, 0.008);
+            path_stream(&mut sim, 12.5, hz, circles, |_| false);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} Hz: {:?}",
+                hz,
+                f
+            );
+            assert_eq!(sim.at.metrics.movement_freezes, 0, "{} Hz {}", hz, radius);
+        }
+    }
+
+    #[test]
+    fn test_clipped_reports_are_flagged_not_stutters() {
+        // Brisk circles at 125 Hz and 1600 DPI (about 200 counts a poll at
+        // the fastest) on a mouse with 8-bit reports
+        let circle = |t: f64| {
+            let a = std::f64::consts::TAU * t;
+            (4000.0 * a.cos(), 4000.0 * a.sin())
+        };
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        lossy_stream(&mut sim, 12.5, 125.0, circle, |_| false, 127);
+        let f = movement_findings(&sim);
+        assert!(
+            f.contains(&(
+                Severity::Warning,
+                "Movement clipped at high speed".to_string()
+            )),
+            "{:?}",
+            f
+        );
+        assert!(!f.iter().any(|(_, t)| t.contains("tutter")), "{:?}", f);
+        assert_eq!(sim.at.metrics.clip_limit_counts, Some(127));
+        assert!(sim.at.metrics.clipped_reports > 100);
+        // The same movement with 16-bit reports
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        lossy_stream(&mut sim, 12.5, 125.0, circle, |_| false, i64::MAX);
+        let f = movement_findings(&sim);
+        assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
+        assert_eq!(sim.at.metrics.clipped_reports, 0);
+    }
+
     fn movement_findings(sim: &Sim) -> Vec<(Severity, String)> {
         sim.at
             .findings_so_far()
@@ -2368,6 +2670,119 @@ mod tests {
         sim.good_lift();
         let r = sim.at.report().unwrap();
         assert_eq!(r.verdict, Verdict::Healthy, "findings: {:?}", titles(r));
+    }
+
+    /// Feeds `secs` of brisk movement from a Bluetooth mouse that makes a
+    /// report every `sample_ms` and is served every `event_ms`: each
+    /// connection event delivers the reports made since the last one,
+    /// 0.4 ms apart. Events for which `skip(k)` is true are missed.
+    fn bluetooth_stream(
+        sim: &mut Sim,
+        secs: f64,
+        sample_ms: f64,
+        event_ms: f64,
+        skip: impl Fn(usize) -> bool,
+    ) {
+        let t0 = sim.t;
+        let mut sent = 0usize;
+        for k in 1..=(secs * 1000.0 / event_ms) as usize {
+            let made = (k as f64 * event_ms / sample_ms).floor() as usize;
+            if skip(k) {
+                continue;
+            }
+            for (i, _) in (sent..made).enumerate() {
+                sim.t = t0 + (k as f64 * event_ms + 0.4 * i as f64) / 1000.0;
+                sim.at.feed(sim.t, &MouseEvent::Move { dx: 6, dy: -3 });
+            }
+            sent = made;
+        }
+        sim.t = t0 + secs;
+        sim.at.tick(sim.t);
+    }
+
+    #[test]
+    fn test_bluetooth_batched_delivery_is_noted_not_flagged() {
+        // A Bluetooth mouse sampling at 250 Hz over a 7.5, 11.25 or 15 ms
+        // connection interval delivers two to four reports at once. Judged
+        // per report, half or more of the intervals are near zero.
+        for event_ms in [7.5, 11.25, 15.0] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            bluetooth_stream(&mut sim, 12.5, 4.0, event_ms, |_| false);
+            assert_eq!(sim.phase(), Some(Phase::Clicks), "{} ms", event_ms);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} ms: {:?}",
+                event_ms,
+                f
+            );
+            assert!(
+                f.iter().any(|(_, t)| t == "Reports arrive in batches"),
+                "{:?}",
+                f
+            );
+            let hz = sim.at.metrics.polling_hz.unwrap() as f64;
+            assert!(
+                (hz - 1000.0 / event_ms).abs() < 2.0,
+                "{} ms: {} Hz",
+                event_ms,
+                hz
+            );
+            assert_eq!(sim.at.metrics.stutter_count, 0);
+            // Deliveries per second are not a USB rate (133 Hz at 7.5 ms)
+            assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        }
+
+        // A mouse sampling at 100 or 150 Hz over an 11.25 or 7.5 ms
+        // interval: two reports in one connection event of eight, which per
+        // report makes over a tenth of the intervals near zero
+        for (sample_ms, event_ms) in [(10.0, 11.25), (6.67, 7.5)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            bluetooth_stream(&mut sim, 12.5, sample_ms, event_ms, |_| false);
+            let f = movement_findings(&sim);
+            assert!(
+                f.iter().all(|(s, _)| *s == Severity::Info),
+                "{} ms: {:?}",
+                event_ms,
+                f
+            );
+            assert!(sim.at.metrics.batched_delivery, "{} ms", event_ms);
+            assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        }
+
+        // A 125 Hz USB mouse, a fifth of whose reports reach the program
+        // almost a poll late, together with the next: not batching
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        let t0 = sim.t;
+        for k in 1..1500 {
+            let late = if k % 5 == 0 { 7.2 } else { 0.0 };
+            sim.t = t0 + (k as f64 * 8.0 + late) / 1000.0;
+            sim.at.feed(sim.t, &MouseEvent::Move { dx: 6, dy: -3 });
+        }
+        sim.at.tick(sim.t + 0.1);
+        let f = movement_findings(&sim);
+        assert!(
+            f.contains(&(Severity::Warning, "Unstable polling interval".to_string())),
+            "{:?}",
+            f
+        );
+        assert!(!sim.at.metrics.batched_delivery);
+        assert_eq!(sim.at.metrics.polling_nominal_hz, Some(125));
+
+        // The link misses one connection event in four: per delivery that
+        // is still an unsteady link
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        bluetooth_stream(&mut sim, 12.5, 4.0, 11.25, |k| k % 4 == 0);
+        let f = movement_findings(&sim);
+        assert!(
+            f.contains(&(Severity::Warning, "Unstable polling interval".to_string())),
+            "{:?}",
+            f
+        );
     }
 
     #[test]

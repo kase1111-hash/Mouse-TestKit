@@ -5,7 +5,10 @@
 //! (encoder skipping) and a direction that never registers. Scrolling speed
 //! is shown but not rated, since it describes the hand rather than the wheel.
 //! Without raw input, up and down are the window system's, which a "natural
-//! scrolling" setting swaps, so a dead direction is then not named.
+//! scrolling" setting swaps, so a dead direction is then not named; and the
+//! wheel events only carry the display frame's time, too coarse to time a
+//! reversal, so skips are not judged (as in Auto Diagnostics). A run reads
+//! one input source: if it changes once notches were counted, the run ends.
 
 use eframe::egui;
 use std::collections::VecDeque;
@@ -50,6 +53,14 @@ pub struct ScrollPanel {
     /// the system's scroll-direction setting ("natural scrolling", the macOS
     /// default, swaps them), so the physical direction is unknown.
     system_directions: bool,
+    /// Whether the run reads raw input (device-timed notches); without it
+    /// skips are not judged.
+    run_raw: bool,
+    /// Stand-in clock (s) for frame-timed notches: one second apart, so the
+    /// skip check only counts them.
+    untimed_clock: f64,
+    /// The run ended because its input source changed.
+    stopped_for_input: bool,
 }
 
 struct ScrollEvent {
@@ -75,6 +86,9 @@ impl ScrollPanel {
             line_wheel: WheelAccumulator::for_platform(),
             saw_smooth_scroll: false,
             system_directions: false,
+            run_raw: true,
+            untimed_clock: 0.0,
+            stopped_for_input: false,
         }
     }
 
@@ -114,6 +128,7 @@ impl ScrollPanel {
             } else if ui.button("Start").clicked() {
                 self.is_running = true;
                 self.reset();
+                self.run_raw = has_bridge;
             }
 
             if ui.button("Reset").clicked() {
@@ -121,6 +136,28 @@ impl ScrollPanel {
                 self.reset();
             }
         });
+
+        // Device-timed and frame-timed notches, or the notches of two
+        // devices, are not judged together: a change of input source ends
+        // the run once it has counted something (before that, the run just
+        // reads the new source).
+        if self.is_running && has_bridge != self.run_raw {
+            if self.step_count == 0 && !self.saw_smooth_scroll {
+                self.run_raw = has_bridge;
+            } else {
+                self.is_running = false;
+                self.stopped_for_input = true;
+            }
+        }
+        if self.stopped_for_input {
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(
+                    "The run stopped: raw input from the mouse started or stopped (it was plugged in or used, unplugged, or another input was chosen). The counts shown are from before that. Press Start to test again.",
+                )
+                .color(egui::Color32::LIGHT_RED),
+            );
+        }
 
         ui.add_space(20.0);
 
@@ -266,11 +303,12 @@ impl ScrollPanel {
                         } else {
                             egui::Color32::YELLOW
                         };
-                        ui.label(
-                            egui::RichText::new(format!("{}", self.wheel.skips))
-                                .size(18.0)
-                                .color(color),
-                        );
+                        let text = if self.run_raw {
+                            format!("{}", self.wheel.skips)
+                        } else {
+                            "not measured".to_string()
+                        };
+                        ui.label(egui::RichText::new(text).size(18.0).color(color));
                     });
                     ui.add_space(30.0);
                     ui.vertical(|ui| {
@@ -347,7 +385,7 @@ impl ScrollPanel {
                     min_each, min_each
                 ));
                 ui.label(format!(
-                    "3. A notch reported the opposite way within {:.0} ms of the previous one is a skip: a finger cannot turn the wheel back that fast",
+                    "3. A notch reported the opposite way within {:.0} ms of the previous one is a skip: a finger cannot turn the wheel back that fast (raw input only: the system's wheel events are timed by display frame)",
                     skip_ms
                 ));
                 ui.label("4. Lost notches are not detected automatically: roll the wheel slowly by 10 clicks you can feel and check the counter rose by exactly 10");
@@ -366,7 +404,7 @@ impl ScrollPanel {
                 // Use raw input events from the input bridge (no hover check needed)
                 for event in raw_events {
                     if let RawInputKind::Scroll { delta } = &event.kind {
-                        self.record(event.timestamp, *delta);
+                        self.record(event.timestamp, *delta, true);
                     }
                 }
             } else if response.hovered() {
@@ -393,7 +431,7 @@ impl ScrollPanel {
                             let notches = self.line_wheel.add(unit, lines, 1.0);
                             if notches != 0 {
                                 self.system_directions = true;
-                                self.record(now, notches);
+                                self.record(now, notches, false);
                             }
                         }
                         egui::MouseWheelUnit::Point => self.saw_smooth_scroll = true,
@@ -403,8 +441,10 @@ impl ScrollPanel {
         }
     }
 
-    /// Record one wheel report of `delta` notches (positive = up).
-    fn record(&mut self, now: Instant, delta: i32) {
+    /// Record one wheel report of `delta` notches (positive = up). `timed`:
+    /// `now` is when the device reported it (raw input), not the display
+    /// frame's time.
+    fn record(&mut self, now: Instant, delta: i32, timed: bool) {
         if delta == 0 {
             return;
         }
@@ -439,11 +479,19 @@ impl ScrollPanel {
         }
         self.last_direction = Some(direction_up);
 
-        // Skip and dead-direction checks, on seconds since the first report
-        let epoch = *self.epoch.get_or_insert(now);
-        let t = match now.checked_duration_since(epoch) {
-            Some(d) => d.as_secs_f64(),
-            None => -epoch.duration_since(now).as_secs_f64(),
+        // Skip and dead-direction checks, on seconds since the first report.
+        // A frame's wheel events share one time stamp, so a frame-timed
+        // notch is only counted: fed a second after the last, it is never a
+        // skip.
+        let t = if timed {
+            let epoch = *self.epoch.get_or_insert(now);
+            match now.checked_duration_since(epoch) {
+                Some(d) => d.as_secs_f64(),
+                None => -epoch.duration_since(now).as_secs_f64(),
+            }
+        } else {
+            self.untimed_clock += 1.0;
+            self.untimed_clock
         };
         self.wheel.feed(t, delta);
 
@@ -521,6 +569,14 @@ impl ScrollPanel {
                     w.up
                 ),
             ),
+            WheelVerdict::NoFaultFound if !self.run_raw => (
+                "Both directions register".to_string(),
+                egui::Color32::GREEN,
+                format!(
+                    "{} notches, both directions register. Skipping was not checked: it needs raw input, because the system's wheel events only carry the time of the display frame, too coarse to time a reversal.",
+                    w.total()
+                ),
+            ),
             WheelVerdict::NoFaultFound => (
                 "No skipping detected".to_string(),
                 egui::Color32::GREEN,
@@ -553,6 +609,8 @@ impl ScrollPanel {
         self.line_wheel = WheelAccumulator::for_platform();
         self.saw_smooth_scroll = false;
         self.system_directions = false;
+        self.untimed_clock = 0.0;
+        self.stopped_for_input = false;
     }
 
     pub fn export(&self) -> Option<ScrollExport> {
@@ -579,6 +637,7 @@ impl ScrollPanel {
             avg_speed_sps: avg_speed,
             consistency_percent: consistency,
             skips: self.wheel.skips,
+            skips_measured: self.run_raw,
             skip_window_ms: mouse_testkit::analysis::diagnostics::Config::default()
                 .scroll_reversal_ms,
             verdict: self.export_verdict(),
@@ -709,8 +768,58 @@ mod tests {
         assert_eq!(panel.step_count, 4);
         assert_eq!(panel.total_down, 3.0);
         assert_eq!(panel.total_up, 1.0);
-        assert_eq!(panel.wheel.skips, 1);
         assert!(panel.saw_smooth_scroll);
+        // The wrong-way notch shares the frame's time stamp with the others:
+        // it cannot be timed, so it is not judged a skip (as in Auto
+        // Diagnostics without raw input)
+        assert_eq!(panel.wheel.skips, 0);
+        assert!(!panel.export().unwrap().skips_measured);
+    }
+
+    #[test]
+    fn framework_notches_are_never_judged_skips() {
+        // A person scrolling down, then flicking back up, with the system
+        // delivering several wheel events per frame (a busy frame): the
+        // frame times say nothing about how fast the wheel turned back
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let mut lines = vec![-1.0; 12];
+        lines.extend([1.0, -1.0, 1.0]);
+        lines.extend([1.0; 12]);
+        run_framework(&mut panel, &lines);
+        assert_eq!(panel.wheel.skips, 0);
+        let (title, _, message) = panel.verdict_text();
+        assert_eq!(title, "Both directions register");
+        assert!(message.contains("not checked"), "{}", message);
+        let export = panel.export().unwrap();
+        assert!(!export.skips_measured);
+        assert_eq!(export.verdict, "Both directions register");
+    }
+
+    #[test]
+    fn a_change_of_input_source_ends_the_run() {
+        // Raw notches, then the mouse is unplugged and the system's wheel
+        // events would follow: they are not mixed in
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let notches: Vec<(u64, i32)> = (1..=5).map(|i| (i * 80, -1)).collect();
+        run(&mut panel, &notches);
+        assert_eq!(panel.step_count, 5);
+        run_framework(&mut panel, &[1.0; 3]);
+        assert!(!panel.is_running());
+        assert!(panel.stopped_for_input);
+        assert_eq!(panel.step_count, 5);
+        assert!(panel.export().unwrap().skips_measured);
+
+        // A run started before the mouse was read takes raw input once the
+        // mouse is used, if nothing was counted yet
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.run_raw = false;
+        run(&mut panel, &notches);
+        assert!(panel.is_running());
+        assert!(panel.run_raw);
+        assert_eq!(panel.step_count, 5);
     }
 
     #[test]

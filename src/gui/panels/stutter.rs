@@ -12,11 +12,11 @@ use egui_plot::{HLine, Line, Plot, PlotPoints};
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use super::polling::raw_input_required_notice;
+use super::polling::{input_lost_notice, raw_input_required_notice};
 use crate::export::StutterExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
 use mouse_testkit::analysis::stutter::{
-    StutterDetector, StutterRating, MIN_JUDGED_SECS, MIN_STUTTER_GAP_MS,
+    StutterDetector, StutterRating, DEFAULT_STUTTER_MULTIPLIER, MIN_JUDGED_SECS, MIN_STUTTER_GAP_MS,
 };
 
 /// Judged intervals kept for the graph and the export.
@@ -47,19 +47,23 @@ pub struct StutterPanel {
     frame_judged: usize,
     threshold_multiplier: f64,
     last_saved_threshold: f64,
+    /// The run was ended because raw input stopped (see
+    /// [`super::polling::input_lost_notice`]).
+    stopped_for_input: bool,
 }
 
 impl StutterPanel {
     pub fn new() -> Self {
         Self {
             is_running: false,
-            detector: StutterDetector::new(2.0),
+            detector: StutterDetector::new(DEFAULT_STUTTER_MULTIPLIER),
             deltas: VecDeque::with_capacity(GRAPH_SAMPLES),
             epoch: Instant::now(),
             frame_reports: 0,
             frame_judged: 0,
-            threshold_multiplier: 2.0,
-            last_saved_threshold: 2.0,
+            threshold_multiplier: DEFAULT_STUTTER_MULTIPLIER,
+            last_saved_threshold: DEFAULT_STUTTER_MULTIPLIER,
+            stopped_for_input: false,
         }
     }
 
@@ -99,9 +103,16 @@ impl StutterPanel {
         ui.add_space(5.0);
         ui.label("Detects reports that arrive late while the mouse is moving fast.");
         if !has_bridge {
+            // Only raw reports are judged: a run ends when they stop, and is
+            // not continued on another source (see `input_lost_notice`)
+            self.stopped_for_input |= self.is_running;
             ui.add_space(5.0);
             raw_input_required_notice(ui, "Report timing (stutters)");
             self.is_running = false;
+        }
+        if self.stopped_for_input {
+            ui.add_space(5.0);
+            input_lost_notice(ui);
         }
         ui.add_space(15.0);
 
@@ -349,6 +360,10 @@ impl StutterPanel {
                         severe,
                         self.detector.freezes()
                     ));
+                    for (note, color) in self.notes() {
+                        ui.add_space(5.0);
+                        ui.label(egui::RichText::new(note).color(color));
+                    }
                 });
         }
 
@@ -361,7 +376,7 @@ impl StutterPanel {
             .corner_radius(8.0)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new("Instructions").strong());
-                ui.label("1. Click 'Start' and move the mouse quickly and continuously in circles");
+                ui.label("1. Click 'Start' and move the mouse quickly and continuously in circles, without lifting it");
                 ui.label(format!(
                     "2. Keep going until at least {:.0} s of fast movement has been judged",
                     MIN_JUDGED_SECS
@@ -370,11 +385,49 @@ impl StutterPanel {
                 ui.add_space(5.0);
                 ui.label(
                     egui::RichText::new(
-                        "Only fast, steady movement is judged; slow passes, reversals and pauses are ignored. At 4000-8000 Hz move briskly or use 1600+ DPI so each report carries enough counts.",
+                        "Only fast, steady movement is judged; slow passes, reversals and pauses are ignored. At 4000-8000 Hz move briskly or use 1600+ DPI so each report carries enough counts. Keep moving: at 125-250 Hz a hand that stops for a moment and sets off again the same way can look like a late report.",
                     )
                     .weak(),
                 );
             });
+    }
+
+    /// What the counts above do not say on their own: freezes that lost the
+    /// movement, reports delivered in batches, and clipped reports.
+    fn notes(&self) -> Vec<(String, egui::Color32)> {
+        let d = &self.detector;
+        let mut notes = Vec::new();
+        if d.dropouts() > 0 {
+            notes.push((
+                format!(
+                    "{} of the freezes lost the movement: the reports stopped and went on at full speed, which no hand does. The connection dropped out or the sensor lost track of the surface (a mouse lifted while moving looks the same).",
+                    d.dropouts()
+                ),
+                egui::Color32::YELLOW,
+            ));
+        }
+        if let Some(b) = d.batching() {
+            notes.push((
+                format!(
+                    "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate, median and stutters are per delivery.",
+                    b.reports_per_event, b.event_period_ms
+                ),
+                egui::Color32::LIGHT_GRAY,
+            ));
+        }
+        if let Some(c) = d.clipping() {
+            notes.push((
+                format!(
+                    "Clipped at high speed: {} of {} fast reports ({:.0}%) held exactly {} counts on one axis, the most the mouse's reports can carry. Faster movement is lost or sent late, so fast movements come up short. Lower the DPI or raise the polling rate. This is not counted as stutter.",
+                    c.pinned,
+                    c.fast_reports,
+                    c.percent(),
+                    c.limit
+                ),
+                egui::Color32::YELLOW,
+            ));
+        }
+        notes
     }
 
     /// Feed raw motion reports to the detector.
@@ -416,6 +469,7 @@ impl StutterPanel {
 
     fn clear(&mut self) {
         self.detector = StutterDetector::new(self.threshold_multiplier);
+        self.stopped_for_input = false;
         self.deltas.clear();
         self.epoch = Instant::now();
         self.frame_reports = 0;
@@ -430,6 +484,9 @@ impl StutterPanel {
         Some(StutterExport {
             rating: self.detector.rating().label().to_string(),
             freezes: self.detector.freezes(),
+            freezes_movement_lost: self.detector.dropouts(),
+            batched_delivery: self.detector.batching().is_some(),
+            clipped_at_counts: self.detector.clipping().map(|c| c.limit),
             total_stutter_count: self.detector.stutter_count(),
             total_samples: judged,
             avg_delta_ms: self.detector.judged_mean_ms().unwrap_or(0.0),
@@ -584,6 +641,42 @@ mod tests {
         });
         assert!(!p.is_running());
         assert!(p.export().is_none());
+    }
+
+    #[test]
+    fn losing_raw_input_ends_the_run_without_mixing() {
+        // Measured on one mouse, which is then unplugged; reports read
+        // afterwards (another mouse) must not join the run
+        let ctx = egui::Context::default();
+        let frame = |p: &mut StutterPanel, events: &[RawInputEvent], raw: bool| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let c = ui.ctx().clone();
+                p.ui(ui, &c, events, raw);
+            });
+        };
+        let mut p = StutterPanel::new();
+        p.start();
+        let events = back_and_forth(8, None);
+        frame(&mut p, &events, true);
+        let reports = p.detector.reports();
+        assert!(reports > 2000);
+        frame(&mut p, &[], false);
+        assert!(!p.is_running() && p.stopped_for_input);
+        frame(&mut p, &back_and_forth(4, Some(10)), true);
+        assert_eq!(p.detector.reports(), reports);
+        assert_eq!(p.export().unwrap().total_stutter_count, 0);
+        p.start_for_test();
+        assert!(!p.stopped_for_input);
+    }
+
+    #[test]
+    fn default_sensitivity_matches_the_cli_and_auto_diagnostics() {
+        let p = StutterPanel::new();
+        assert_eq!(p.get_threshold_multiplier(), DEFAULT_STUTTER_MULTIPLIER);
+        assert_eq!(
+            p.get_threshold_multiplier(),
+            mouse_testkit::analysis::diagnostics::Config::default().stutter_multiplier
+        );
     }
 
     #[test]
