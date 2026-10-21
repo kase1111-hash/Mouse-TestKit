@@ -90,14 +90,17 @@ pub fn run() {
         if phase != last_phase {
             if let Some(p) = phase {
                 let index = engine.phases().iter().position(|x| *x == p).unwrap_or(0);
-                print!("\r\x1B[K");
-                println!(
-                    "\n>>> Step {}/{}: {}",
-                    index + 1,
-                    engine.phases().len(),
-                    p.title()
+                // Raw mode: "\n" alone would not return to the line start
+                print!(
+                    "\r\x1B[K{}",
+                    terminal::raw_lines(&format!(
+                        "\n>>> Step {}/{}: {}\n    {}\n",
+                        index + 1,
+                        engine.phases().len(),
+                        p.title(),
+                        p.instruction()
+                    ))
                 );
-                println!("    {}", p.instruction());
             }
             last_phase = phase;
         }
@@ -107,8 +110,7 @@ pub fn run() {
         while announced < findings.len() {
             let f = &findings[announced];
             if f.severity != Severity::Info {
-                print!("\r\x1B[K");
-                println!("    [{}] {}", f.severity.label(), f.title);
+                print!("\r\x1B[K    [{}] {}\r\n", f.severity.label(), f.title);
             }
             announced += 1;
         }

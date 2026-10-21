@@ -95,6 +95,13 @@ pub fn secs_after(start: Instant, t: Instant) -> Option<f64> {
     t.checked_duration_since(start).map(|d| d.as_secs_f64())
 }
 
+/// `text` with every line ending as "\r\n", for printing in raw mode: there
+/// the terminal does not turn "\n" into a return to the start of the line,
+/// so lines printed with a bare "\n" each start where the last one ended.
+pub fn raw_lines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
 /// How long [`confirm_device_moves`] waits for movement.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -150,6 +157,11 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_lines_return_to_the_start_of_each_line() {
+        assert_eq!(raw_lines("a\nb\r\nc\n"), "a\r\nb\r\nc\r\n");
+    }
 
     #[test]
     fn events_from_before_the_start_are_left_out() {
