@@ -134,6 +134,12 @@ impl ScrollPanel {
             egui::vec2(ui.available_width(), 200.0),
             egui::Sense::hover(),
         );
+        // Keep the wheel from scrolling the page while testing. Otherwise a
+        // few notches move the test area out from under the pointer, and
+        // framework input (counted only while hovering it) loses notches.
+        if self.is_running && response.hovered() {
+            ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+        }
 
         // Visual scroll indicator
         let scroll_indicator = if let Some(event) = self.scroll_events.back() {
@@ -680,6 +686,52 @@ mod tests {
         assert_eq!(panel.total_up, 1.0);
         assert_eq!(panel.wheel.skips, 1);
         assert!(panel.saw_smooth_scroll);
+    }
+
+    #[test]
+    fn framework_input_keeps_every_notch_when_the_page_could_scroll() {
+        // In the app the panel sits in a scrolling page taller than the
+        // default window. The wheel must not scroll the test area away
+        // from the pointer, or framework input stops counting notches and
+        // the "count 10 detents" check would wrongly suggest lost notches.
+        let ctx = egui::Context::default();
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        let mut frame = |panel: &mut ScrollPanel, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let ctx = ui.ctx().clone();
+                egui::ScrollArea::vertical().show(ui, |ui| panel.ui(ui, &ctx, &[], false));
+            });
+        };
+        frame(
+            &mut panel,
+            vec![egui::Event::PointerMoved(egui::pos2(300.0, 200.0))],
+        );
+        for dir in [-1.0, 1.0] {
+            for _ in 0..10 {
+                let notch = egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, dir),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame(&mut panel, vec![notch]);
+                // Let egui's smooth scrolling play out between notches
+                for _ in 0..10 {
+                    frame(&mut panel, Vec::new());
+                }
+            }
+        }
+        assert_eq!(panel.total_down, 10.0);
+        assert_eq!(panel.total_up, 10.0);
     }
 
     #[test]
