@@ -278,8 +278,13 @@ impl AccelPanel {
                 .inner_margin(20.0)
                 .corner_radius(8.0)
                 .show(ui, |ui| {
+                    // Fewer counts on fast passes is almost always the sensor
+                    // losing tracking, not an acceleration setting to turn off.
+                    let loses_counts = result.has_acceleration && result.factor < 1.0;
                     let (status, color) = if !result.conclusive {
                         ("Inconclusive - vary your speed more", egui::Color32::YELLOW)
+                    } else if loses_counts {
+                        ("Fast Passes LOSE Counts", egui::Color32::RED)
                     } else if result.has_acceleration {
                         if has_bridge {
                             ("Sensor/Firmware Acceleration DETECTED", egui::Color32::RED)
@@ -333,6 +338,16 @@ impl AccelPanel {
                             egui::RichText::new(
                                 "The fast passes were not clearly faster than the slow ones. Make the slow passes slower and the fast passes faster.",
                             )
+                            .color(egui::Color32::YELLOW),
+                        );
+                    } else if loses_counts {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(if has_bridge {
+                                "The sensor may be losing tracking at speed: try another mousepad or surface, or the mouse may be moving faster than it is rated for."
+                            } else {
+                                "The pointer moved less on fast passes: it may have hit the screen edge, or the sensor is losing tracking at speed."
+                            })
                             .color(egui::Color32::YELLOW),
                         );
                     } else if result.has_acceleration {
