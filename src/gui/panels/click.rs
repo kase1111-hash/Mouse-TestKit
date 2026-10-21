@@ -88,15 +88,111 @@ fn sticky_verdict(
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum TestButton {
     Left,
     Right,
 }
 
+/// One left or right button press or release.
+#[derive(Debug, Clone, Copy)]
+struct ButtonEdge {
+    button: TestButton,
+    pressed: bool,
+    time: Instant,
+    /// Whether the pointer was over the test area: only presses there count.
+    in_area: bool,
+}
+
+/// This frame's left and right button presses and releases. Raw input
+/// carries each report's own time. Without it, egui's button events are
+/// used, all of them even when a quick click's press and release fall in
+/// one frame, stamped with the frame time `now`. Raw input sees clicks
+/// anywhere (the sidebar, the panel's own buttons), so presses are marked
+/// with whether the pointer was over `area`.
+fn button_edges(
+    ctx: &egui::Context,
+    raw_events: &[RawInputEvent],
+    has_bridge: bool,
+    area: egui::Rect,
+    now: Instant,
+) -> Vec<ButtonEdge> {
+    if has_bridge {
+        let in_area = ctx
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pos| area.contains(pos));
+        raw_events
+            .iter()
+            .filter_map(|e| {
+                let (button, pressed) = match e.kind {
+                    RawInputKind::ButtonPress(RawButton::Left) => (TestButton::Left, true),
+                    RawInputKind::ButtonRelease(RawButton::Left) => (TestButton::Left, false),
+                    RawInputKind::ButtonPress(RawButton::Right) => (TestButton::Right, true),
+                    RawInputKind::ButtonRelease(RawButton::Right) => (TestButton::Right, false),
+                    _ => return None,
+                };
+                Some(ButtonEdge {
+                    button,
+                    pressed,
+                    time: e.timestamp,
+                    in_area,
+                })
+            })
+            .collect()
+    } else {
+        ctx.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        ..
+                    } => {
+                        let button = match button {
+                            egui::PointerButton::Primary => TestButton::Left,
+                            egui::PointerButton::Secondary => TestButton::Right,
+                            _ => return None,
+                        };
+                        Some(ButtonEdge {
+                            button,
+                            pressed: *pressed,
+                            time: now,
+                            in_area: area.contains(*pos),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+}
+
+/// Apply a press or release to one button's open press. A press counts only
+/// in the test area and while no press is open; a release closes the open
+/// press wherever it happens. Returns the hold (ms) a release completes.
+fn track_hold(pressed_at: &mut Option<Instant>, edge: &ButtonEdge) -> Option<f64> {
+    if edge.pressed {
+        if pressed_at.is_none() && edge.in_area {
+            *pressed_at = Some(edge.time);
+        }
+        None
+    } else {
+        pressed_at
+            .take()
+            .map(|start| edge.time.saturating_duration_since(start).as_secs_f64() * 1000.0)
+    }
+}
+
+/// Shown on the click panels without raw input.
+const FRAME_TIMED_NOTE: &str = "Raw input unavailable: presses and releases are only known to the display frame (about 16 ms), so hold times are rounded to frames and the shortest hold is not shown.";
+
 pub struct ClickPanel {
     // Click Response - real click testing
     response_running: bool,
+    /// Whether the current or last Click Test run read raw input.
+    response_raw: bool,
     response_button: TestButton,
     /// Total clicks recorded
     response_click_count: usize,
@@ -152,6 +248,7 @@ impl ClickPanel {
     pub fn new() -> Self {
         Self {
             response_running: false,
+            response_raw: true,
             response_button: TestButton::Left,
             response_click_count: 0,
             response_right_click_count: 0,
@@ -222,10 +319,16 @@ impl ClickPanel {
         ui.horizontal(|ui| {
             if self.response_running {
                 if ui.button("Stop").clicked() {
+                    // A press still open never gets its release here
                     self.response_running = false;
+                    self.response_press_start = None;
+                    self.response_right_press_start = None;
+                    self.response_is_pressed = false;
+                    self.response_right_is_pressed = false;
                 }
             } else if ui.button("Start").clicked() {
                 self.response_running = true;
+                self.response_raw = has_bridge;
                 self.response_click_count = 0;
                 self.response_right_click_count = 0;
                 self.response_hold_times.clear();
@@ -324,6 +427,17 @@ impl ClickPanel {
                 ),
             };
 
+        // Hold times follow the input the run used
+        let raw = if self.response_running || click_count > 0 {
+            self.response_raw
+        } else {
+            has_bridge
+        };
+        if !raw {
+            ui.label(egui::RichText::new(FRAME_TIMED_NOTE).color(egui::Color32::YELLOW));
+            ui.add_space(8.0);
+        }
+
         egui::Frame::dark_canvas(ui.style())
             .inner_margin(20.0)
             .corner_radius(8.0)
@@ -360,7 +474,9 @@ impl ClickPanel {
                     ui.vertical(|ui| {
                         ui.label("Min Hold");
                         let min_hold = hold_times_slice.iter().cloned().fold(f64::MAX, f64::min);
-                        let min_str = if min_hold == f64::MAX {
+                        // A press shorter than a frame reads as 0 ms or a
+                        // frame without raw input: not a measurement.
+                        let min_str = if min_hold == f64::MAX || !raw {
                             "- ms".to_string()
                         } else {
                             format!("{:.1} ms", min_hold)
@@ -404,116 +520,32 @@ impl ClickPanel {
         if self.response_running {
             let now = Instant::now();
 
-            if has_bridge {
-                // Raw input path: process all button events from the bridge
-                for event in raw_events {
-                    match &event.kind {
-                        // Left click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Left) => {
-                            if !self.response_is_pressed {
-                                self.response_is_pressed = true;
-                                self.response_press_start = Some(event.timestamp);
-                            }
-                        }
-                        RawInputKind::ButtonRelease(RawButton::Left) => {
-                            if self.response_is_pressed {
-                                self.response_is_pressed = false;
-                                self.response_click_count += 1;
-                                self.response_click_times.push_back(event.timestamp);
-
-                                if let Some(start) = self.response_press_start {
-                                    let hold_ms =
-                                        event.timestamp.duration_since(start).as_secs_f64()
-                                            * 1000.0;
-                                    self.response_hold_times.push_back(hold_ms);
-                                    if self.response_hold_times.len() > 100 {
-                                        self.response_hold_times.pop_front();
-                                    }
-                                }
-                                self.response_press_start = None;
-                            }
-                        }
-                        // Right click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Right) => {
-                            if !self.response_right_is_pressed {
-                                self.response_right_is_pressed = true;
-                                self.response_right_press_start = Some(event.timestamp);
-                            }
-                        }
-                        RawInputKind::ButtonRelease(RawButton::Right)
-                            if self.response_right_is_pressed =>
-                        {
-                            self.response_right_is_pressed = false;
-                            self.response_right_click_count += 1;
-                            self.response_right_click_times.push_back(event.timestamp);
-
-                            if let Some(start) = self.response_right_press_start {
-                                let hold_ms =
-                                    event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
-                                self.response_right_hold_times.push_back(hold_ms);
-                                if self.response_right_hold_times.len() > 100 {
-                                    self.response_right_hold_times.pop_front();
-                                }
-                            }
-                            self.response_right_press_start = None;
-                        }
-                        _ => {}
+            for edge in button_edges(ctx, raw_events, has_bridge, rect, now) {
+                let (pressed_at, count, times, holds) = match edge.button {
+                    TestButton::Left => (
+                        &mut self.response_press_start,
+                        &mut self.response_click_count,
+                        &mut self.response_click_times,
+                        &mut self.response_hold_times,
+                    ),
+                    TestButton::Right => (
+                        &mut self.response_right_press_start,
+                        &mut self.response_right_click_count,
+                        &mut self.response_right_click_times,
+                        &mut self.response_right_hold_times,
+                    ),
+                };
+                if let Some(hold_ms) = track_hold(pressed_at, &edge) {
+                    *count += 1;
+                    times.push_back(edge.time);
+                    holds.push_back(hold_ms);
+                    if holds.len() > 100 {
+                        holds.pop_front();
                     }
-                }
-            } else {
-                // Fallback: egui pointer input
-                let pointer = ctx.input(|i| i.pointer.clone());
-                let is_primary_down = pointer.primary_down();
-                let is_secondary_down = pointer.secondary_down();
-
-                // Only track clicks that start within the test area
-                let in_test_area = pointer
-                    .hover_pos()
-                    .map(|pos| rect.contains(pos))
-                    .unwrap_or(false);
-
-                // Left click handling
-                if in_test_area && is_primary_down && !self.response_is_pressed {
-                    self.response_is_pressed = true;
-                    self.response_press_start = Some(now);
-                }
-
-                if !is_primary_down && self.response_is_pressed {
-                    self.response_is_pressed = false;
-                    self.response_click_count += 1;
-                    self.response_click_times.push_back(now);
-
-                    if let Some(start) = self.response_press_start {
-                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                        self.response_hold_times.push_back(hold_ms);
-                        if self.response_hold_times.len() > 100 {
-                            self.response_hold_times.pop_front();
-                        }
-                    }
-                    self.response_press_start = None;
-                }
-
-                // Right click handling
-                if in_test_area && is_secondary_down && !self.response_right_is_pressed {
-                    self.response_right_is_pressed = true;
-                    self.response_right_press_start = Some(now);
-                }
-
-                if !is_secondary_down && self.response_right_is_pressed {
-                    self.response_right_is_pressed = false;
-                    self.response_right_click_count += 1;
-                    self.response_right_click_times.push_back(now);
-
-                    if let Some(start) = self.response_right_press_start {
-                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                        self.response_right_hold_times.push_back(hold_ms);
-                        if self.response_right_hold_times.len() > 100 {
-                            self.response_right_hold_times.pop_front();
-                        }
-                    }
-                    self.response_right_press_start = None;
                 }
             }
+            self.response_is_pressed = self.response_press_start.is_some();
+            self.response_right_is_pressed = self.response_right_press_start.is_some();
 
             // Prune old click times and update CPS for both buttons
             while let Some(front) = self.response_click_times.front() {
@@ -796,116 +828,34 @@ impl ClickPanel {
 
         // Capture real mouse button input
         if self.sticky_running {
-            let now = Instant::now();
-
             // Only presses that start in the test area count. Raw input sees
             // every click, including the Stop button and the sidebar, whose
             // release this panel never gets once it stops or is left: the
-            // press would stay open and later read as a long hold.
-            let in_test_area = ctx
-                .input(|i| i.pointer.hover_pos())
-                .is_some_and(|pos| rect.contains(pos));
-
-            if has_bridge {
-                // Raw input path: process all button events from the bridge
-                for event in raw_events {
-                    match &event.kind {
-                        // Left click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Left) if in_test_area => {
-                            if !self.sticky_is_pressed {
-                                self.sticky_is_pressed = true;
-                                self.sticky_press_start = Some(event.timestamp);
-                            }
-                        }
-                        RawInputKind::ButtonRelease(RawButton::Left) => {
-                            if self.sticky_is_pressed {
-                                self.sticky_is_pressed = false;
-
-                                if let Some(start) = self.sticky_press_start {
-                                    let hold_ms =
-                                        event.timestamp.duration_since(start).as_secs_f64()
-                                            * 1000.0;
-                                    self.sticky_holds.push(hold_ms);
-
-                                    if hold_ms > sticky_ms {
-                                        self.sticky_count += 1;
-                                    }
-                                }
-                                self.sticky_press_start = None;
-                            }
-                        }
-                        // Right click handling via raw input
-                        RawInputKind::ButtonPress(RawButton::Right) if in_test_area => {
-                            if !self.sticky_right_is_pressed {
-                                self.sticky_right_is_pressed = true;
-                                self.sticky_right_press_start = Some(event.timestamp);
-                            }
-                        }
-                        RawInputKind::ButtonRelease(RawButton::Right)
-                            if self.sticky_right_is_pressed =>
-                        {
-                            self.sticky_right_is_pressed = false;
-
-                            if let Some(start) = self.sticky_right_press_start {
-                                let hold_ms =
-                                    event.timestamp.duration_since(start).as_secs_f64() * 1000.0;
-                                self.sticky_right_holds.push(hold_ms);
-
-                                if hold_ms > sticky_ms {
-                                    self.sticky_right_count += 1;
-                                }
-                            }
-                            self.sticky_right_press_start = None;
-                        }
-                        _ => {}
+            // press would stay open and later read as a long hold. Without
+            // raw input every button event counts, even a press and release
+            // within one frame.
+            for edge in button_edges(ctx, raw_events, has_bridge, rect, Instant::now()) {
+                let (pressed_at, holds, slow) = match edge.button {
+                    TestButton::Left => (
+                        &mut self.sticky_press_start,
+                        &mut self.sticky_holds,
+                        &mut self.sticky_count,
+                    ),
+                    TestButton::Right => (
+                        &mut self.sticky_right_press_start,
+                        &mut self.sticky_right_holds,
+                        &mut self.sticky_right_count,
+                    ),
+                };
+                if let Some(hold_ms) = track_hold(pressed_at, &edge) {
+                    holds.push(hold_ms);
+                    if hold_ms > sticky_ms {
+                        *slow += 1;
                     }
-                }
-            } else {
-                // Fallback: egui pointer input
-                let pointer = ctx.input(|i| i.pointer.clone());
-                let is_primary_down = pointer.primary_down();
-                let is_secondary_down = pointer.secondary_down();
-
-                // Left click handling
-                if in_test_area && is_primary_down && !self.sticky_is_pressed {
-                    self.sticky_is_pressed = true;
-                    self.sticky_press_start = Some(now);
-                }
-
-                if !is_primary_down && self.sticky_is_pressed {
-                    self.sticky_is_pressed = false;
-
-                    if let Some(start) = self.sticky_press_start {
-                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                        self.sticky_holds.push(hold_ms);
-
-                        if hold_ms > sticky_ms {
-                            self.sticky_count += 1;
-                        }
-                    }
-                    self.sticky_press_start = None;
-                }
-
-                // Right click handling
-                if in_test_area && is_secondary_down && !self.sticky_right_is_pressed {
-                    self.sticky_right_is_pressed = true;
-                    self.sticky_right_press_start = Some(now);
-                }
-
-                if !is_secondary_down && self.sticky_right_is_pressed {
-                    self.sticky_right_is_pressed = false;
-
-                    if let Some(start) = self.sticky_right_press_start {
-                        let hold_ms = now.duration_since(start).as_secs_f64() * 1000.0;
-                        self.sticky_right_holds.push(hold_ms);
-
-                        if hold_ms > sticky_ms {
-                            self.sticky_right_count += 1;
-                        }
-                    }
-                    self.sticky_right_press_start = None;
                 }
             }
+            self.sticky_is_pressed = self.sticky_press_start.is_some();
+            self.sticky_right_is_pressed = self.sticky_right_press_start.is_some();
         }
     }
 
@@ -1239,6 +1189,12 @@ impl ClickPanel {
             return None;
         }
         Some(ClickResponseExport {
+            hold_timing: if self.response_raw {
+                "device"
+            } else {
+                "display frame"
+            }
+            .to_string(),
             left: ClickButtonExport {
                 click_count: self.response_click_count,
                 cps: self.response_cps,
@@ -1410,6 +1366,106 @@ mod tests {
         panel.sticky_running = true;
         sticky_frame(&mut panel, IN_TEST_AREA, &left_clicks(holds_ms));
         panel
+    }
+
+    /// One frame of the Click Test panel with the pointer at `pointer`,
+    /// `raw` events through the raw-input path when `has_bridge`, and
+    /// `pointer_events` as the window system's input.
+    fn response_frame(
+        panel: &mut ClickPanel,
+        pointer: egui::Pos2,
+        raw: &[RawInputEvent],
+        pointer_events: Vec<egui::Event>,
+        has_bridge: bool,
+    ) {
+        let ctx = egui::Context::default();
+        let mut events = vec![egui::Event::PointerMoved(pointer)];
+        events.extend(pointer_events);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_response(ui, &ctx, raw, has_bridge);
+        });
+    }
+
+    #[test]
+    fn click_test_counts_only_presses_in_its_box() {
+        // A press on the heading (the sidebar, Stop) whose release comes
+        // with a later click in the box must not become a long hold
+        let mut panel = ClickPanel::new();
+        panel.response_running = true;
+        let events = left_clicks(&[30_000]);
+        response_frame(&mut panel, ON_HEADING, &events[..1], vec![], true);
+        assert!(!panel.response_is_pressed);
+        response_frame(&mut panel, IN_TEST_AREA, &events[1..], vec![], true);
+        assert_eq!(panel.response_click_count, 0);
+        assert!(panel.response_hold_times.is_empty());
+        // Clicks in the box count
+        response_frame(
+            &mut panel,
+            IN_TEST_AREA,
+            &left_clicks(&[90, 80]),
+            vec![],
+            true,
+        );
+        assert_eq!(panel.response_click_count, 2);
+        assert_eq!(panel.response_hold_times.len(), 2);
+    }
+
+    #[test]
+    fn framework_clicks_within_one_frame_are_counted() {
+        // A fast click: press and release reach egui in the same frame
+        let mut panel = ClickPanel::new();
+        panel.response_running = true;
+        panel.response_raw = false;
+        let button = |pressed| egui::Event::PointerButton {
+            pos: IN_TEST_AREA,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        response_frame(
+            &mut panel,
+            IN_TEST_AREA,
+            &[],
+            vec![button(true), button(false)],
+            false,
+        );
+        assert_eq!(panel.response_click_count, 1);
+        assert!(!panel.response_is_pressed);
+        assert_eq!(
+            panel.export_response().unwrap().hold_timing,
+            "display frame"
+        );
+
+        // The same in the stickiness panel
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            events: vec![
+                egui::Event::PointerMoved(IN_TEST_AREA),
+                button(true),
+                button(false),
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_sticky(ui, &ctx, &[], false);
+        });
+        assert_eq!(panel.sticky_holds.len(), 1);
     }
 
     #[test]

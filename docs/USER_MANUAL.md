@@ -67,8 +67,10 @@ Counts clicks and measures hold duration. Click latency (the delay inside the mo
 
 1. Select **Left Click** or **Right Click**
 2. Click **Start**
-3. Click inside the test area
+3. Click inside the test area (only presses there count)
 4. View clicks count, CPS (clicks per second), and hold times
+
+Without raw input every click is still counted, even a press and release within one display frame, but press and release times are only known to the frame (about 16 ms): hold times are rounded to frames, the shortest hold is not shown, and the export says so.
 
 ---
 
@@ -166,6 +168,8 @@ Detects switch issues that cause accidental double-clicks.
 1. Click **Start**, then click the large target repeatedly at a normal pace
 2. A press closer than the threshold to the previous press, or within 25 ms of the previous release, is flagged as accidental (a finger cannot do either)
 3. One or two accidental double-clicks are a possible fault (run the test again); three or more indicate a failing switch
+
+Only presses on the target count. Switch bounce needs raw input: without it presses are only known to the display frame (about 16 ms), too coarse for these checks, so clicks and intervals are shown but the switch is not judged (as in Auto Diagnostics).
 
 ---
 

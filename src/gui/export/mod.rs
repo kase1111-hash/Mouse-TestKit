@@ -81,6 +81,10 @@ pub struct StutterExport {
 /// Click response test results for left and right buttons.
 #[derive(Serialize)]
 pub struct ClickResponseExport {
+    /// Where press and release times came from: "device" (raw input, each
+    /// report's own time) or "display frame" (about 16 ms steps; very short
+    /// presses read as 0 ms and min_hold_ms is not a measurement).
+    pub hold_timing: String,
     pub left: ClickButtonExport,
     pub right: ClickButtonExport,
 }
@@ -182,6 +186,9 @@ pub struct DoubleClickExport {
     pub total_clicks: usize,
     pub double_click_count: u32,
     pub accidental_double_clicks: u32,
+    /// False without raw input: frame-timed presses cannot show bounce, so
+    /// `accidental_double_clicks` was not counted.
+    pub bounce_measured: bool,
     pub avg_interval_ms: f64,
     pub min_interval_ms: f64,
     pub max_interval_ms: f64,
@@ -333,6 +340,7 @@ impl TestResultsExport {
 
         // Click Response
         if let Some(ref c) = self.click_response {
+            csv.push_str(&format!("Click Response,Hold Timing,{}\n", c.hold_timing));
             csv.push_str(&format!(
                 "Click Response (Left),Click Count,{}\n",
                 c.left.click_count
@@ -420,10 +428,14 @@ impl TestResultsExport {
                 "Double-Click,Double-Clicks,{}\n",
                 d.double_click_count
             ));
-            csv.push_str(&format!(
-                "Double-Click,Accidental,{}\n",
-                d.accidental_double_clicks
-            ));
+            if d.bounce_measured {
+                csv.push_str(&format!(
+                    "Double-Click,Accidental,{}\n",
+                    d.accidental_double_clicks
+                ));
+            } else {
+                csv.push_str("Double-Click,Accidental,not measured (no raw input)\n");
+            }
             csv.push_str(&format!(
                 "Double-Click,Avg Interval (ms),{:.1}\n",
                 d.avg_interval_ms
