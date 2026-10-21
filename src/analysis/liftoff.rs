@@ -617,9 +617,10 @@ pub enum LiftState {
 }
 
 impl LiftState {
+    /// Short, for a one-line status display.
     pub fn label(self) -> &'static str {
         match self {
-            LiftState::Settling => "waiting for the mouse to be still",
+            LiftState::Settling => "waiting for stillness",
             LiftState::Still => "still",
             LiftState::Moving => "moving",
         }
@@ -1183,10 +1184,7 @@ mod tests {
         assert_eq!(det.state().label(), "still");
         det.feed(0.5, 30, 0);
         assert_eq!(det.state(), LiftState::Moving);
-        assert_eq!(
-            LiftState::Settling.label(),
-            "waiting for the mouse to be still"
-        );
+        assert_eq!(LiftState::Settling.label(), "waiting for stillness");
         // Without `watching_from` the mouse is taken to be still at once.
         assert_eq!(LiftDetector::new(800.0).state(), LiftState::Still);
     }

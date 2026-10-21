@@ -1172,7 +1172,7 @@ impl ClickPanel {
                     "Possible jumps",
                     egui::Color32::YELLOW,
                     format!(
-                        "{} movements carried the cursor more than {:.1} mm, but {} of them started or stopped gently enough to be the hand - for example the mouse landing while it still slid sideways, or a mouse reporting too rarely to show how it moved. Set the mouse straight down without sliding it and repeat the test.",
+                        "{} movements carried the cursor more than {:.1} mm, but {} of them started or stopped gently enough to be the hand - for example the mouse landing while it still slid sideways, or a mouse reporting too rarely to show how it moved. Set the mouse straight down without sliding it and repeat the test: if they come back, the lift-off distance (LOD) is likely too high.",
                         jumps + possible,
                         JUMP_THRESHOLD_MM,
                         possible

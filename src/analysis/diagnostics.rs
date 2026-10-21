@@ -1753,7 +1753,7 @@ impl AutoTest {
                     Phase::Lift,
                     "Possible cursor jumps on lift",
                     format!(
-                        "{} movements after a pause carried the cursor more than {} and then stopped (largest {:.1} mm), but {} of them started or stopped gently enough to be the hand - for example the mouse landing while it still moved sideways, or a mouse reporting too rarely to show how it moved. Set the mouse straight down without sliding it and repeat, or run the Lift-Off Jump test.{}{}",
+                        "{} movements after a pause carried the cursor more than {} and then stopped (largest {:.1} mm), but {} of them started or stopped gently enough to be the hand - for example the mouse landing while it still moved sideways, or a mouse reporting too rarely to show how it moved. Set the mouse straight down without sliding it and repeat, or run the Lift-Off Jump test: if they come back, the lift-off distance is likely too high.{}{}",
                         n, threshold, max_mm, possible, nudges, dpi_note
                     ),
                 );

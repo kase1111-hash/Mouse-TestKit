@@ -312,14 +312,18 @@ pub fn verdict(tally: &LiftTally, lifts: usize, dpi_assumed: bool) -> (TestOutco
         LiftVerdict::PossibleJumps => {
             let mut l = vec![
                 format!(
-                    "? {} possible jumps: each moved the cursor more than {:.1} mm, but started or",
-                    jumps, JUMP_THRESHOLD_MM
+                    "? Possible jumps: {} movements carried the cursor more than {:.1} mm, but {} of them",
+                    jumps,
+                    JUMP_THRESHOLD_MM,
+                    tally.possible.len()
                 ),
-                "  stopped gently enough to be the hand - for example the mouse landing while it"
+                "  started or stopped gently enough to be the hand - for example the mouse landing"
                     .to_string(),
-                "  still slid sideways, or a mouse reporting too rarely to show how it moved."
+                "  while it still slid sideways, or a mouse reporting too rarely to show how it"
                     .to_string(),
-                "  Set the mouse straight down without sliding it and repeat the test.".to_string(),
+                "  moved. Set the mouse straight down without sliding it and repeat the test:"
+                    .to_string(),
+                "  if they come back, the lift-off distance (LOD) is likely too high.".to_string(),
             ];
             if dpi_assumed {
                 l.push(format!(
@@ -413,13 +417,14 @@ mod tests {
         // cannot rule out the hand, so they are no proof of a fault.
         let (outcome, lines) = verdict(&tally(0, 5), 5, false);
         assert_eq!(outcome, TestOutcome::PossibleIssue);
-        assert!(lines[0].contains("5 possible jumps"), "{:?}", lines);
+        assert!(lines[0].contains("5 movements"), "{:?}", lines);
+        assert!(lines[0].contains("but 5 of them"), "{:?}", lines);
         assert!(lines.join(" ").contains("without sliding"), "{:?}", lines);
-        // One jump that no hand could make does not confirm it either.
-        assert_eq!(
-            verdict(&tally(1, 1), 5, false).0,
-            TestOutcome::PossibleIssue
-        );
+        // One jump that no hand could make does not confirm it either, and
+        // the text does not say it could have been the hand.
+        let (outcome, lines) = verdict(&tally(1, 1), 5, false);
+        assert_eq!(outcome, TestOutcome::PossibleIssue);
+        assert!(lines[0].contains("but 1 of them"), "{:?}", lines);
         assert_eq!(
             verdict(&tally(0, 1), 5, false).0,
             TestOutcome::PossibleIssue
