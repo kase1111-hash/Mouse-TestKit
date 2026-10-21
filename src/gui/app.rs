@@ -1010,9 +1010,11 @@ impl eframe::App for MouseTestKitApp {
             .as_ref()
             .and_then(pointer_mismatch_warning);
 
-        // The auto diagnostics engine must see every frame's events even
-        // while another panel is displayed.
+        // The auto diagnostics engine and a jitter sample must see every
+        // frame's events even while another panel is displayed.
         self.auto_test_panel
+            .process_input(ctx, &frame_events, has_bridge);
+        self.jitter_panel
             .process_input(ctx, &frame_events, has_bridge);
 
         // Check if any panel settings changed and mark config dirty
@@ -1091,7 +1093,7 @@ impl eframe::App for MouseTestKitApp {
                     ActiveTest::DoubleClick => {
                         self.double_click_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
-                    ActiveTest::Jitter => self.jitter_panel.ui(ui, ctx, raw_events, has_bridge),
+                    ActiveTest::Jitter => self.jitter_panel.ui(ui, has_bridge),
                 });
             });
 

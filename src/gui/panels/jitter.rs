@@ -81,13 +81,8 @@ impl JitterPanel {
         self.is_sampling
     }
 
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        raw_events: &[RawInputEvent],
-        has_bridge: bool,
-    ) {
+    /// Draw the page. Input is recorded by [`Self::process_input`].
+    pub fn ui(&mut self, ui: &mut egui::Ui, has_bridge: bool) {
         ui.heading("Jitter Test");
         ui.add_space(5.0);
         ui.label("Measures sensor noise when the mouse is stationary.");
@@ -255,32 +250,52 @@ impl JitterPanel {
                     );
                 });
         }
+    }
 
-        // Capture mouse input during sampling
-        if self.is_sampling {
-            let now = Instant::now();
-            if has_bridge {
-                self.record_raw(raw_events);
-            } else if self
-                .recording_window()
-                .is_some_and(|(from, until)| now >= from && now < until)
-            {
-                // Fallback: window-system pointer delta (points, OS-accelerated)
-                let (delta, clicked) = ctx.input(|i| {
-                    (
-                        i.pointer.delta(),
-                        i.pointer.any_pressed() || i.pointer.any_released(),
-                    )
-                });
-                if clicked {
-                    self.touched = true;
-                }
-                if delta.x != 0.0 || delta.y != 0.0 {
-                    self.record_delta(delta.x as f64, delta.y as f64);
-                }
-            }
-            self.tick(now);
+    /// Record this frame's input for a sample in progress. The app calls
+    /// this every frame, whichever page is shown: input drained while
+    /// another page was displayed would otherwise never be seen, and a
+    /// sample finished on return would claim an untouched mouse.
+    pub fn process_input(
+        &mut self,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+    ) {
+        self.process_frame(ctx, raw_events, has_bridge, Instant::now());
+    }
+
+    fn process_frame(
+        &mut self,
+        ctx: &egui::Context,
+        raw_events: &[RawInputEvent],
+        has_bridge: bool,
+        now: Instant,
+    ) {
+        if !self.is_sampling {
+            return;
         }
+        if has_bridge {
+            self.record_raw(raw_events);
+        } else if self
+            .recording_window()
+            .is_some_and(|(from, until)| now >= from && now < until)
+        {
+            // Fallback: window-system pointer delta (points, OS-accelerated)
+            let (delta, clicked) = ctx.input(|i| {
+                (
+                    i.pointer.delta(),
+                    i.pointer.any_pressed() || i.pointer.any_released(),
+                )
+            });
+            if clicked {
+                self.touched = true;
+            }
+            if delta.x != 0.0 || delta.y != 0.0 {
+                self.record_delta(delta.x as f64, delta.y as f64);
+            }
+        }
+        self.tick(now);
     }
 
     /// (start, end) of the recording window of the current sample.
@@ -508,6 +523,36 @@ mod tests {
         run_sample(&mut p, &events, start);
         assert!(p.export().is_none());
         assert!(p.last_discarded);
+    }
+
+    #[test]
+    fn input_while_another_page_is_shown_still_counts() {
+        // Take Sample, then the user opens another page during the settle
+        // time and comes back 20 s later: the panel's ui() never ran, but
+        // the app fed every frame. The mouse moved and clicked meanwhile.
+        let ctx = egui::Context::default();
+        let mut p = JitterPanel::new();
+        let start = Instant::now();
+        p.start_sample_at(start, true);
+        let away = [
+            at(start, 3_000, mv(40, 12)),
+            at(start, 3_500, RawInputKind::ButtonPress(RawButton::Left)),
+            at(start, 3_600, RawInputKind::ButtonRelease(RawButton::Left)),
+        ];
+        p.process_frame(&ctx, &away, true, start + Duration::from_millis(3_700));
+        p.process_frame(&ctx, &[], true, start + Duration::from_secs(20));
+        assert!(!p.is_running());
+        assert!(p.export().is_none(), "touched sample was kept");
+        assert!(p.last_discarded);
+
+        // Untouched but moving on its own while away: recorded, not Excellent
+        p.start_sample_at(start, true);
+        let drift: Vec<_> = (0..20u64)
+            .map(|i| at(start, 2_100 + 240 * i, mv(1, 1)))
+            .collect();
+        p.process_frame(&ctx, &drift, true, start + Duration::from_millis(7_000));
+        p.process_frame(&ctx, &[], true, start + Duration::from_secs(20));
+        assert_ne!(p.export().unwrap().rating, "Excellent");
     }
 
     #[test]

@@ -111,7 +111,7 @@ mod smoke_tests {
                     click.ui_response(ui, ctx, &[], has_bridge);
                     click.ui_sticky(ui, ctx, &[], has_bridge);
                     click.ui_liftoff(ui, ctx, &[], has_bridge);
-                    jitter.ui(ui, ctx, &[], has_bridge);
+                    jitter.ui(ui, has_bridge);
                     dpi.ui(ui, ctx, &[], has_bridge);
                     accel.ui_accel(ui, ctx, &[], has_bridge);
                     accel.ui_angle(ui, ctx, &[], has_bridge);
