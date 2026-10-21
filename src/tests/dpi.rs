@@ -109,14 +109,15 @@ pub fn run() -> TestOutcome {
     };
     say("");
     say("Instructions:");
-    say("  1. Hold the mouse against the START mark of your ruler and keep it still");
+    say("  1. Line up one edge of the mouse with the START mark of your ruler");
+    say("     and keep it still");
     say("  2. Press SPACE to start counting");
     say(&format!(
         "  3. Slide it exactly {} along the ruler in one movement, without lifting",
         distance_label
     ));
     say("     (any direction: horizontal, vertical or slanted)");
-    say("  4. Hold it still on the END mark and press SPACE to record");
+    say("  4. Stop with the same edge on the END mark, hold still, press SPACE");
     say("  Repeat 3 or more times. 'r' cancels the current sample, 'q' finishes.");
     say("");
 
