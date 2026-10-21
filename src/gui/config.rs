@@ -15,10 +15,12 @@ use std::path::PathBuf;
 
 /// Stutter panel sensitivity slider.
 pub const STUTTER_MULTIPLIER_RANGE: RangeInclusive<f64> = 1.5..=4.0;
-/// DPI panel target DPI field.
-pub const DPI_TARGET_RANGE: RangeInclusive<u32> = 100..=16000;
-/// DPI panel movement distance field (inches).
-pub const DPI_DISTANCE_RANGE: RangeInclusive<f32> = 0.5..=12.0;
+/// DPI panel target DPI field. Current sensors reach about 45,000 DPI; the
+/// upper bound leaves headroom.
+pub const DPI_TARGET_RANGE: RangeInclusive<u32> = 50..=64_000;
+/// DPI panel movement distance field (inches): up to about the width of a
+/// large pad.
+pub const DPI_DISTANCE_RANGE: RangeInclusive<f32> = 0.5..=24.0;
 /// Double-click panel threshold field (ms).
 pub const DOUBLE_CLICK_THRESHOLD_RANGE: RangeInclusive<f64> = 10.0..=100.0;
 
@@ -212,8 +214,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loaded.stutter_threshold_multiplier, 1.5);
-        assert_eq!(loaded.dpi_target, 100);
-        assert_eq!(loaded.dpi_distance_inches, 12.0);
+        assert_eq!(loaded.dpi_target, *DPI_TARGET_RANGE.start());
+        assert_eq!(loaded.dpi_distance_inches, *DPI_DISTANCE_RANGE.end());
         assert_eq!(loaded.double_click_threshold_ms, 100.0);
 
         let loaded = Config::parse(
@@ -222,9 +224,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(loaded.stutter_threshold_multiplier, 4.0);
-        assert_eq!(loaded.dpi_target, 16000);
-        assert_eq!(loaded.dpi_distance_inches, 0.5);
+        assert_eq!(loaded.dpi_target, *DPI_TARGET_RANGE.end());
+        assert_eq!(loaded.dpi_distance_inches, *DPI_DISTANCE_RANGE.start());
         assert_eq!(loaded.double_click_threshold_ms, 10.0);
+    }
+
+    #[test]
+    fn test_widget_extremes_survive_save_and_load() {
+        // A 26000 DPI mouse marked over 14 in, and the widgets' own limits
+        for (dpi, inches) in [(26_000, 14.0), (64_000, 24.0), (50, 0.5)] {
+            let saved = Config {
+                dpi_target: dpi,
+                dpi_distance_inches: inches,
+                ..Config::default()
+            };
+            let loaded = Config::parse(&serde_json::to_string(&saved).unwrap()).unwrap();
+            assert_eq!(loaded.dpi_target, dpi);
+            assert_eq!(loaded.dpi_distance_inches, inches);
+        }
     }
 
     #[test]

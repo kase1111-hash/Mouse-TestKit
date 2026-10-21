@@ -10,17 +10,17 @@
 use eframe::egui;
 
 use super::polling::raw_input_required_notice;
+use crate::config::{DPI_DISTANCE_RANGE, DPI_TARGET_RANGE};
 use crate::export::{DpiExport, DpiSampleExport};
 use crate::input_bridge::{RawInputEvent, RawInputKind};
 
-/// Lowest and highest selectable target DPI. Current sensors reach about
-/// 45,000 DPI; the upper bound leaves headroom.
-const MIN_TARGET_DPI: u32 = 50;
-const MAX_TARGET_DPI: u32 = 64_000;
+/// Selectable target DPI and distance (inches): the ranges saved settings
+/// are clamped to on load, so a value set here survives a restart.
+const MIN_TARGET_DPI: u32 = *DPI_TARGET_RANGE.start();
+const MAX_TARGET_DPI: u32 = *DPI_TARGET_RANGE.end();
 const CM_PER_INCH: f32 = 2.54;
-/// Longest selectable distance in inches (about the width of a large pad).
-const MAX_DISTANCE_INCHES: f32 = 24.0;
-const MIN_DISTANCE_INCHES: f32 = 0.5;
+const MAX_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.end();
+const MIN_DISTANCE_INCHES: f32 = *DPI_DISTANCE_RANGE.start();
 /// A result this far off the target (fraction) is almost always a setup
 /// mistake (a different DPI stage, a wrong distance, a missed SPACE press)
 /// rather than the sensor: real sensors deviate by a few percent.
