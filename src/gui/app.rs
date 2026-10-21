@@ -1030,6 +1030,11 @@ impl eframe::App for MouseTestKitApp {
         self.render_sidebar(ui);
 
         let raw_events = &frame_events;
+        // Lift-off checks measure in mm with the DPI from the DPI Accuracy
+        // page. That page starts at 800, so 800 counts as not set and the
+        // checks say they assumed it.
+        let lift_dpi = Some(f64::from(self.dpi_panel.get_target_dpi()))
+            .filter(|&d| d != mouse_testkit::analysis::liftoff::DEFAULT_DPI);
 
         // Render main content with styled central panel
         egui::CentralPanel::default()
@@ -1055,7 +1060,10 @@ impl eframe::App for MouseTestKitApp {
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| match self.active_test {
                     ActiveTest::Dashboard => self.render_dashboard(ui),
-                    ActiveTest::AutoTest => self.auto_test_panel.ui(ui, ctx, has_bridge),
+                    ActiveTest::AutoTest => {
+                        self.auto_test_panel.set_dpi(lift_dpi);
+                        self.auto_test_panel.ui(ui, ctx, has_bridge)
+                    }
                     ActiveTest::PollingRate => {
                         self.polling_panel.ui(ui, ctx, raw_events, has_bridge)
                     }
@@ -1067,6 +1075,7 @@ impl eframe::App for MouseTestKitApp {
                         self.click_panel.ui_sticky(ui, ctx, raw_events, has_bridge)
                     }
                     ActiveTest::LiftOff => {
+                        self.click_panel.set_liftoff_dpi(lift_dpi);
                         self.click_panel.ui_liftoff(ui, ctx, raw_events, has_bridge)
                     }
                     ActiveTest::ScrollWheel => {
