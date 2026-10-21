@@ -50,6 +50,9 @@ pub fn run() -> TestOutcome {
 
     terminal::grab_device(&mut device);
 
+    // Clicks made while the device list waited are queued with their own
+    // times: a stale double-click would read as a 0 ms bounce.
+    terminal::discard_queued(|| input::fetch_timed_events(&mut device));
     let start = Instant::now();
     let mut detector = BounceDetector::new(&cfg);
     let mut last_print = Instant::now();
@@ -70,7 +73,9 @@ pub fn run() -> TestOutcome {
         }
 
         for timed in input::fetch_timed_events(&mut device) {
-            let t = timed.time.saturating_duration_since(start).as_secs_f64();
+            let Some(t) = terminal::secs_after(start, timed.time) else {
+                continue;
+            };
             if let Some(dc) = detector.feed(t, &timed.event) {
                 println!("\r\x1B[K⚠ DOUBLE-CLICK: {}", dc.describe());
             }
@@ -97,6 +102,10 @@ pub fn run() -> TestOutcome {
 
     let double_clicks = &detector.events;
     println!("Total clicks: {}", detector.presses);
+    println!(
+        "By button: {}",
+        super::click_sticky::per_button(&detector.presses_by_button()).0
+    );
     println!("Double-clicks detected: {}\n", double_clicks.len());
 
     if !double_clicks.is_empty() {
@@ -121,7 +130,10 @@ pub fn run() -> TestOutcome {
         println!();
     }
 
-    let (outcome, lines) = verdict(double_clicks.len(), detector.presses, min_clicks());
+    let (outcome, mut lines) = verdict(double_clicks.len(), detector.presses, min_clicks());
+    if outcome == TestOutcome::NoIssues {
+        lines.extend(super::click_sticky::per_button(&detector.presses_by_button()).1);
+    }
     for line in lines {
         println!("{}", line);
     }
@@ -191,8 +203,9 @@ pub fn verdict(bounces: usize, presses: usize, min_presses: usize) -> (TestOutco
             TestOutcome::NoIssues,
             vec![
                 format!("✓ No double-click issues detected in {} clicks", presses),
-                "  Your mouse switches appear healthy. An intermittent fault can need".to_string(),
-                "  50+ clicks to show up.".to_string(),
+                "  The switches of the buttons clicked appear healthy. An intermittent fault"
+                    .to_string(),
+                "  can need 50+ clicks to show up.".to_string(),
             ],
         )
     }
@@ -225,6 +238,7 @@ impl DoubleClickEvent {
 struct ButtonState {
     last_press: Option<f64>,
     last_release: Option<f64>,
+    presses: usize,
 }
 
 /// Flags presses that come too soon after the previous press or release of
@@ -262,6 +276,15 @@ impl BounceDetector {
         &mut self.buttons[pos].1
     }
 
+    /// Presses per button, in the order the buttons first appeared.
+    pub fn presses_by_button(&self) -> Vec<(String, usize)> {
+        self.buttons
+            .iter()
+            .filter(|(_, s)| s.presses > 0)
+            .map(|(b, s)| (format!("{:?}", b), s.presses))
+            .collect()
+    }
+
     /// Feed one event at `t` seconds. Returns the double-click it reveals.
     pub fn feed(&mut self, t: f64, event: &MouseEvent) -> Option<&DoubleClickEvent> {
         match event {
@@ -272,6 +295,7 @@ impl BounceDetector {
                 let interval = state.last_press.map(|p| (t - p) * 1000.0);
                 let gap = state.last_release.map(|r| (t - r) * 1000.0);
                 state.last_press = Some(t);
+                state.presses += 1;
                 self.presses += 1;
                 if let Some(i) = interval {
                     self.press_intervals_ms.push(i);
@@ -369,6 +393,20 @@ mod tests {
         assert!(d.events.is_empty());
         let (outcome, _) = verdict(d.events.len(), d.presses, min_clicks());
         assert_eq!(outcome, TestOutcome::NoIssues);
+    }
+
+    #[test]
+    fn test_presses_are_counted_per_button() {
+        let mut d = BounceDetector::new(&Config::default());
+        for i in 0..6 {
+            press(&mut d, 400.0 * i as f64, MouseButton::Left);
+            release(&mut d, 400.0 * i as f64 + 90.0, MouseButton::Left);
+        }
+        press(&mut d, 5000.0, MouseButton::Right);
+        assert_eq!(
+            d.presses_by_button(),
+            vec![("Left".to_string(), 6), ("Right".to_string(), 1)]
+        );
     }
 
     #[test]

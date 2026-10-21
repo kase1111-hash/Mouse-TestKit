@@ -45,6 +45,9 @@ pub fn run() -> TestOutcome {
 
     terminal::grab_device(&mut device);
 
+    // Clicks made while the device list waited are queued with their own
+    // times: they are not part of the test.
+    terminal::discard_queued(|| input::fetch_timed_events(&mut device));
     let start = Instant::now();
     let mut tracker = HoldTracker::new(&cfg);
     let mut last_print = Instant::now();
@@ -65,7 +68,9 @@ pub fn run() -> TestOutcome {
         }
 
         for timed in input::fetch_timed_events(&mut device) {
-            let t = timed.time.saturating_duration_since(start).as_secs_f64();
+            let Some(t) = terminal::secs_after(start, timed.time) else {
+                continue;
+            };
             if let Some(hold) = tracker.feed(t, &timed.event) {
                 if hold.is_sticky {
                     println!(
@@ -124,6 +129,7 @@ pub fn run() -> TestOutcome {
         durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         println!("Total clicks analyzed: {}", total);
+        println!("By button: {}", per_button(&tracker.clicks_by_button()).0);
         println!(
             "Slow releases (>{:.0} ms): {}",
             cfg.sticky_threshold_ms, report.sticky
@@ -225,6 +231,18 @@ impl HoldTracker {
         &self.holds
     }
 
+    /// Clicks recorded per button, in the order the buttons first appeared.
+    pub fn clicks_by_button(&self) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for hold in &self.holds {
+            match counts.iter_mut().find(|(b, _)| *b == hold.button) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((hold.button.clone(), 1)),
+            }
+        }
+        counts
+    }
+
     /// Judge everything recorded, with `now` the time the test ended.
     pub fn report(&self, now: f64) -> StickyReport {
         let sticky = self.holds.iter().filter(|h| h.is_sticky).count();
@@ -287,10 +305,15 @@ impl HoldTracker {
             ));
             TestOutcome::Inconclusive
         } else {
+            // Only the buttons that registered were checked: a dead one
+            // registers nothing.
+            let (by_button, note) = per_button(&self.clicks_by_button());
             lines.push(format!(
-                "✓ No sticky or bouncing clicks in {} clicks. Switches appear healthy.",
-                self.holds.len()
+                "✓ No sticky or bouncing clicks in {} clicks ({}). Those switches appear healthy.",
+                self.holds.len(),
+                by_button
             ));
+            lines.extend(note);
             TestOutcome::NoIssues
         };
 
@@ -302,6 +325,25 @@ impl HoldTracker {
             lines,
         }
     }
+}
+
+/// "Left 20, Right 18" for the clicks each button registered, and a note
+/// when only one button registered: a verdict on "the switches" covers only
+/// the buttons listed, and a dead button registers nothing at all.
+pub fn per_button(counts: &[(String, usize)]) -> (String, Option<String>) {
+    let summary = counts
+        .iter()
+        .map(|(b, n)| format!("{} {}", b, n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = match counts {
+        [(only, _)] => Some(format!(
+            "  Only {} clicks registered. If you also clicked other buttons, they did not register (a dead switch?).",
+            only
+        )),
+        _ => None,
+    };
+    (summary, note)
 }
 
 #[allow(dead_code)]
@@ -326,6 +368,29 @@ mod tests {
             t += 0.4;
         }
         t
+    }
+
+    #[test]
+    fn test_verdict_names_the_buttons_that_registered() {
+        // Left clicked 20 times; the right switch is dead and sends nothing
+        let mut tracker = HoldTracker::new(&Config::default());
+        let end = clicks(&mut tracker, &[90.0; 20]);
+        let report = tracker.report(end);
+        assert_eq!(report.outcome, TestOutcome::NoIssues);
+        let text = report.lines.join("\n");
+        assert!(text.contains("(Left 20)"), "{}", text);
+        assert!(text.contains("Only Left clicks registered"), "{}", text);
+
+        // Both buttons registered: no note
+        let mut t = end;
+        for _ in 0..10 {
+            tracker.feed(t, &MouseEvent::ButtonPress(MouseButton::Right));
+            tracker.feed(t + 0.09, &MouseEvent::ButtonRelease(MouseButton::Right));
+            t += 0.4;
+        }
+        let text = tracker.report(t).lines.join("\n");
+        assert!(text.contains("(Left 20, Right 10)"), "{}", text);
+        assert!(!text.contains("Only"), "{}", text);
     }
 
     #[test]

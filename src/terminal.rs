@@ -3,7 +3,9 @@
 //! Provides safe wrappers around terminal operations that give users
 //! meaningful feedback when something goes wrong.
 
+use mouse_testkit::types::{MouseEvent, TimedEvent};
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 // Windows-specific imports
 #[cfg(target_os = "windows")]
@@ -78,6 +80,52 @@ pub fn wait_for_enter() {
     }
 }
 
+/// Discard the input queued for a device so far. A device node buffers its
+/// events from the moment it is opened, so clicks and movement made while a
+/// prompt (such as the device list) waited would otherwise reach the test
+/// with stale timestamps.
+pub fn discard_queued(mut fetch: impl FnMut() -> Vec<TimedEvent>) {
+    while !fetch().is_empty() {}
+}
+
+/// Seconds from `start` to an event at `t`, or `None` for an event from
+/// before `start`: input queued earlier must be left out, not counted as
+/// happening at the start (two stale clicks would be 0 ms apart).
+pub fn secs_after(start: Instant, t: Instant) -> Option<f64> {
+    t.checked_duration_since(start).map(|d| d.as_secs_f64())
+}
+
+/// How long [`confirm_device_moves`] waits for movement.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Ask the user to nudge the mouse and wait for movement from the device:
+/// proof that the device read is the mouse being tested and that it is
+/// connected. Input queued before the prompt does not count. Returns false
+/// when nothing arrived within [`CONFIRM_TIMEOUT`].
+///
+/// Tests in which a healthy mouse sends nothing (sensor at rest, clean
+/// lifts) need this before "nothing seen" can mean a clean result: a silent
+/// device node (the wrong one of several, one held by another program, or a
+/// mouse that was unplugged) sends nothing too.
+pub fn confirm_device_moves(prompt: &str, mut fetch: impl FnMut() -> Vec<TimedEvent>) -> bool {
+    discard_queued(&mut fetch);
+    print!("{} ", prompt);
+    flush_stdout();
+    let deadline = Instant::now() + CONFIRM_TIMEOUT;
+    while Instant::now() < deadline {
+        let moved = fetch()
+            .iter()
+            .any(|e| matches!(e.event, MouseEvent::Move { dx, dy } if dx != 0 || dy != 0));
+        if moved {
+            println!("OK");
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    println!("no movement.");
+    false
+}
+
 /// RAII guard that enables raw terminal mode on creation and disables it on drop.
 /// Guarantees terminal state cleanup even if a test panics.
 pub struct TerminalGuard {
@@ -96,5 +144,40 @@ impl Drop for TerminalGuard {
         if self.raw_mode_enabled {
             disable_raw_mode();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_from_before_the_start_are_left_out() {
+        let start = Instant::now();
+        assert_eq!(
+            secs_after(start, start + Duration::from_millis(250)),
+            Some(0.25)
+        );
+        if let Some(earlier) = start.checked_sub(Duration::from_millis(5)) {
+            assert_eq!(secs_after(start, earlier), None);
+        }
+    }
+
+    #[test]
+    fn discard_queued_drains_every_batch() {
+        let mut batches = vec![
+            vec![],
+            vec![TimedEvent {
+                time: Instant::now(),
+                event: MouseEvent::Move { dx: 1, dy: 0 },
+            }],
+            vec![TimedEvent {
+                time: Instant::now(),
+                event: MouseEvent::Move { dx: 1, dy: 0 },
+            }],
+        ];
+        // Stops at the first empty fetch: nothing more is queued
+        discard_queued(|| batches.pop().unwrap_or_default());
+        assert!(batches.is_empty());
     }
 }
