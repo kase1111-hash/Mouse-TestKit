@@ -7,9 +7,10 @@
 //! stutters and must not be judged; [`StutterDetector`] only judges intervals
 //! between reports that both prove the hand was moving fast enough, in a
 //! steady direction, for a report at every poll (see
-//! [`crate::analysis::polling::is_saturated_pair`]),
-//! compares them against the median of such intervals, and counts each
-//! interval exactly once.
+//! [`crate::analysis::polling::is_saturated_pair`]) and that are not the
+//! small reports of a hand slowing to a brief stop (see
+//! [`MIN_RELATIVE_REPORT_SIZE`]), compares them against the median of such
+//! intervals, and counts each interval exactly once.
 //!
 //! [`analyze_stutter`] is the older deviation-from-mean classifier for a plain
 //! list of intervals. It knows nothing about pauses or slow movement and is
@@ -31,6 +32,20 @@ pub const DEFAULT_STUTTER_MULTIPLIER: f64 = 2.5;
 /// hundred microseconds. 2.5 ms is still only two missed reports in a row at
 /// 1 kHz (about twenty at 8 kHz), so a real dropout is not missed.
 pub const MIN_STUTTER_GAP_MS: f64 = 2.5;
+
+/// Both reports around a judged interval must be at least this fraction of
+/// the median report size of fast movement.
+///
+/// A hand that slows to a brief stop and carries on in the same direction
+/// leaves a gap between two same-direction reports, and both can hold two or
+/// more counts: at 125-500 Hz a poll is long enough for an ordinary
+/// slow-down to still move two counts in its last poll, and at very high DPI
+/// two counts are a tiny distance. Those reports at the end and start of the
+/// stop are much smaller than the reports of steady movement. During a real
+/// stutter the hand keeps moving: the report before the gap is ordinary and
+/// the one after it is ordinary (counts lost, or a catch-up burst) or larger
+/// (it carries the counts of the missed polls).
+pub const MIN_RELATIVE_REPORT_SIZE: f64 = 0.25;
 
 /// Judged intervals collected before the median baseline is trusted.
 /// Intervals seen before that are held back and judged once it exists.
@@ -144,7 +159,9 @@ pub fn rate_stutters(judged_secs: f64, stutters: usize) -> StutterRating {
 ///
 /// Each interval between two consecutive motion reports is considered once:
 /// it is *judged* only when the two reports form a saturated pair (fast
-/// motion in a steady direction) and it is no longer than [`MAX_POLL_INTERVAL_MS`] (longer gaps are the hand stopping or
+/// motion in a steady direction), neither is much smaller than the median
+/// report of such movement (see [`MIN_RELATIVE_REPORT_SIZE`]), and it is no
+/// longer than [`MAX_POLL_INTERVAL_MS`] (longer gaps are the hand stopping or
 /// lifting). A judged interval longer than
 /// [`stutter_threshold_ms`]`(median, multiplier)` is a stutter.
 #[derive(Debug, Clone)]
@@ -156,9 +173,14 @@ pub struct StutterDetector {
     /// Most recent judged-candidate intervals (ms) for the baseline median.
     recent: VecDeque<f64>,
     median_ms: Option<f64>,
+    /// Sizes (counts) of the most recent reports that ended a candidate
+    /// interval, for the median report size.
+    recent_sizes: VecDeque<f64>,
+    median_size: Option<f64>,
     since_refresh: usize,
-    /// Intervals seen before the baseline existed: (report index, ms).
-    pending: Vec<(usize, f64)>,
+    /// Intervals seen before the baseline existed: (report index, ms, size
+    /// of the smaller of its two reports).
+    pending: Vec<(usize, f64, f64)>,
     judged: usize,
     judged_sum_ms: f64,
     judged_min_ms: f64,
@@ -179,6 +201,8 @@ impl StutterDetector {
             reports: 0,
             recent: VecDeque::with_capacity(BASELINE_WINDOW),
             median_ms: None,
+            recent_sizes: VecDeque::with_capacity(BASELINE_WINDOW),
+            median_size: None,
             since_refresh: 0,
             pending: Vec::new(),
             judged: 0,
@@ -202,8 +226,8 @@ impl StutterDetector {
     /// Feed one motion report: time in seconds (any fixed origin) and its
     /// counts. Reports must arrive in time order.
     ///
-    /// Returns the interval (ms) since the previous report when it is going
-    /// to be judged (now, or once the baseline exists), `None` otherwise.
+    /// Returns the interval (ms) since the previous report when it is judged,
+    /// or held back to be judged once the baseline exists; `None` otherwise.
     pub fn feed(&mut self, t: f64, dx: i32, dy: i32) -> Option<f64> {
         if dx == 0 && dy == 0 {
             return None;
@@ -218,46 +242,60 @@ impl StutterDetector {
         {
             return None;
         }
+        let size = (dx as f64).hypot(dy as f64);
+        let smaller = (pdx as f64).hypot(pdy as f64).min(size);
 
         self.recent.push_back(interval);
         if self.recent.len() > BASELINE_WINDOW {
             self.recent.pop_front();
         }
+        self.recent_sizes.push_back(size);
+        if self.recent_sizes.len() > BASELINE_WINDOW {
+            self.recent_sizes.pop_front();
+        }
         self.since_refresh += 1;
 
         if self.median_ms.is_none() {
-            self.pending.push((index, interval));
+            self.pending.push((index, interval, smaller));
             if self.pending.len() >= BASELINE_MIN_INTERVALS {
                 self.refresh_baseline();
-                for (i, ms) in std::mem::take(&mut self.pending) {
-                    self.judge(i, ms);
+                for (i, ms, smaller) in std::mem::take(&mut self.pending) {
+                    self.judge(i, ms, smaller);
                 }
             }
+            Some(interval)
         } else {
             if self.since_refresh >= BASELINE_REFRESH {
                 self.refresh_baseline();
             }
-            self.judge(index, interval);
+            self.judge(index, interval, smaller).then_some(interval)
         }
-        Some(interval)
     }
 
     fn refresh_baseline(&mut self) {
         let mut values: Vec<f64> = self.recent.iter().copied().collect();
         self.median_ms = median_in_place(&mut values);
+        let mut sizes: Vec<f64> = self.recent_sizes.iter().copied().collect();
+        self.median_size = median_in_place(&mut sizes);
         self.since_refresh = 0;
     }
 
-    fn judge(&mut self, index: usize, interval: f64) {
-        let Some(median) = self.median_ms else {
-            return;
+    /// Judge one interval whose smaller report holds `smaller` counts.
+    /// Returns whether it was judged (it is skipped when that report is one
+    /// of the small reports around a brief stop).
+    fn judge(&mut self, index: usize, interval: f64, smaller: f64) -> bool {
+        let (Some(median), Some(median_size)) = (self.median_ms, self.median_size) else {
+            return false;
         };
+        if smaller < MIN_RELATIVE_REPORT_SIZE * median_size {
+            return false;
+        }
         self.judged += 1;
         self.judged_sum_ms += interval;
         self.judged_min_ms = self.judged_min_ms.min(interval);
         self.judged_max_ms = self.judged_max_ms.max(interval);
         if interval <= stutter_threshold_ms(median, self.multiplier) {
-            return;
+            return true;
         }
         let late = interval - median;
         let severity = classify_lateness(late);
@@ -277,6 +315,7 @@ impl StutterDetector {
         if self.events.len() > MAX_KEPT_EVENTS {
             self.events.pop_front();
         }
+        true
     }
 
     /// Motion reports fed so far.
@@ -755,6 +794,75 @@ mod detector_tests {
         let d = run(&reports, 2.0);
         assert_eq!(d.stutter_count(), 0);
         assert!((d.polling_hz().unwrap() - 125.0).abs() < 3.0);
+    }
+
+    /// Smooth slow-down / speed-up time around each stop (s).
+    const STOP_GO_RAMP: f64 = 0.03;
+    const STOP_GO_CRUISE: f64 = 0.3;
+
+    /// Length of the i-th stop: 30-100 ms, varied so the stops fall at
+    /// different points of the poll cycle.
+    fn stop_go_rest(i: usize) -> f64 {
+        0.03 + 0.0037 * i as f64
+    }
+
+    /// Steady movement along X at `v` counts/s where the hand smoothly slows
+    /// to a brief stop and carries on the same way, 20 times.
+    fn stop_and_go(v: f64) -> Vec<Seg> {
+        let ramp = STOP_GO_RAMP;
+        let mut segs = Vec::new();
+        for i in 0..20 {
+            segs.push(seg(STOP_GO_CRUISE, move |t| (v * t, 0.0)));
+            segs.push(seg(ramp, move |w| {
+                let wave = ramp / TAU * (TAU / 2.0 * w / ramp).sin();
+                (v * (w / 2.0 + wave), 0.0)
+            }));
+            segs.push(pause(stop_go_rest(i)));
+            segs.push(seg(ramp, move |w| {
+                let wave = ramp / TAU * (TAU / 2.0 * w / ramp).sin();
+                (v * (w / 2.0 - wave), 0.0)
+            }));
+        }
+        segs
+    }
+
+    #[test]
+    fn brief_stops_in_the_same_direction_are_not_stutters() {
+        // Start of each steady stretch, to place dropouts inside them
+        let starts: Vec<f64> = (0..20)
+            .scan(0.0, |t, i| {
+                let start = *t;
+                *t += STOP_GO_CRUISE + 2.0 * STOP_GO_RAMP + stop_go_rest(i);
+                Some(start)
+            })
+            .collect();
+        // A hand at about 0.5 m/s with the mouse at 1600, 6400 and 26000 DPI
+        for (hz, v) in [(125.0, 30_000.0), (250.0, 120_000.0), (500.0, 500_000.0)] {
+            let reports = simulate(hz, stop_and_go(v), no_drops, 30e-6);
+            // The scenario really has same-direction pairs of 2+ count
+            // reports around a stop, longer than the threshold: what was
+            // reported as stutters before reports were compared by size.
+            let threshold = stutter_threshold_ms(1000.0 / hz, 2.0);
+            let stop_gaps = reports
+                .windows(2)
+                .filter(|w| {
+                    is_saturated_pair((w[0].1, w[0].2), (w[1].1, w[1].2))
+                        && (w[1].0 - w[0].0) * 1000.0 > threshold
+                })
+                .count();
+            assert!(stop_gaps >= 5, "{} Hz: {}", hz, stop_gaps);
+
+            let d = run(&reports, 2.0);
+            assert_eq!(d.stutter_count(), 0, "{} Hz", hz);
+            assert!(d.judged_secs() >= MIN_JUDGED_SECS, "{}", d.judged_secs());
+            assert_eq!(d.rating(), StutterRating::Excellent);
+
+            // A 20 ms dropout in the middle of every steady stretch is
+            // still caught, once each.
+            let drop = |t: f64| starts.iter().any(|&s| (s + 0.15..s + 0.17).contains(&t));
+            let d = run(&simulate(hz, stop_and_go(v), drop, 30e-6), 2.0);
+            assert_eq!(d.stutter_count(), 20, "{} Hz", hz);
+        }
     }
 
     #[test]
