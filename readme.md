@@ -16,7 +16,7 @@ Mouse TRAP is a cross-platform mouse testing utility designed to analyze and dia
 - **Polling Rate Monitor** - Real-time Hz measurement (125Hz to 8000Hz+)
 - **Stutter Detection & Graphing** - Visual detection of movement irregularities
 - **USB Conflict Detection** - Identifies competing devices on the same controller
-- **Click Response Test** - Measures button registration latency
+- **Click Response Test** - Hold times and clicks per second (GUI); click reaction time in the CLI, which includes your reaction and display delay, not the mouse's own latency
 - **Click Stickiness Test** - Detects stuck or delayed click releases
 - **Lift-Off Distance Test** - Detects unwanted cursor jumps when lifting
 - **DPI Accuracy Test** - Verifies actual vs advertised DPI

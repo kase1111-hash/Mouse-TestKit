@@ -48,9 +48,9 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 
 | Specification | Description |
 |---------------|-------------|
-| Function | Measures click latency and response time |
+| Function | Measures click reaction time (human reaction plus display and input delay, not the mouse's own latency) |
 | Measurement | Milliseconds (ms) |
-| Use Case | Evaluating switch responsiveness and debounce timing |
+| Use Case | Checking that clicks register and gauging overall reaction time |
 
 ### 5. Click Stickiness Test
 
@@ -82,7 +82,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Detects if mouse has angle snapping/prediction enabled |
-| Method | Analyzes diagonal movement for artificial straightening |
+| Method | Fits a line to slightly tilted near-horizontal/vertical strokes; perfectly straight on-axis strokes indicate snapping |
 | Detection | Identifies deviation from natural hand movement |
 | Use Case | Verifying raw input for competitive gaming |
 

@@ -183,6 +183,20 @@ Without raw input no rating is given: only pointer movement in screen points is 
 
 ---
 
+## Command-Line (CLI) Tests
+
+The `mouse-testkit` binary (Linux and Windows) runs the same tests from a text menu. Timing comes from the device's own report timestamps, and click thresholds are the Auto Diagnostics ones, so the CLI, the GUI and the check-up agree. Where a CLI test works differently from the GUI panel described above:
+
+- **Click Reaction Time (4)** - after a random 1.5-4 s wait, `CLICK NOW!` appears; click as fast as you can. Clicking before the cue (or under 100 ms after it, which is a guess rather than a reaction) is a false start and the trial is repeated. The result is your reaction time plus display and input delay (typically 200-300 ms). It is not the mouse's own click latency, which is a few ms and cannot be separated from human reaction this way
+- **Click Stickiness (5)** - click normally about 20 times. A hold over 250 ms is a slow release; one long hold is treated as the hand, two or more as a late-releasing switch. Presses under 3 ms (contact bounce) and a button still held for over a second when you press `q` (stuck switch) are also reported. Fewer than 5 clicks is **Inconclusive**
+- **Lift-Off Jump (6)** - enter the mouse's DPI (or press Enter to assume 800), then lift the mouse straight up about 1 cm and set it straight back down, 5-10 times with a pause in between, pressing **SPACE** after each lift. Motion in the first 100 ms of each lift or set-down is summed; if it carries the cursor more than 2 mm, it is a jump. A movement that keeps going for more than another 2 mm after that is treated as sliding and not judged. One jump may be a hand slip; two or more mean a high lift-off distance. A clean lift produces no motion at all, so with no jumps and fewer than 5 lifts recorded the result is **Inconclusive**
+- **DPI Accuracy (7)** - enter the configured DPI and the distance you will move (for example `10cm` or `4in`; default 10 cm). Line up one edge of the mouse with the start mark of a ruler, press **SPACE**, slide it until the same edge is on the end mark in one movement (any direction), press **SPACE** again. The straight-line distance in counts gives the DPI. Take 3 or more samples: the verdict uses their median, so one sample spoiled by lifting the mouse does not decide it. A longer distance reduces the effect of hand placement; if the deviation could be explained by placing the mouse 1 mm off at each end, the result is **Inconclusive**
+- **Angle Snapping (8)** - draw freehand lines that are *almost* horizontal or vertical (tilted about 5°), a few centimetres long, pausing between them; press `q` when done. Uses the same line analysis as the GUI. Diagonal lines cannot show snapping, so fewer than 3 near-axis lines is **Inconclusive**
+- **Double-Click (10)** - click normally about 20 times per button. A press within 50 ms of the previous press, or within 25 ms of the previous release, of the same button is an accidental double-click. 1-2 are a possible fault (re-run), 3 or more a failing switch
+- **Run All Standard Tests (12)** - before each test you can press Enter to run it, `s` to skip it or `q` to stop the suite. The summary shows what each test found (problem, possible problem, no problem, inconclusive, not run); tests that were skipped or had no mouse are never reported as completed
+
+---
+
 ## About
 
 Click the **About** button in the sidebar to view version info.
