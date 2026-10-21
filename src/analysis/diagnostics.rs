@@ -195,6 +195,9 @@ pub struct Report {
     pub findings: Vec<Finding>,
     pub metrics: Metrics,
     pub phases_completed: Vec<Phase>,
+    /// Steps that ran but had too little data to judge (or found a part
+    /// that registered nothing).
+    pub untested: Vec<Phase>,
     pub aborted: bool,
     /// False when timestamps came from a frame-rate-limited source, in which
     /// case the timing-based checks were skipped.
@@ -208,6 +211,55 @@ impl Report {
             .iter()
             .filter(|f| f.severity == severity)
             .count()
+    }
+
+    fn step_ran(&self, phase: Phase) -> bool {
+        self.phases_completed.contains(&phase)
+    }
+
+    fn step_judged(&self, phase: Phase) -> bool {
+        self.step_ran(phase) && !self.untested.contains(&phase)
+    }
+
+    // The headline numbers, `None` where the check was not run or had too
+    // little data: a 0 there would read as a measured pass.
+
+    /// Stutters as a percentage of the timed movement intervals.
+    pub fn stutter_rate_percent(&self) -> Option<f64> {
+        self.step_judged(Phase::Movement)
+            .then_some(self.metrics.stutter_rate_percent)
+    }
+
+    /// Switch bounces, judged only on device timestamps.
+    pub fn bounce_events(&self) -> Option<usize> {
+        let clicks =
+            self.metrics.left_clicks + self.metrics.right_clicks + self.metrics.other_clicks;
+        (self.timing_reliable && self.step_ran(Phase::Clicks) && clicks > 0)
+            .then_some(self.metrics.bounce_events)
+    }
+
+    /// Scroll notches reversed within the skip window, judged only on device
+    /// timestamps.
+    pub fn scroll_reversals(&self) -> Option<usize> {
+        let notches = self.metrics.scroll_up + self.metrics.scroll_down;
+        (self.timing_reliable && self.step_ran(Phase::Scroll) && notches > 0)
+            .then_some(self.metrics.scroll_reversals)
+    }
+
+    /// Cursor jumps on lift, when the lift step had something to judge.
+    pub fn lift_jumps(&self) -> Option<usize> {
+        self.step_judged(Phase::Lift)
+            .then_some(self.metrics.lift_jumps)
+    }
+
+    /// Unit of `Metrics::rest_distance_counts`: raw sensor counts, or
+    /// pointer units without raw input.
+    pub fn rest_unit(&self) -> &'static str {
+        if self.timing_reliable {
+            "counts"
+        } else {
+            "pointer units"
+        }
     }
 }
 
@@ -788,6 +840,11 @@ impl AutoTest {
             findings,
             metrics: self.metrics.clone(),
             phases_completed: self.phases_completed.clone(),
+            untested: {
+                let mut untested = self.untested.clone();
+                untested.dedup();
+                untested
+            },
             aborted,
             timing_reliable: self.cfg.timing_reliable,
             duration_secs: self.now - self.started_at,
@@ -3171,6 +3228,51 @@ mod tests {
         assert_eq!(bounce_verdict(0), BounceVerdict::None);
         assert_eq!(bounce_verdict(2), BounceVerdict::Possible);
         assert_eq!(bounce_verdict(CONFIRMED_BOUNCES), BounceVerdict::Failing);
+    }
+
+    #[test]
+    fn test_unmeasured_checks_have_no_numbers() {
+        // Framework input: the timing checks were not run
+        let mut sim = Sim::new(Config {
+            timing_reliable: false,
+            ..cfg()
+        });
+        sim.good_rest();
+        sim.good_clicks();
+        sim.good_scroll();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Healthy);
+        assert_eq!(r.stutter_rate_percent(), None);
+        assert_eq!(r.bounce_events(), None);
+        assert_eq!(r.scroll_reversals(), None);
+        assert_eq!(r.lift_jumps(), None);
+        assert_eq!(r.rest_unit(), "pointer units");
+
+        // Raw input, but too little fast movement and no lift
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.move_for(0.05, 1.0);
+        sim.idle(12.5);
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.idle(10.5);
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.stutter_rate_percent(), None);
+        assert_eq!(r.lift_jumps(), None);
+        assert_eq!(r.bounce_events(), Some(0));
+        assert_eq!(r.scroll_reversals(), Some(0));
+        assert_eq!(r.rest_unit(), "counts");
+
+        // A full healthy run has every number
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        sim.good_movement();
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.stutter_rate_percent(), Some(0.0));
+        assert_eq!(r.lift_jumps(), Some(0));
     }
 
     #[test]

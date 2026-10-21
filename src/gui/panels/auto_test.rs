@@ -623,11 +623,15 @@ impl AutoTestPanel {
                         .num_columns(2)
                         .spacing([24.0, 4.0])
                         .show(ui, |ui| {
+                            // A check that was not run or had too little
+                            // data shows "not tested", not a 0
+                            let or_not_tested =
+                                |v: Option<String>| v.unwrap_or_else(|| "not tested".to_string());
                             let rows: Vec<(&str, String)> = vec![
                                 ("Rest: movement reports", m.rest_move_events.to_string()),
                                 (
                                     "Rest: movement distance",
-                                    format!("{:.1} counts", m.rest_distance_counts),
+                                    format!("{:.1} {}", m.rest_distance_counts, report.rest_unit()),
                                 ),
                                 ("Rest: clicks", m.rest_clicks.to_string()),
                                 ("Rest: scroll events", m.rest_scroll_events.to_string()),
@@ -651,7 +655,11 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Movement: stutters",
-                                    format!("{} ({:.2}%)", m.stutter_count, m.stutter_rate_percent),
+                                    or_not_tested(
+                                        report.stutter_rate_percent().map(|rate| {
+                                            format!("{} ({:.2}%)", m.stutter_count, rate)
+                                        }),
+                                    ),
                                 ),
                                 (
                                     "Movement: unstable intervals",
@@ -673,7 +681,10 @@ impl AutoTestPanel {
                                         m.left_clicks, m.right_clicks, m.other_clicks
                                     ),
                                 ),
-                                ("Clicks: bounce events", m.bounce_events.to_string()),
+                                (
+                                    "Clicks: bounce events",
+                                    or_not_tested(report.bounce_events().map(|v| v.to_string())),
+                                ),
                                 ("Clicks: micro presses", m.micro_presses.to_string()),
                                 ("Clicks: sticky releases", m.sticky_releases.to_string()),
                                 ("Clicks: stuck buttons", m.stuck_buttons.to_string()),
@@ -691,8 +702,14 @@ impl AutoTestPanel {
                                     "Scroll: down / up",
                                     format!("{} / {}", m.scroll_down, m.scroll_up),
                                 ),
-                                ("Scroll: reversals", m.scroll_reversals.to_string()),
-                                ("Lift: jumps", m.lift_jumps.to_string()),
+                                (
+                                    "Scroll: reversals",
+                                    or_not_tested(report.scroll_reversals().map(|v| v.to_string())),
+                                ),
+                                (
+                                    "Lift: jumps",
+                                    or_not_tested(report.lift_jumps().map(|v| v.to_string())),
+                                ),
                                 (
                                     "Lift: largest jump",
                                     format!("{:.0} counts", m.lift_max_jump_counts),

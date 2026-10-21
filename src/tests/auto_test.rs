@@ -237,12 +237,19 @@ fn print_report(report: &Report, total_phases: usize) {
     );
     println!(
         "  Scroll: {} down, {} up, {} reversal(s)",
-        m.scroll_down, m.scroll_up, m.scroll_reversals
+        m.scroll_down,
+        m.scroll_up,
+        report
+            .scroll_reversals()
+            .map_or("not tested".to_string(), |n| n.to_string())
     );
-    println!(
-        "  Lift: {} jump(s), largest {:.0} counts",
-        m.lift_jumps, m.lift_max_jump_counts
-    );
+    match report.lift_jumps() {
+        Some(jumps) => println!(
+            "  Lift: {} jump(s), largest {:.0} counts",
+            jumps, m.lift_max_jump_counts
+        ),
+        None => println!("  Lift: not tested"),
+    }
 }
 
 #[cfg(test)]

@@ -542,25 +542,29 @@ impl TestResultsExport {
             if let Some(hz) = r.metrics.polling_hz {
                 csv.push_str(&format!("Auto Diagnostics,Polling Rate (Hz),{}\n", hz));
             }
+            // A check that was not run or had too little data says so: a 0
+            // would read as a measured pass.
+            let or_not_tested = |v: Option<String>| v.unwrap_or_else(|| "not tested".to_string());
             csv.push_str(&format!(
-                "Auto Diagnostics,Stutter Rate (%),{:.2}\n",
-                r.metrics.stutter_rate_percent
+                "Auto Diagnostics,Stutter Rate (%),{}\n",
+                or_not_tested(r.stutter_rate_percent().map(|v| format!("{:.2}", v)))
             ));
             csv.push_str(&format!(
-                "Auto Diagnostics,Rest Movement (counts),{:.1}\n",
+                "Auto Diagnostics,Rest Movement ({}),{:.1}\n",
+                r.rest_unit(),
                 r.metrics.rest_distance_counts
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Switch Bounces,{}\n",
-                r.metrics.bounce_events
+                or_not_tested(r.bounce_events().map(|v| v.to_string()))
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Scroll Reversals,{}\n",
-                r.metrics.scroll_reversals
+                or_not_tested(r.scroll_reversals().map(|v| v.to_string()))
             ));
             csv.push_str(&format!(
                 "Auto Diagnostics,Lift Jumps,{}\n",
-                r.metrics.lift_jumps
+                or_not_tested(r.lift_jumps().map(|v| v.to_string()))
             ));
             for f in &r.findings {
                 csv.push_str(&format!(
@@ -645,6 +649,7 @@ mod tests {
                 }],
                 metrics: Metrics::default(),
                 phases_completed: vec![Phase::Rest],
+                untested: vec![],
                 aborted: false,
                 timing_reliable: true,
                 duration_secs: 42.0,
@@ -652,6 +657,11 @@ mod tests {
         };
         let csv = export.to_csv();
         assert!(csv.contains("Auto Diagnostics,Verdict,Needs attention\n"));
+        // Only the rest step ran: the other checks are not reported as 0
+        assert!(csv.contains("Auto Diagnostics,Stutter Rate (%),not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Switch Bounces,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Lift Jumps,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Rest Movement (counts),0.0\n"));
         assert!(csv.contains(
             "Auto Diagnostics,WARNING: Possible switch bounce,\"1 press came within 25 ms, re-run\"\n"
         ));
