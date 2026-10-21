@@ -12,7 +12,7 @@
 //! - [`DpiPanel`] - DPI accuracy verification
 //! - [`AccelPanel`] - Acceleration and angle snapping detection
 //! - [`DoubleClickPanel`] - Switch health and double-click detection
-//! - [`ScrollPanel`] - Scroll wheel consistency testing
+//! - [`ScrollPanel`] - Scroll wheel skipping and dead-direction checks
 //! - [`AutoTestPanel`] - Guided automated diagnostics that look for faults
 
 mod accel;
