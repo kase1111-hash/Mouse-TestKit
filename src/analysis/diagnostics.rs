@@ -338,6 +338,42 @@ fn button_name(i: usize) -> &'static str {
     ["left", "right", "middle", "side", "extra", "unknown"][i.min(5)]
 }
 
+/// The slowest rate a USB mouse runs at is 125 Hz; this leaves room for
+/// timing error. Below it a mouse is on Bluetooth, where one report per
+/// 7.5-15 ms connection interval (67-133 Hz) is normal, or is a USB mouse
+/// set to a low rate.
+const USB_MIN_POLLING_HZ: u32 = 110;
+/// Fewer reports than a 60 Hz screen shows frames: the pointer moves in
+/// visible steps whatever the connection. A healthy Bluetooth link (15 ms at
+/// most, 67 Hz) stays above it.
+const CHOPPY_POLLING_HZ: u32 = 60;
+
+/// Severity, title and detail for a measured report rate below what a USB
+/// mouse uses, or None when the rate is normal for any mouse.
+fn low_polling_finding(hz: u32) -> Option<(Severity, &'static str, String)> {
+    if hz < CHOPPY_POLLING_HZ {
+        Some((
+            Severity::Warning,
+            "Very low polling rate",
+            format!(
+                "{} Hz is fewer reports than a 60 Hz screen shows frames, so the pointer moves in visible steps. A Bluetooth mouse normally reports at 67-133 Hz: this slow, it is likely in a power-saving mode (charge it) or the computer set up a slow Bluetooth connection. A USB mouse should report 125 Hz or more: check the polling rate in its software and try another USB port.",
+                hz
+            ),
+        ))
+    } else if hz < USB_MIN_POLLING_HZ {
+        Some((
+            Severity::Info,
+            "Low polling rate (normal for Bluetooth)",
+            format!(
+                "{} Hz is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: if this is one, check the polling rate in its software and try another USB port.",
+                hz
+            ),
+        ))
+    } else {
+        None
+    }
+}
+
 /// Movement seen in one second of the rest phase.
 #[derive(Debug, Default, Clone, Copy)]
 struct RestSecond {
@@ -957,16 +993,8 @@ impl AutoTest {
                     usable.len()
                 ),
             );
-            if hz < 110 {
-                self.push(
-                    Severity::Warning,
-                    Phase::Movement,
-                    "Very low polling rate",
-                    format!(
-                        "{} Hz is below the 125 Hz USB minimum. A wireless mouse may be in a power-saving mode, or the receiver is struggling.",
-                        hz
-                    ),
-                );
+            if let Some((severity, title, detail)) = low_polling_finding(hz) {
+                self.push(severity, Phase::Movement, title, detail);
             }
         }
 
@@ -1712,15 +1740,62 @@ mod tests {
     fn test_movement_low_rate_and_pauses() {
         let mut sim = Sim::new(cfg());
         sim.good_rest();
-        // 60 Hz mouse with a 2 s dropout in the middle
-        sim.move_for(3.0, 16.67);
+        // 40 Hz mouse with a 2 s dropout in the middle
+        sim.move_for(3.0, 25.0);
         sim.t += 2.0;
-        sim.move_for(3.0, 16.67);
+        sim.move_for(3.0, 25.0);
         sim.idle(12.0);
+        assert_eq!(sim.at.metrics.polling_hz, Some(40));
+        assert!(movement_findings(&sim)
+            .contains(&(Severity::Warning, "Very low polling rate".to_string())));
         let f = sim.at.findings_so_far();
-        assert!(f.iter().any(|f| f.title == "Very low polling rate"));
         assert!(f.iter().any(|f| f.title == "Pauses during movement"));
         assert_eq!(sim.at.metrics.movement_pauses, 1);
+    }
+
+    #[test]
+    fn test_bluetooth_polling_rate_is_noted_not_flagged() {
+        // A healthy Bluetooth mouse reports once per 11.25 ms connection
+        // interval (89 Hz), moved briskly for the whole step
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        while sim.phase() == Some(Phase::Movement) {
+            sim.move_for(0.5, 11.25);
+            sim.at.tick(sim.t);
+        }
+        assert_eq!(sim.at.metrics.polling_hz, Some(89));
+        let movement = movement_findings(&sim);
+        assert!(
+            movement.iter().all(|(s, _)| *s == Severity::Info),
+            "{:?}",
+            movement
+        );
+        assert!(movement
+            .iter()
+            .any(|(_, t)| t == "Low polling rate (normal for Bluetooth)"));
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Healthy, "findings: {:?}", titles(r));
+    }
+
+    #[test]
+    fn test_low_polling_rate_thresholds() {
+        let sev = |hz| low_polling_finding(hz).map(|(s, _, _)| s);
+        // Bluetooth connection intervals of 7.5-15 ms: 133-67 Hz
+        assert_eq!(sev(133), None);
+        assert_eq!(sev(89), Some(Severity::Info));
+        assert_eq!(sev(67), Some(Severity::Info));
+        // Fewer reports than a 60 Hz screen shows frames
+        assert_eq!(sev(59), Some(Severity::Warning));
+        assert_eq!(sev(30), Some(Severity::Warning));
+        // USB mice: 125 Hz and up, with room for timing error
+        assert_eq!(sev(125), None);
+        assert_eq!(sev(110), None);
+        assert_eq!(sev(109), Some(Severity::Info));
+        let (_, _, detail) = low_polling_finding(100).unwrap();
+        assert!(detail.contains("Bluetooth") && detail.contains("125 Hz"));
     }
 
     #[test]
