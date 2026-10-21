@@ -26,9 +26,6 @@ pub struct AutoTestPanel {
     epoch: Instant,
     /// Whether the last run used precise raw-input timestamps.
     last_run_raw: bool,
-    /// The run's raw input went away for a while (device unplugged or
-    /// reconnecting): input in that time was not measured.
-    raw_lost: bool,
     show_metrics: bool,
     /// Framework input: partial wheel movement not yet worth a notch.
     wheel: WheelAccumulator,
@@ -157,7 +154,6 @@ impl AutoTestPanel {
             engine: AutoTest::new(Config::default()),
             epoch: Instant::now(),
             last_run_raw: true,
-            raw_lost: false,
             show_metrics: false,
             wheel: WheelAccumulator::for_platform(),
             dpi: None,
@@ -195,7 +191,9 @@ impl AutoTestPanel {
         }
         let path = input_path(self.last_run_raw, has_bridge);
         if path == InputPath::Neither {
-            self.raw_lost = true;
+            // The step in progress did not see everything: the engine says
+            // so instead of judging it on what it saw.
+            self.engine.input_lost();
         }
         if path == InputPath::Raw {
             for ev in raw_events {
@@ -256,7 +254,6 @@ impl AutoTestPanel {
             ..Config::default()
         });
         self.last_run_raw = has_bridge;
-        self.raw_lost = false;
         self.wheel = WheelAccumulator::for_platform();
         self.engine.start(self.secs(Instant::now()));
     }
@@ -541,15 +538,6 @@ impl AutoTestPanel {
                     note.push_str(" — framework input");
                 }
                 ui.label(egui::RichText::new(note).weak());
-                if self.raw_lost {
-                    ui.label(
-                        egui::RichText::new(
-                            "Raw input from the mouse was lost during the run (unplugged or reconnecting): input in that time was not measured. If you did not unplug it, the connection is dropping out.",
-                        )
-                        .color(egui::Color32::YELLOW)
-                        .size(12.0),
-                    );
-                }
                 if !report.timing_reliable {
                     ui.label(
                         egui::RichText::new(
@@ -768,15 +756,38 @@ mod tests {
 
     #[test]
     fn losing_raw_input_mid_run_is_noted_and_feeds_nothing() {
+        // The mouse is unplugged during the rest step; the pointer still
+        // reports a frame-timed click from another input
         let ctx = egui::Context::default();
         let mut panel = AutoTestPanel::new();
         panel.start_for_test(true);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let c = ui.ctx().clone();
-            panel.process_input(&c, &[], false);
-        });
-        assert!(panel.raw_lost);
-        assert!(panel.engine.findings_so_far().is_empty());
+        let input = egui::RawInput {
+            events: vec![egui::Event::PointerButton {
+                pos: egui::pos2(10.0, 10.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let _ = ctx.run_ui(input.clone(), |ui| {
+                let c = ui.ctx().clone();
+                panel.process_input(&c, &[], false);
+            });
+        }
+        // Noted once for the step, which is then not judged
+        let findings = panel.engine.findings_so_far();
+        assert_eq!(findings.len(), 1, "{:?}", findings);
+        assert_eq!(findings[0].title, "Input lost during the step");
+        assert_eq!(findings[0].phase, Phase::Rest);
+        panel.engine.abort();
+        assert!(panel
+            .engine
+            .report()
+            .unwrap()
+            .untested
+            .contains(&Phase::Rest));
     }
     use egui::MouseWheelUnit::{Line, Page, Point};
 

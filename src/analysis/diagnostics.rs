@@ -474,6 +474,9 @@ pub fn bounce_verdict(bounces: usize) -> BounceVerdict {
 /// Rest movement (counts) below which it is ordinary sensor noise.
 const REST_NOISE_COUNTS: f64 = 3.0;
 
+/// Title of the finding [`AutoTest::input_lost`] adds once per step.
+const INPUT_LOST_TITLE: &str = "Input lost during the step";
+
 /// Movement seen in one second of the rest phase.
 #[derive(Debug, Default, Clone, Copy)]
 struct RestSecond {
@@ -654,6 +657,35 @@ impl AutoTest {
             Phase::Lift => self.feed_lift(phase_start, t, event),
         }
         self.advance_if_done(index, phase_start);
+    }
+
+    /// The run's input stopped arriving: the mouse was unplugged, its cable,
+    /// receiver or Bluetooth link dropped out, or another input was chosen.
+    /// Call it for every moment the input is missing. The current step did
+    /// not see everything the mouse did (a step that saw nothing would
+    /// otherwise read as a still sensor or a clean lift), so it is not judged
+    /// complete and the run cannot be Healthy.
+    pub fn input_lost(&mut self) {
+        let Some(phase) = self.current_phase() else {
+            return;
+        };
+        if self
+            .findings
+            .iter()
+            .any(|f| f.phase == phase && f.title == INPUT_LOST_TITLE)
+        {
+            return;
+        }
+        self.untested.push(phase);
+        self.push(
+            Severity::Info,
+            phase,
+            INPUT_LOST_TITLE,
+            format!(
+                "Input from the mouse stopped during the {} step: it was unplugged, its cable, receiver or Bluetooth link dropped out, or another input was chosen. The step did not see everything, so it is not judged. If you did none of these, the connection is failing: try another port or cable, or move the receiver closer.",
+                phase.title().to_lowercase()
+            ),
+        );
     }
 
     /// Advance time without an event. Call regularly (each frame / loop).
@@ -3062,6 +3094,36 @@ mod tests {
         sim.idle(0.5);
         let f = rest_findings(&sim);
         assert!(f.iter().any(|(s, _)| *s >= Severity::Warning), "{:?}", f);
+    }
+
+    #[test]
+    fn test_input_lost_during_a_step_is_not_healthy() {
+        // The mouse's link drops for part of the rest step and comes back:
+        // the step saw nothing then, which must not read as a still sensor
+        let mut sim = Sim::new(cfg());
+        sim.idle(3.0);
+        for _ in 0..20 {
+            sim.at.input_lost();
+            sim.idle(0.05);
+        }
+        sim.idle(4.5);
+        assert_eq!(sim.phase(), Some(Phase::Movement));
+        sim.good_movement();
+        sim.good_clicks();
+        sim.good_scroll();
+        sim.good_lift();
+        let r = sim.at.report().unwrap();
+        assert_eq!(r.verdict, Verdict::Inconclusive);
+        assert_eq!(r.untested, vec![Phase::Rest]);
+        let lost = r
+            .findings
+            .iter()
+            .filter(|f| f.title == INPUT_LOST_TITLE)
+            .count();
+        assert_eq!(lost, 1);
+        // Not running: nothing to note
+        sim.at.input_lost();
+        assert_eq!(sim.at.report().unwrap().untested, vec![Phase::Rest]);
     }
 
     #[test]
