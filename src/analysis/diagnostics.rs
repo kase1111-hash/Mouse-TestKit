@@ -1330,20 +1330,31 @@ impl AutoTest {
             format!("{} notches down, {} notches up.", down, up),
         );
         if up == 0 || down == 0 {
-            let (seen, missing) = if up == 0 {
-                ("down", "up")
+            // Without raw input up and down are the window system's, which
+            // natural scrolling (the macOS default) swaps: naming the missing
+            // direction could point at the one that works.
+            let detail = if self.cfg.timing_reliable {
+                let (seen, missing) = if up == 0 {
+                    ("down", "up")
+                } else {
+                    ("up", "down")
+                };
+                format!(
+                    "{} notches {} and none {}. If you also scrolled {}, that direction of the wheel may be dead; if you did not, it was not tested.",
+                    total, seen, missing, missing
+                )
             } else {
-                ("up", "down")
+                format!(
+                    "{} notches registered one way and none the other. If you also turned the wheel the other way, that direction may be dead; if you did not, it was not tested. Up and down are not named because the system's scroll-direction setting may have swapped them.",
+                    total
+                )
             };
             self.untested.push(Phase::Scroll);
             self.push(
                 Severity::Info,
                 Phase::Scroll,
                 "Wheel only registered one direction",
-                format!(
-                    "{} notches {} and none {}. If you also scrolled {}, that direction of the wheel may be dead; if you did not, it was not tested.",
-                    total, seen, missing, missing
-                ),
+                detail,
             );
         }
         // Like switch bounce, judged on the count. Three are needed because a
@@ -1974,10 +1985,37 @@ mod tests {
         }
         sim.idle(13.0);
         let f = sim.at.findings_so_far();
-        assert!(f
+        let dead = f
             .iter()
-            .any(|f| f.title == "Wheel only registered one direction"));
+            .find(|f| f.title == "Wheel only registered one direction")
+            .unwrap();
+        assert!(dead.detail.starts_with("12 notches down and none up."));
         assert_eq!(sim.at.metrics.scroll_reversals, 0);
+    }
+
+    #[test]
+    fn test_scroll_dead_direction_without_raw_input_is_not_named() {
+        // Framework input: natural scrolling (the macOS default) swaps up
+        // and down, so a dead physical "down" arrives as up notches only
+        let mut sim = Sim::new(Config {
+            timing_reliable: false,
+            ..cfg()
+        });
+        sim.good_rest();
+        sim.good_clicks();
+        for _ in 0..12 {
+            sim.scroll(1, 80.0);
+        }
+        sim.idle(13.0);
+        let f = sim.at.findings_so_far();
+        let dead = f
+            .iter()
+            .find(|f| f.title == "Wheel only registered one direction")
+            .unwrap();
+        assert!(dead
+            .detail
+            .starts_with("12 notches registered one way and none the other."));
+        assert!(!dead.detail.contains("none down"), "{}", dead.detail);
     }
 
     #[test]

@@ -27,7 +27,7 @@ A one-minute guided check-up that looks for faults by itself. Available from the
 4. Each finding explains what was measured and what it usually means. Tick **Show raw measurements** for the numbers behind it
 5. Press **Abort** (top right) or **Esc** to stop early (a partial report is still produced) or **Run Again** to repeat. During the click step only Esc stops the run, so stray clicks cannot end it, and the sidebar export buttons stay disabled until the run ends
 
-Without raw input (FRAMEWORK input source) the movement and lift-off steps are left out, and switch bounce, very short presses and scroll skips are not judged, because window-system events are frame-rate limited and pointer movement is accelerated. The report is marked "Limited check". Keep the pointer inside the window: clicks and scrolls outside it are not seen.
+Without raw input (FRAMEWORK input source) the movement and lift-off steps are left out, and switch bounce, very short presses and scroll skips are not judged, because window-system events are frame-rate limited and pointer movement is accelerated. A scroll direction that registered nothing is not named either: natural scrolling swaps the system's up and down. The report is marked "Limited check". Keep the pointer inside the window: clicks and scrolls outside it are not seen.
 
 The report is included in the JSON/CSV export. If a warning appears once, re-run: a fault that repeats is real, a one-off is often the hand.
 
