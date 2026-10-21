@@ -106,7 +106,7 @@ Counts wheel notches and checks for encoder faults. This test is only available 
 1. Click **Start**
 2. Hover over the test area
 3. Scroll steadily down at least 10 notches, then up at least 10
-4. A notch reported in the opposite direction within 60 ms of the previous one is a skip (a finger cannot turn the wheel back that fast). One or two are reported as a possible skip, three or more as a skipping wheel. Many notches one way and none the other means that direction may be dead
+4. A notch reported in the opposite direction within 60 ms of the previous one is a skip (a finger cannot turn the wheel back that fast). One or two are reported as a possible skip, three or more as a skipping wheel. Many notches one way and none the other means that direction may be dead. Without raw input (always on macOS) up and down are as the system reports them, and natural scrolling swaps them, so the panel then does not say which direction is missing: turn the wheel both ways and see which one adds nothing
 5. Lost notches are not detected automatically: roll the wheel slowly by 10 clicks you can feel and check the counter rose by exactly 10
 
 Scrolling speed is shown but not rated: it describes your hand, not the wheel.

@@ -39,6 +39,23 @@ enum StickyVerdict {
     NoSlowReleases,
 }
 
+impl StickyVerdict {
+    /// The conclusion in one line, for exports.
+    fn summary(self) -> String {
+        match self {
+            StickyVerdict::HeldDown { .. } => "Button held down".to_string(),
+            StickyVerdict::NeedMoreClicks { need } => {
+                format!("Inconclusive: fewer than {} clicks", need)
+            }
+            StickyVerdict::SlowReleases { .. } => "Slow or sticky releases".to_string(),
+            StickyVerdict::OneLongHold { .. } => {
+                "One long click, usually the hand, not the switch".to_string()
+            }
+            StickyVerdict::NoSlowReleases => "No slow releases".to_string(),
+        }
+    }
+}
+
 /// Judge one button from its completed hold times and, if it is down right
 /// now, how long it has been held. A deliberate click is held about
 /// 80-150 ms, so only holds past `sticky_threshold_ms` (250 ms) count, and
@@ -1135,10 +1152,16 @@ impl ClickPanel {
         if self.sticky_holds.is_empty() && self.sticky_right_holds.is_empty() {
             return None;
         }
+        // A press still open is left out, as on screen after Stop.
+        let cfg = DiagConfig::default();
+        let verdict = |holds: &[f64]| sticky_verdict(holds, None, &cfg).summary();
         Some(ClickStickyExport {
+            long_hold_threshold_ms: cfg.sticky_threshold_ms,
             left: StickyButtonExport {
                 click_count: self.sticky_holds.len(),
                 sticky_count: self.sticky_count,
+                long_hold_count: self.sticky_count,
+                verdict: verdict(&self.sticky_holds),
                 avg_hold_ms: if self.sticky_holds.is_empty() {
                     0.0
                 } else {
@@ -1150,6 +1173,8 @@ impl ClickPanel {
             right: StickyButtonExport {
                 click_count: self.sticky_right_holds.len(),
                 sticky_count: self.sticky_right_count,
+                long_hold_count: self.sticky_right_count,
+                verdict: verdict(&self.sticky_right_holds),
                 avg_hold_ms: if self.sticky_right_holds.is_empty() {
                     0.0
                 } else {
@@ -1259,6 +1284,8 @@ mod tests {
         let export = panel.export_sticky().unwrap();
         assert_eq!(export.left.click_count, 6);
         assert_eq!(export.left.sticky_count, 0);
+        assert_eq!(export.left.verdict, "No slow releases");
+        assert_eq!(export.right.verdict, "Inconclusive: fewer than 5 clicks");
         assert_eq!(
             sticky_verdict(&panel.sticky_holds, None, &DiagConfig::default()),
             StickyVerdict::NoSlowReleases
@@ -1271,6 +1298,9 @@ mod tests {
         let panel = sticky_panel_with_holds(&[90, 380, 110, 420, 100, 350, 120]);
         let export = panel.export_sticky().unwrap();
         assert_eq!(export.left.sticky_count, 3);
+        assert_eq!(export.left.long_hold_count, 3);
+        assert_eq!(export.left.verdict, "Slow or sticky releases");
+        assert_eq!(export.long_hold_threshold_ms, 250.0);
         assert!(matches!(
             sticky_verdict(&panel.sticky_holds, None, &DiagConfig::default()),
             StickyVerdict::SlowReleases { count: 3, .. }
@@ -1284,6 +1314,15 @@ mod tests {
         assert_eq!(
             sticky_verdict(&holds, None, &cfg),
             StickyVerdict::OneLongHold { held_ms: 400.0 }
+        );
+        // The export says the same, not "1 sticky click"
+        let export = sticky_panel_with_holds(&[100, 120, 400, 90, 110, 130])
+            .export_sticky()
+            .unwrap();
+        assert_eq!(export.left.long_hold_count, 1);
+        assert_eq!(
+            export.left.verdict,
+            "One long click, usually the hand, not the switch"
         );
         // Exactly at the threshold is still a normal click
         let holds = [250.0, 250.0, 100.0, 100.0, 100.0];

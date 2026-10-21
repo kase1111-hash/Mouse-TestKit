@@ -404,7 +404,8 @@ impl JitterPanel {
             .map(|s| s.max_single)
             .fold(0.0, f64::max);
 
-        let rating = if self.samples.iter().all(|s| s.raw) {
+        let raw = self.samples.iter().all(|s| s.raw);
+        let rating = if raw {
             jitter_rating(avg_distance)
         } else {
             NOT_RATED
@@ -413,6 +414,7 @@ impl JitterPanel {
         Some(JitterExport {
             sample_count: self.samples.len(),
             avg_events,
+            distance_unit: if raw { "counts" } else { "points" }.to_string(),
             avg_distance_px: avg_distance,
             max_jitter_px: max_jitter,
             rating: rating.to_string(),
@@ -471,6 +473,7 @@ mod tests {
         let e = p.export().unwrap();
         assert_eq!(e.avg_events, 0.0);
         assert_eq!(e.rating, "Excellent");
+        assert_eq!(e.distance_unit, "counts");
         assert!(!p.is_running());
     }
 
@@ -529,6 +532,8 @@ mod tests {
         p.start_sample_at(start, false);
         p.record_delta(0.5, 0.0);
         p.tick(start + Duration::from_secs(SETTLE_SECS + SAMPLE_SECS));
-        assert_eq!(p.export().unwrap().rating, NOT_RATED);
+        let e = p.export().unwrap();
+        assert_eq!(e.rating, NOT_RATED);
+        assert_eq!(e.distance_unit, "points");
     }
 }

@@ -99,6 +99,8 @@ pub struct ClickButtonExport {
 /// Click stickiness test results (buttons failing to release properly).
 #[derive(Serialize)]
 pub struct ClickStickyExport {
+    /// A click held longer than this (ms) is a long hold.
+    pub long_hold_threshold_ms: f64,
     pub left: StickyButtonExport,
     pub right: StickyButtonExport,
 }
@@ -107,7 +109,13 @@ pub struct ClickStickyExport {
 #[derive(Serialize)]
 pub struct StickyButtonExport {
     pub click_count: usize,
+    /// Same as `long_hold_count`, under its older name.
     pub sticky_count: usize,
+    /// Clicks held longer than `long_hold_threshold_ms`. Not a count of
+    /// faults: one alone is usually the hand; `verdict` says what they mean.
+    pub long_hold_count: usize,
+    /// What the panel concluded for this button.
+    pub verdict: String,
     pub avg_hold_ms: f64,
     pub max_hold_ms: f64,
     pub hold_times: Vec<f64>,
@@ -127,7 +135,14 @@ pub struct LiftOffExport {
 pub struct JitterExport {
     pub sample_count: usize,
     pub avg_events: f64,
+    /// Unit of every distance in this export: "counts" (raw sensor counts at
+    /// the mouse's current DPI) or "points" (window-system pointer movement
+    /// after OS acceleration, when raw input was unavailable).
+    pub distance_unit: String,
+    /// Average total movement per sample, in `distance_unit` (the `_px`
+    /// name is kept for existing readers; it is not pixels).
     pub avg_distance_px: f64,
+    /// Largest single report, in `distance_unit` (`_px` as above).
     pub max_jitter_px: f64,
     pub rating: String,
     pub samples: Vec<JitterSampleExport>,
@@ -202,12 +217,22 @@ pub struct AngleSnapExport {
 /// Scroll wheel test results.
 #[derive(Serialize)]
 pub struct ScrollExport {
+    /// Wheel reports (one report can carry several notches).
     pub total_steps: usize,
+    /// Notches up and down, as the input source reports the direction.
     pub scroll_up: f32,
     pub scroll_down: f32,
     pub direction_changes: usize,
     pub avg_speed_sps: f64,
+    /// Share of wheel reports that were not skips (100 = no skips). Speed is
+    /// not part of it.
     pub consistency_percent: u32,
+    /// Wheel reports counted as skips: reversed within `skip_window_ms` of
+    /// the previous report, faster than a finger turns the wheel back.
+    pub skips: usize,
+    pub skip_window_ms: f64,
+    /// What the panel concluded about the wheel.
+    pub verdict: String,
 }
 
 /// Escape a string value for safe CSV embedding (RFC 4180).
@@ -301,22 +326,21 @@ impl TestResultsExport {
 
         // Click Sticky
         if let Some(ref c) = self.click_sticky {
-            csv.push_str(&format!(
-                "Click Sticky (Left),Click Count,{}\n",
-                c.left.click_count
-            ));
-            csv.push_str(&format!(
-                "Click Sticky (Left),Sticky Count,{}\n",
-                c.left.sticky_count
-            ));
-            csv.push_str(&format!(
-                "Click Sticky (Right),Click Count,{}\n",
-                c.right.click_count
-            ));
-            csv.push_str(&format!(
-                "Click Sticky (Right),Sticky Count,{}\n",
-                c.right.sticky_count
-            ));
+            for (side, b) in [("Left", &c.left), ("Right", &c.right)] {
+                csv.push_str(&format!(
+                    "Click Sticky ({}),Click Count,{}\n",
+                    side, b.click_count
+                ));
+                csv.push_str(&format!(
+                    "Click Sticky ({}),Long Holds (>{:.0} ms),{}\n",
+                    side, c.long_hold_threshold_ms, b.long_hold_count
+                ));
+                csv.push_str(&format!(
+                    "Click Sticky ({}),Verdict,{}\n",
+                    side,
+                    csv_escape(&b.verdict)
+                ));
+            }
         }
 
         // Lift-off
@@ -336,11 +360,15 @@ impl TestResultsExport {
         if let Some(ref j) = self.jitter {
             csv.push_str(&format!("Jitter,Sample Count,{}\n", j.sample_count));
             csv.push_str(&format!("Jitter,Avg Events,{:.1}\n", j.avg_events));
+            let unit = csv_escape(&j.distance_unit);
             csv.push_str(&format!(
-                "Jitter,Avg Distance (px),{:.2}\n",
-                j.avg_distance_px
+                "Jitter,Avg Distance per Sample ({}),{:.2}\n",
+                unit, j.avg_distance_px
             ));
-            csv.push_str(&format!("Jitter,Max Jitter (px),{:.2}\n", j.max_jitter_px));
+            csv.push_str(&format!(
+                "Jitter,Max Jitter ({}),{:.2}\n",
+                unit, j.max_jitter_px
+            ));
             csv.push_str(&format!("Jitter,Rating,{}\n", csv_escape(&j.rating)));
         }
 
@@ -420,9 +448,14 @@ impl TestResultsExport {
             ));
             csv.push_str(&format!("Scroll,Avg Speed (sps),{:.1}\n", s.avg_speed_sps));
             csv.push_str(&format!(
-                "Scroll,Consistency (%),{}\n",
+                "Scroll,Skips (reversed within {:.0} ms),{}\n",
+                s.skip_window_ms, s.skips
+            ));
+            csv.push_str(&format!(
+                "Scroll,Reports Not Skipped (%),{}\n",
                 s.consistency_percent
             ));
+            csv.push_str(&format!("Scroll,Verdict,{}\n", csv_escape(&s.verdict)));
         }
 
         // Auto diagnostics
@@ -556,6 +589,111 @@ mod tests {
             .to_json()
             .unwrap()
             .contains("\"verdict\": \"Attention\""));
+    }
+
+    /// An export with no test results.
+    fn empty_export() -> TestResultsExport {
+        TestResultsExport {
+            export_info: ExportInfo::new(),
+            polling_rate: None,
+            stutter: None,
+            click_response: None,
+            click_sticky: None,
+            liftoff: None,
+            jitter: None,
+            double_click: None,
+            dpi: None,
+            acceleration: None,
+            angle_snap: None,
+            scroll: None,
+            auto_diagnostics: None,
+        }
+    }
+
+    fn jitter(unit: &str) -> JitterExport {
+        JitterExport {
+            sample_count: 2,
+            avg_events: 1.5,
+            distance_unit: unit.to_string(),
+            avg_distance_px: 2.0,
+            max_jitter_px: 1.41,
+            rating: "Good".to_string(),
+            samples: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_jitter_labels_name_the_unit_not_pixels() {
+        let mut export = empty_export();
+        export.jitter = Some(jitter("counts"));
+        let csv = export.to_csv();
+        assert!(csv.contains("Jitter,Avg Distance per Sample (counts),2.00\n"));
+        assert!(csv.contains("Jitter,Max Jitter (counts),1.41\n"));
+        assert!(!csv.contains("(px)"));
+        let json = export.to_json().unwrap();
+        assert!(json.contains("\"distance_unit\": \"counts\""));
+        // Existing readers still find the old key
+        assert!(json.contains("\"avg_distance_px\": 2.0"));
+
+        export.jitter = Some(jitter("points"));
+        assert!(export
+            .to_csv()
+            .contains("Jitter,Avg Distance per Sample (points),2.00\n"));
+    }
+
+    #[test]
+    fn test_sticky_export_says_long_holds_and_the_verdict() {
+        let button = |long, verdict: &str| StickyButtonExport {
+            click_count: 6,
+            sticky_count: long,
+            long_hold_count: long,
+            verdict: verdict.to_string(),
+            avg_hold_ms: 150.0,
+            max_hold_ms: 400.0,
+            hold_times: Vec::new(),
+        };
+        let mut export = empty_export();
+        export.click_sticky = Some(ClickStickyExport {
+            long_hold_threshold_ms: 250.0,
+            left: button(1, "One long click, usually the hand, not the switch"),
+            right: button(3, "Slow or sticky releases"),
+        });
+        let csv = export.to_csv();
+        assert!(csv.contains("Click Sticky (Left),Long Holds (>250 ms),1\n"));
+        assert!(csv.contains(
+            "Click Sticky (Left),Verdict,\"One long click, usually the hand, not the switch\"\n"
+        ));
+        assert!(csv.contains("Click Sticky (Right),Long Holds (>250 ms),3\n"));
+        assert!(csv.contains("Click Sticky (Right),Verdict,Slow or sticky releases\n"));
+        assert!(!csv.contains("Sticky Count"));
+        let json = export.to_json().unwrap();
+        assert!(json.contains("\"long_hold_threshold_ms\": 250.0"));
+        assert!(json.contains("\"long_hold_count\": 1"));
+        assert!(json.contains("\"sticky_count\": 1"));
+    }
+
+    #[test]
+    fn test_scroll_export_counts_skips_not_consistency() {
+        let mut export = empty_export();
+        export.scroll = Some(ScrollExport {
+            total_steps: 52,
+            scroll_up: 20.0,
+            scroll_down: 32.0,
+            direction_changes: 17,
+            avg_speed_sps: 30.0,
+            consistency_percent: 85,
+            skips: 8,
+            skip_window_ms: 60.0,
+            verdict: "Wheel is skipping".to_string(),
+        });
+        let csv = export.to_csv();
+        assert!(csv.contains("Scroll,Skips (reversed within 60 ms),8\n"));
+        assert!(csv.contains("Scroll,Reports Not Skipped (%),85\n"));
+        assert!(csv.contains("Scroll,Verdict,Wheel is skipping\n"));
+        assert!(!csv.contains("Consistency"));
+        let json = export.to_json().unwrap();
+        assert!(json.contains("\"skips\": 8"));
+        assert!(json.contains("\"consistency_percent\": 85"));
     }
 
     #[test]
