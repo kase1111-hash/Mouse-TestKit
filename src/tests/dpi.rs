@@ -105,6 +105,8 @@ pub fn run() -> TestOutcome {
 
     let mut samples: Vec<DpiSample> = Vec::new();
     let mut counting = false;
+    // Some of the sample being counted was lost: it will not be recorded
+    let mut spoiled = false;
     let (mut total_x, mut total_y) = (0i64, 0i64);
     let mut last_print = Instant::now();
     let mut device_lost = false;
@@ -137,11 +139,13 @@ pub fn run() -> TestOutcome {
             device_lost = true;
             break;
         };
-        if batch.lost_data && counting {
-            // Dropped reports took their counts with them
-            counting = false;
+        if batch.lost_data && counting && !spoiled {
+            // Dropped reports took their counts with them. The user is still
+            // sliding, so the SPACE that ends the slide discards the sample
+            // (it must not start a new one on the end mark).
+            spoiled = true;
             say("Some movement was lost (the computer fell behind reading the mouse), so this");
-            say("sample was cancelled. Put the mouse on the start mark and press SPACE.");
+            say("sample will not be recorded. Finish it and press SPACE, then take it again.");
         }
         for (dx, dy) in moves(batch.events) {
             if counting {
@@ -157,6 +161,7 @@ pub fn run() -> TestOutcome {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('r') => {
                     counting = false;
+                    spoiled = false;
                     say("Sample cancelled. Put the mouse on the start mark and press SPACE.");
                 }
                 KeyCode::Char(' ') if !counting => {
@@ -166,6 +171,11 @@ pub fn run() -> TestOutcome {
                         "Counting... slide {} and press SPACE on the end mark.",
                         distance_label
                     ));
+                }
+                KeyCode::Char(' ') if spoiled => {
+                    counting = false;
+                    spoiled = false;
+                    say("Sample not recorded. Put the mouse on the start mark and press SPACE.");
                 }
                 KeyCode::Char(' ') => {
                     counting = false;
