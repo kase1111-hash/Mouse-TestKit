@@ -36,24 +36,28 @@ The report is included in the JSON/CSV export. If a warning appears once, re-run
 ## Core Tests
 
 ### Polling Rate Monitor
-Measures how often your mouse reports its position to the computer.
+Measures how often your mouse reports its position to the computer. Requires raw input ("RAW INPUT" on the Dashboard); with framework input the panel explains why it cannot measure instead of showing the display refresh rate as Hz.
 
 1. Click **Start**
-2. Move your mouse around continuously
+2. Move the mouse quickly and continuously, e.g. in circles
 3. View real-time Hz readings and graph. "Nominal" is the nearest standard rate the measurement corresponds to
+
+A mouse only sends a report when it has moved at least one count, so slow movement and direction changes legitimately produce fewer reports. Readings are only taken while the mouse moves fast enough to report at every poll; otherwise "Current" shows "-" and asks you to move faster, and Min/Avg/Nominal are not affected. At 4000-8000 Hz each report holds very few counts: move briskly or use 1600+ DPI.
 
 **Common polling rates:** 125Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz
 
 ---
 
 ### Stutter Detection
-Detects irregular timing between mouse events that can cause choppy cursor movement.
+Detects reports that arrive late while the mouse is moving fast (choppy cursor movement). Requires raw input.
 
 1. Click **Start**
-2. Move mouse in circles or back-and-forth continuously
+2. Move the mouse quickly and continuously in circles until at least 3 s of fast movement has been judged
 3. Spikes above the red threshold line indicate stutters
 
-**Tip:** Adjust sensitivity slider - lower = more sensitive detection.
+Only intervals during fast, steady movement are judged against the median interval; slow passes, direction reversals and pauses are ignored because a healthy mouse legitimately sends fewer reports then. Each interval is counted once. A stutter must also be at least 2.5 ms long, so normal sub-millisecond timing noise at 2-8 kHz is not flagged. The rating is **Inconclusive** until enough fast movement was recorded.
+
+**Tip:** Adjust sensitivity slider (multiple of the median interval) - lower = more sensitive detection.
 
 ---
 
@@ -109,16 +113,18 @@ Tests scroll wheel functionality and consistency. This test is only available in
 ## Advanced Tests
 
 ### DPI Accuracy
-Verifies your mouse's actual DPI matches the configured setting.
+Verifies your mouse's actual DPI matches the configured setting. Requires raw input (the window-system pointer is scaled by OS acceleration).
 
 1. Set your mouse DPI in its software
-2. Enter the target DPI value
-3. Enter the distance you'll move (use a ruler)
-4. Press **SPACE** to start
-5. Move the mouse exactly that distance
+2. Enter the target DPI value (up to 64000)
+3. Enter the distance you'll move, in inches or cm (use a ruler; longer is more accurate)
+4. Put the mouse on the start mark and press **SPACE**
+5. Move the mouse to the end mark
 6. Press **SPACE** to finish
 
-**95%+ accuracy** = Good DPI calibration
+The result uses the straight-line distance between where the movement started and ended, so wobble or overshooting and coming back to the mark does not inflate it.
+
+**95%+ accuracy** = Good DPI calibration. More than 25% off is shown as **Check setup**: almost always a different DPI stage, a wrong distance, or a movement that missed the marks.
 
 ---
 
@@ -134,6 +140,8 @@ Detects firmware that straightens near-horizontal or near-vertical hand movement
 
 ### Acceleration Detection
 Detects if the number of counts for a fixed distance changes with movement speed.
+
+With raw input this covers the mouse's **sensor/firmware** only: OS pointer acceleration (Windows "Enhance pointer precision", macOS or libinput acceleration) is applied after the raw counts, so a "no acceleration" result says nothing about that setting. Without raw input the test measures the on-screen pointer, which does include OS acceleration.
 
 1. Pick a fixed physical distance (for example the full width of your mousepad, or between two marks)
 2. Click **Start Test**
@@ -158,10 +166,12 @@ Detects switch issues that cause accidental double-clicks.
 ### Jitter Test
 Measures sensor noise when the mouse is stationary.
 
-1. Place mouse on pad and **don't touch it**
-2. Click **Take Sample (5s)**
-3. Wait 5 seconds without moving the mouse
-4. Lower distance = less jitter = better sensor
+1. Place mouse on pad
+2. Click **Take Sample (5s)**, then let go of the mouse: recording starts 2 seconds later so the click and your hand leaving are not recorded
+3. Wait 5 seconds without touching the mouse (a button press while recording discards the sample)
+4. Lower distance = less jitter = better sensor. Amounts are raw counts at the mouse's current DPI; a healthy sensor that nobody touches normally reports nothing
+
+Without raw input no rating is given: only pointer movement in screen points is visible.
 
 ---
 

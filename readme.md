@@ -103,7 +103,7 @@ For detailed usage instructions, see the [User Manual](docs/USER_MANUAL.md).
 | macOS (ARM64) | Yes | No | Apple Silicon; GUI uses framework input |
 | macOS (x64) | Yes | No | Intel Macs; GUI uses framework input |
 
-> **Note:** On macOS, the GUI falls back to framework-level input since raw input access (IOKit/HID) is not yet implemented. Timing-sensitive tests (polling rate, stutter detection) will be less accurate on macOS.
+> **Note:** On macOS, the GUI falls back to framework-level input since raw input access (IOKit/HID) is not yet implemented. That input arrives once per display frame and after OS pointer acceleration, so polling rate, stutter, DPI and jitter cannot be measured on macOS; those panels say so instead of showing a reading.
 
 ## Contributing
 

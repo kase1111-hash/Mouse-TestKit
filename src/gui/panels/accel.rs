@@ -4,6 +4,12 @@
 //! pauses) rather than individual reports. See
 //! `mouse_testkit::analysis::{strokes, acceleration, angle_snap}` for the
 //! analysis; this module only collects input and draws the results.
+//!
+//! With raw input the acceleration test sees the mouse's own counts, before
+//! the OS applies pointer acceleration, so it covers sensor/firmware
+//! acceleration only and must not be read as a verdict on the OS setting.
+//! Without raw input it sees the on-screen pointer, which includes OS
+//! acceleration.
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints, Points};
@@ -45,6 +51,24 @@ pub struct AccelPanel {
     /// Cumulative path for visualisation (plot coordinates: y up).
     angle_points: VecDeque<(f64, f64)>,
     angle_accumulated_pos: (f64, f64),
+
+    /// Pointer movement (points) not yet passed on as whole points in the
+    /// framework-input fallback.
+    pointer_remainder: (f32, f32),
+}
+
+/// Add a frame's pointer movement to `remainder` and take out the whole
+/// points. Rounding each frame on its own would lose or add up to half a
+/// point per frame, and a slow pass moves only a point or two per frame on a
+/// high-refresh display: the counts of slow passes would be off by tens of
+/// percent and look like acceleration.
+fn take_whole_points(remainder: &mut (f32, f32), delta: egui::Vec2) -> (i32, i32) {
+    remainder.0 += delta.x;
+    remainder.1 += delta.y;
+    let (dx, dy) = (remainder.0.round(), remainder.1.round());
+    remainder.0 -= dx;
+    remainder.1 -= dy;
+    (dx as i32, dy as i32)
 }
 
 impl AccelPanel {
@@ -62,6 +86,7 @@ impl AccelPanel {
             angle_result: None,
             angle_points: VecDeque::new(),
             angle_accumulated_pos: (0.0, 0.0),
+            pointer_remainder: (0.0, 0.0),
         }
     }
 
@@ -76,7 +101,7 @@ impl AccelPanel {
     /// Collect (time, dx, dy) motion for this frame from raw input or the
     /// egui fallback.
     fn frame_motion(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         raw_events: &[RawInputEvent],
         has_bridge: bool,
@@ -91,12 +116,9 @@ impl AccelPanel {
                 .collect()
         } else {
             let delta = ctx.input(|i| i.pointer.delta());
-            if delta.x != 0.0 || delta.y != 0.0 {
-                vec![(
-                    self.secs(Instant::now()),
-                    delta.x.round() as i32,
-                    delta.y.round() as i32,
-                )]
+            let (dx, dy) = take_whole_points(&mut self.pointer_remainder, delta);
+            if dx != 0 || dy != 0 {
+                vec![(self.secs(Instant::now()), dx, dy)]
             } else {
                 Vec::new()
             }
@@ -114,13 +136,24 @@ impl AccelPanel {
     ) {
         ui.heading("Acceleration Detection");
         ui.add_space(5.0);
-        ui.label(
-            "Detects mouse acceleration (more counts for the same distance when you move faster).",
-        );
-        if !has_bridge {
+        if has_bridge {
+            ui.label(
+                "Detects acceleration in the mouse's sensor or firmware (more counts for the same distance when you move faster).",
+            );
             ui.label(
                 egui::RichText::new(
-                    "Note: Raw input unavailable — using framework input (reduced accuracy)",
+                    "Covers sensor/firmware acceleration only. OS pointer acceleration (Windows \"Enhance pointer precision\", macOS or libinput acceleration) is applied after the raw counts this test reads, so it cannot be seen here - check that setting separately.",
+                )
+                .weak()
+                .size(11.0),
+            );
+        } else {
+            ui.label(
+                "Detects acceleration in the on-screen pointer (more movement for the same distance when you move faster).",
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Note: Raw input unavailable - measuring the pointer after OS processing, so OS pointer acceleration is included. Keep the pointer inside this window: the screen edge stops it and spoils a pass.",
                 )
                 .color(egui::Color32::YELLOW)
                 .size(11.0),
@@ -245,12 +278,23 @@ impl AccelPanel {
                 .inner_margin(20.0)
                 .corner_radius(8.0)
                 .show(ui, |ui| {
+                    // Fewer counts on fast passes is almost always the sensor
+                    // losing tracking, not an acceleration setting to turn off.
+                    let loses_counts = result.has_acceleration && result.factor < 1.0;
                     let (status, color) = if !result.conclusive {
                         ("Inconclusive - vary your speed more", egui::Color32::YELLOW)
+                    } else if loses_counts {
+                        ("Fast Passes LOSE Counts", egui::Color32::RED)
                     } else if result.has_acceleration {
-                        ("Acceleration DETECTED", egui::Color32::RED)
+                        if has_bridge {
+                            ("Sensor/Firmware Acceleration DETECTED", egui::Color32::RED)
+                        } else {
+                            ("Pointer Acceleration DETECTED", egui::Color32::RED)
+                        }
+                    } else if has_bridge {
+                        ("No Sensor/Firmware Acceleration", egui::Color32::GREEN)
                     } else {
-                        ("No Acceleration Detected", egui::Color32::GREEN)
+                        ("No Pointer Acceleration Detected", egui::Color32::GREEN)
                     };
                     ui.label(egui::RichText::new(status).size(24.0).strong().color(color));
                     ui.add_space(15.0);
@@ -296,13 +340,35 @@ impl AccelPanel {
                             )
                             .color(egui::Color32::YELLOW),
                         );
+                    } else if loses_counts {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(if has_bridge {
+                                "The sensor may be losing tracking at speed: try another mousepad or surface, or the mouse may be moving faster than it is rated for."
+                            } else {
+                                "The pointer moved less on fast passes: it may have hit the screen edge, or the sensor is losing tracking at speed."
+                            })
+                            .color(egui::Color32::YELLOW),
+                        );
                     } else if result.has_acceleration {
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new(
-                                "Recommendation: disable pointer acceleration / \"enhance pointer precision\" in your OS and mouse software",
-                            )
+                            egui::RichText::new(if has_bridge {
+                                "Recommendation: turn off acceleration, \"enhanced\" or smoothing modes in the mouse's own software or on-board settings"
+                            } else {
+                                "Recommendation: disable pointer acceleration / \"enhance pointer precision\" in your OS and mouse software"
+                            })
                             .color(egui::Color32::YELLOW),
+                        );
+                    }
+                    if result.conclusive && has_bridge {
+                        ui.add_space(5.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "This result does not tell you whether OS pointer acceleration is on: the OS applies it after the raw counts measured here.",
+                            )
+                            .weak()
+                            .size(11.0),
                         );
                     }
                 });
@@ -346,6 +412,7 @@ impl AccelPanel {
 
     fn start_accel(&mut self) {
         self.is_running = true;
+        self.pointer_remainder = (0.0, 0.0);
         self.accel_segmenter.reset();
         self.accel_strokes.clear();
         self.accel_result = None;
@@ -543,6 +610,7 @@ impl AccelPanel {
 
     fn start_angle(&mut self) {
         self.angle_running = true;
+        self.pointer_remainder = (0.0, 0.0);
         self.angle_segmenter.reset();
         self.angle_shapes.clear();
         self.angle_short_strokes = 0;
@@ -612,5 +680,24 @@ impl AccelPanel {
             near_axis_stroke_count: result.near_axis_strokes,
             snapped_stroke_count: result.snapped_strokes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_pointer_movement_is_not_lost_to_rounding() {
+        // A slow pass on a 240 Hz display: 1.3 points per frame
+        let mut remainder = (0.0, 0.0);
+        let (mut x, mut y) = (0, 0);
+        for _ in 0..100 {
+            let (dx, dy) = take_whole_points(&mut remainder, egui::vec2(1.3, -0.4));
+            x += dx;
+            y += dy;
+        }
+        // (rounding every frame on its own would give 100 and 0)
+        assert_eq!((x, y), (130, -40));
     }
 }

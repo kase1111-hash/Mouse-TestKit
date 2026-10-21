@@ -23,6 +23,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Detects mouse movement stutter and irregularities |
+| Method | Judges report intervals only during fast, steady movement (slow movement, reversals and pauses legitimately skip polls); stutter = more than the chosen multiple of the median interval and at least 2.5 ms |
 | Output | Visual graph representation of stutter events |
 | Use Case | Identifying inconsistent tracking or frame drops |
 
@@ -89,10 +90,11 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 
 | Specification | Description |
 |---------------|-------------|
-| Function | Tests for unwanted mouse acceleration curves |
+| Function | Tests for unwanted acceleration curves in the mouse's sensor/firmware |
 | Method | Compares movement distance at different speeds |
 | Output | Acceleration coefficient and consistency |
-| Use Case | Ensuring 1:1 input for precision tasks |
+| Scope | Raw counts are read before OS pointer acceleration, which is not covered |
+| Use Case | Ensuring the mouse itself reports 1:1 for precision tasks |
 
 ### 10. Double-Click Test
 
@@ -109,7 +111,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Measures micro-movements when mouse is stationary |
 | Method | Records position variance over time at rest |
-| Output | Jitter magnitude in pixels/counts |
+| Output | Jitter magnitude in raw counts, recorded after a 2 s settle period so the click that started it is not counted |
 | Use Case | Evaluating sensor stability and noise floor |
 
 ### 12. Scroll Wheel Test

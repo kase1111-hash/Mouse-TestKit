@@ -133,7 +133,8 @@ mod smoke_tests {
         // use the internal start path through the public API instead.
         polling.start_for_test();
         let start = Instant::now() - Duration::from_millis(600);
-        let events = moves(500, 1, 0, Duration::from_millis(1), start);
+        // 3 counts per report: fast enough that every poll carries a report
+        let events = moves(500, 3, 0, Duration::from_millis(1), start);
         frame(&ctx, |ui, ctx| polling.ui(ui, ctx, &events, true));
         let export = polling.export().expect("a Hz sample after 500 reports");
         assert!(
@@ -402,7 +403,7 @@ mod smoke_tests {
         scroll.start_for_test();
         stutter.start_for_test();
         let start = Instant::now() - Duration::from_millis(300);
-        let mut events = moves(200, 1, 1, Duration::from_millis(1), start);
+        let mut events = moves(200, 3, 1, Duration::from_millis(1), start);
         for i in 0..25 {
             events.push(RawInputEvent {
                 kind: RawInputKind::Scroll {
