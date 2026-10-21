@@ -178,7 +178,7 @@ Measures sensor noise when the mouse is stationary.
 
 1. Place mouse on pad
 2. Click **Take Sample (5s)**, then let go of the mouse: recording starts 2 seconds later so the click and your hand leaving are not recorded
-3. Wait 5 seconds without touching the mouse (a button press while recording discards the sample)
+3. Wait 5 seconds without touching the mouse (a button press while recording discards the sample, as does raw input stopping or starting, for example when the mouse is unplugged). The sample keeps recording if you open another page meanwhile
 4. Lower distance = less jitter = better sensor. Amounts are raw counts at the mouse's current DPI; a healthy sensor that nobody touches normally reports nothing
 
 Without raw input no rating is given: only pointer movement in screen points is visible.

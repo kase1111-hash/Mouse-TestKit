@@ -48,8 +48,10 @@ pub struct JitterPanel {
     accumulated_pos: (f64, f64),
     /// A button changed state while recording: the hand was on the mouse.
     touched: bool,
-    /// The last sample was thrown away because the mouse was touched.
+    /// The last sample was thrown away because the mouse was touched...
     last_discarded: bool,
+    /// ... or because its input source changed while it was taken.
+    discarded_for_input: bool,
     /// Whether the current sample reads raw counts (false: pointer points).
     current_raw: bool,
 }
@@ -73,6 +75,7 @@ impl JitterPanel {
             accumulated_pos: (0.0, 0.0),
             touched: false,
             last_discarded: false,
+            discarded_for_input: false,
             current_raw: true,
         }
     }
@@ -132,9 +135,11 @@ impl JitterPanel {
         );
         if self.last_discarded {
             ui.label(
-                egui::RichText::new(
-                    "Last sample discarded: a mouse button was pressed or released while recording, so the hand was on the mouse. Take another sample.",
-                )
+                egui::RichText::new(if self.discarded_for_input {
+                    "Last sample discarded: raw input from the mouse stopped or started while it was taken (unplugged, its link dropped out, or another input was chosen), so it was not measured throughout. Take another sample."
+                } else {
+                    "Last sample discarded: a mouse button was pressed or released while recording, so the hand was on the mouse. Take another sample."
+                })
                 .color(egui::Color32::LIGHT_RED),
             );
         }
@@ -275,6 +280,16 @@ impl JitterPanel {
         if !self.is_sampling {
             return;
         }
+        // Raw counts and pointer points cannot be mixed in one sample, and a
+        // mouse that stopped delivering raw input was not watched: a quiet
+        // sample would read as a still sensor.
+        if has_bridge != self.current_raw {
+            self.is_sampling = false;
+            self.sample_start = None;
+            self.last_discarded = true;
+            self.discarded_for_input = true;
+            return;
+        }
         if has_bridge {
             self.record_raw(raw_events);
         } else if self
@@ -373,6 +388,7 @@ impl JitterPanel {
         self.accumulated_pos = (0.0, 0.0);
         self.touched = false;
         self.last_discarded = false;
+        self.discarded_for_input = false;
         self.current_raw = raw;
     }
 
@@ -553,6 +569,30 @@ mod tests {
         p.process_frame(&ctx, &drift, true, start + Duration::from_millis(7_000));
         p.process_frame(&ctx, &[], true, start + Duration::from_secs(20));
         assert_ne!(p.export().unwrap().rating, "Excellent");
+    }
+
+    #[test]
+    fn a_sample_whose_input_changes_is_discarded() {
+        // The mouse is unplugged during a raw sample: the frames after it
+        // saw nothing and must not make an Excellent sample
+        let ctx = egui::Context::default();
+        let mut p = JitterPanel::new();
+        let start = Instant::now();
+        p.start_sample_at(start, true);
+        p.process_frame(&ctx, &[], true, start + Duration::from_millis(2_500));
+        p.process_frame(&ctx, &[], false, start + Duration::from_millis(3_000));
+        p.process_frame(&ctx, &[], false, start + Duration::from_secs(20));
+        assert!(!p.is_running());
+        assert!(p.export().is_none());
+        assert!(p.last_discarded && p.discarded_for_input);
+
+        // A device claimed during a pointer sample: its counts are no points
+        p.start_sample_at(start, false);
+        assert!(!p.discarded_for_input);
+        let drift = [at(start, 2_500, mv(3, 2))];
+        p.process_frame(&ctx, &drift, true, start + Duration::from_millis(2_600));
+        p.process_frame(&ctx, &[], true, start + Duration::from_secs(20));
+        assert!(p.export().is_none());
     }
 
     #[test]
