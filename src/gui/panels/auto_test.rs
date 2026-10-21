@@ -26,11 +26,36 @@ pub struct AutoTestPanel {
     epoch: Instant,
     /// Whether the last run used precise raw-input timestamps.
     last_run_raw: bool,
+    /// The run's raw input went away for a while (device unplugged or
+    /// reconnecting): input in that time was not measured.
+    raw_lost: bool,
     show_metrics: bool,
     /// Framework input: partial wheel movement not yet worth a notch.
     wheel: WheelAccumulator,
     /// The mouse's DPI for the lift step, if the user set it (`Config::dpi`).
     dpi: Option<f64>,
+}
+
+/// Which input feeds the engine this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputPath {
+    Raw,
+    Framework,
+    /// Nothing: a raw-input run whose device is gone. Frame-stamped pointer
+    /// input would be judged with device-timing rules (16 ms frames read as
+    /// stutters, a press and release in one frame as bounce).
+    Neither,
+}
+
+/// The input path for a run that started with (`run_raw`) or without raw
+/// input, when raw input is `has_bridge` now. A run keeps the kind of input
+/// it started with.
+fn input_path(run_raw: bool, has_bridge: bool) -> InputPath {
+    match (run_raw, has_bridge) {
+        (true, true) => InputPath::Raw,
+        (true, false) => InputPath::Neither,
+        (false, _) => InputPath::Framework,
+    }
 }
 
 /// Turns window-system wheel deltas into whole notches.
@@ -132,6 +157,7 @@ impl AutoTestPanel {
             engine: AutoTest::new(Config::default()),
             epoch: Instant::now(),
             last_run_raw: true,
+            raw_lost: false,
             show_metrics: false,
             wheel: WheelAccumulator::for_platform(),
             dpi: None,
@@ -167,12 +193,16 @@ impl AutoTestPanel {
         if !self.engine.is_running() {
             return;
         }
-        if has_bridge {
+        let path = input_path(self.last_run_raw, has_bridge);
+        if path == InputPath::Neither {
+            self.raw_lost = true;
+        }
+        if path == InputPath::Raw {
             for ev in raw_events {
                 let t = self.secs(ev.timestamp);
                 self.engine.feed(t, &to_lib_event(&ev.kind));
             }
-        } else {
+        } else if path == InputPath::Framework {
             // Framework fallback: frame-quantised timing, no per-report data.
             let now = self.secs(Instant::now());
             let (delta, events) = ctx.input(|i| (i.pointer.delta(), i.raw.events.clone()));
@@ -226,6 +256,7 @@ impl AutoTestPanel {
             ..Config::default()
         });
         self.last_run_raw = has_bridge;
+        self.raw_lost = false;
         self.wheel = WheelAccumulator::for_platform();
         self.engine.start(self.secs(Instant::now()));
     }
@@ -510,6 +541,15 @@ impl AutoTestPanel {
                     note.push_str(" — framework input");
                 }
                 ui.label(egui::RichText::new(note).weak());
+                if self.raw_lost {
+                    ui.label(
+                        egui::RichText::new(
+                            "Raw input from the mouse was lost during the run (unplugged or reconnecting): input in that time was not measured. If you did not unplug it, the connection is dropping out.",
+                        )
+                        .color(egui::Color32::YELLOW)
+                        .size(12.0),
+                    );
+                }
                 if !report.timing_reliable {
                     ui.label(
                         egui::RichText::new(
@@ -696,6 +736,31 @@ impl AutoTestPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_keeps_the_input_it_started_with() {
+        assert_eq!(input_path(true, true), InputPath::Raw);
+        // The mouse reconnecting mid-run: frame-timed pointer input must not
+        // reach an engine that judges device timing
+        assert_eq!(input_path(true, false), InputPath::Neither);
+        // A device claimed during a framework run: its counts are not the
+        // pointer units the run measures
+        assert_eq!(input_path(false, true), InputPath::Framework);
+        assert_eq!(input_path(false, false), InputPath::Framework);
+    }
+
+    #[test]
+    fn losing_raw_input_mid_run_is_noted_and_feeds_nothing() {
+        let ctx = egui::Context::default();
+        let mut panel = AutoTestPanel::new();
+        panel.start_for_test(true);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            panel.process_input(&c, &[], false);
+        });
+        assert!(panel.raw_lost);
+        assert!(panel.engine.findings_so_far().is_empty());
+    }
     use egui::MouseWheelUnit::{Line, Page, Point};
 
     fn run_frame(
