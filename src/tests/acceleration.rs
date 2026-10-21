@@ -347,7 +347,8 @@ mod tests {
         let s = pass.sample().unwrap();
         assert!((s.counts - 800.0).abs() < 25.0, "{}", s.counts);
         assert!((s.secs - 0.995).abs() < 1e-6, "{}", s.secs);
-        // Counting everything would double the counts and halve the speed
+        // Counting everything would double the counts and add the return
+        // trip and the rest to the time
         let all: f64 = pass
             .reports
             .iter()

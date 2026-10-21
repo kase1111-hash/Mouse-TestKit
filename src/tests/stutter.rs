@@ -152,7 +152,7 @@ fn print_summary(detector: &StutterDetector) {
         );
     }
     println!(
-        "(A stutter is a report more than {:.1}x the median interval late, and at least {:.1} ms.)",
+        "(A stutter is a gap between reports during fast movement longer than {:.1}x the median interval and longer than {:.1} ms.)",
         DEFAULT_STUTTER_MULTIPLIER, MIN_STUTTER_GAP_MS
     );
 }
