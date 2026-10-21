@@ -208,7 +208,14 @@ pub fn run() -> TestOutcome {
         println!("Distance used: {}", distance_label);
         println!("Samples taken: {}\n", samples.len());
 
+        // The verdict uses the median: one sample where the mouse was lifted
+        // or started off the mark must not drag an accurate result off.
+        let typical_dpi = median(&dpis);
+        let spread = spread_pct(&dpis);
+        let disagree = spread > spread_limit_pct(distance_mm);
+
         println!("Results:");
+        println!("  Median measured DPI:  {:.0}", typical_dpi);
         println!("  Average measured DPI: {:.0}", avg_dpi);
         println!(
             "  DPI range: {:.0} - {:.0}",
@@ -217,8 +224,8 @@ pub fn run() -> TestOutcome {
         );
         println!("  Average accuracy: {:.1}%", avg_accuracy);
 
-        let deviation = ((avg_dpi - expected_dpi) / expected_dpi * 100.0).abs();
-        println!("  Deviation from expected: {:.1}%", deviation);
+        let deviation = ((typical_dpi - expected_dpi) / expected_dpi * 100.0).abs();
+        println!("  Deviation of the median from expected: {:.1}%", deviation);
 
         println!("\nSamples:");
         for (i, sample) in samples.iter().enumerate() {
@@ -232,9 +239,25 @@ pub fn run() -> TestOutcome {
             );
         }
 
-        let (outcome, message) = verdict(deviation, distance_mm);
+        let (outcome, message) = if disagree && samples.len() < 3 {
+            (
+                TestOutcome::Inconclusive,
+                format!(
+                    "? The samples differ by {:.0}%, more than hand placement explains - one was\n  probably lifted or started off the mark. Take 3 or more samples.",
+                    spread
+                ),
+            )
+        } else {
+            verdict(deviation, distance_mm)
+        };
         println!("\n{}", message);
-        if samples.len() < 3 {
+        if disagree && samples.len() >= 3 {
+            println!(
+                "Note: the samples differ by {:.0}% - at least one was probably lifted or started",
+                spread
+            );
+            println!("off the mark. The median above is not thrown off by a single odd sample.");
+        } else if samples.len() < 3 {
             println!("Take 3 or more samples to average out hand placement.");
         }
         outcome
@@ -280,9 +303,15 @@ fn moves(events: Vec<input::TimedEvent>) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Parse a DPI value typed by the user. Accepts 50 to 100000.
+/// Parse a DPI value typed by the user, e.g. "1600" or "1600 DPI" (CPI is
+/// accepted too). Accepts 50 to 100000.
 pub fn parse_dpi(input: &str) -> Option<f64> {
-    let dpi: f64 = input.trim().parse().ok()?;
+    let s = input.trim().to_ascii_lowercase();
+    let number = s
+        .strip_suffix("dpi")
+        .or_else(|| s.strip_suffix("cpi"))
+        .unwrap_or(&s);
+    let dpi: f64 = number.trim().parse().ok()?;
     (50.0..=100_000.0).contains(&dpi).then_some(dpi)
 }
 
@@ -330,7 +359,30 @@ pub fn dpi_from_counts(counts: f64, distance_mm: f64) -> f64 {
     counts / (distance_mm / MM_PER_INCH)
 }
 
-/// Verdict for an average deviation (percent) measured over `distance_mm`.
+/// Median of values sorted ascending (0 when empty).
+fn median(sorted: &[f64]) -> f64 {
+    match sorted.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => sorted[n / 2],
+        n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
+    }
+}
+
+/// Spread of the measured DPIs (sorted ascending), in percent of the median.
+fn spread_pct(sorted: &[f64]) -> f64 {
+    match (sorted.first(), sorted.last()) {
+        (Some(lo), Some(hi)) if median(sorted) > 0.0 => (hi - lo) / median(sorted) * 100.0,
+        _ => 0.0,
+    }
+}
+
+/// Largest spread between samples that hand placement explains: each sample
+/// can be off by the placement error, in opposite directions.
+fn spread_limit_pct(distance_mm: f64) -> f64 {
+    ACCURATE_PCT.max(2.0 * PLACEMENT_ERROR_MM / distance_mm * 100.0)
+}
+
+/// Verdict for a deviation (percent) of the median measured over `distance_mm`.
 pub fn verdict(deviation_pct: f64, distance_mm: f64) -> (TestOutcome, String) {
     let placement_pct = PLACEMENT_ERROR_MM / distance_mm * 100.0;
     if deviation_pct < ACCURATE_PCT {
@@ -423,6 +475,11 @@ mod tests {
     #[test]
     fn test_parse_dpi() {
         assert_eq!(parse_dpi("1600\n"), Some(1600.0));
+        // Typing the unit is natural and must not fall back to 800.
+        assert_eq!(parse_dpi("1600 DPI\n"), Some(1600.0));
+        assert_eq!(parse_dpi("3200dpi"), Some(3200.0));
+        assert_eq!(parse_dpi("400 cpi"), Some(400.0));
+        assert_eq!(parse_dpi("dpi"), None);
         assert_eq!(parse_dpi("0"), None);
         assert_eq!(parse_dpi("-800"), None);
         assert_eq!(parse_dpi("lots"), None);
@@ -468,6 +525,37 @@ mod tests {
     fn test_wrong_dpi_is_flagged() {
         assert_eq!(verdict(25.0, 100.0).0, TestOutcome::IssueFound);
         assert_eq!(verdict(25.0, MM_PER_INCH).0, TestOutcome::IssueFound);
+    }
+
+    #[test]
+    fn test_one_lifted_sample_does_not_fail_an_accurate_mouse() {
+        // 800 DPI, 10 cm: two good samples and one where the mouse was
+        // lifted near the end. The average (742) reads 7% low - "minor
+        // deviation" - but the median is within 2%.
+        let mut dpis = vec![795.0, 640.0, 790.0];
+        dpis.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let avg = dpis.iter().sum::<f64>() / 3.0;
+        assert_eq!(
+            verdict((avg - 800.0f64).abs() / 8.0, 100.0).0,
+            TestOutcome::PossibleIssue
+        );
+        let typical = median(&dpis);
+        assert_eq!(typical, 790.0);
+        assert_eq!(
+            verdict((typical - 800.0f64).abs() / 8.0, 100.0).0,
+            TestOutcome::NoIssues
+        );
+        assert!(spread_pct(&dpis) > spread_limit_pct(100.0));
+    }
+
+    #[test]
+    fn test_consistent_samples_do_not_disagree() {
+        // 1 mm placement error either way over 10 cm: 2% spread is normal.
+        let dpis = [784.0, 792.0, 800.0];
+        assert!(spread_pct(&dpis) < spread_limit_pct(100.0));
+        // Over one inch, placement alone can spread samples by ~16%.
+        let dpis = [740.0, 800.0, 850.0];
+        assert!(spread_pct(&dpis) < spread_limit_pct(MM_PER_INCH));
     }
 
     #[test]

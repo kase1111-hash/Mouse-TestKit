@@ -9,8 +9,12 @@
 //! burst is summed, and the furthest the cursor got from where the burst
 //! started is compared with [`JUMP_THRESHOLD_MM`], converted to counts with
 //! the mouse's DPI so the verdict does not depend on the DPI setting.
-//! A burst still going after [`MAX_LIFT_BURST_MS`] is the hand sliding the
-//! mouse, not a lift, and is not judged.
+//! A burst that keeps moving the mouse by more than [`SLIDE_AFTER_MM`] after
+//! that window is the hand sliding the mouse, not a lift, and is not judged;
+//! a jump followed by a small re-grip still counts.
+//!
+//! A clean lift produces no motion at all, so the user presses SPACE after
+//! each lift: without enough recorded lifts, "no jumps" is not a verdict.
 
 use super::standard::TestOutcome;
 use crate::terminal;
@@ -31,8 +35,11 @@ pub const IDLE_THRESHOLD_MS: u64 = 100;
 /// Lifting or setting down takes the sensor through its 1-2 mm focus range
 /// in a few tens of ms, so a lift artefact is over within this window.
 pub const JUMP_WINDOW_MS: f64 = 100.0;
-/// Motion still going this long after it started is a deliberate slide.
-pub const MAX_LIFT_BURST_MS: f64 = 200.0;
+/// A burst that moves the mouse further than this (path length) after
+/// [`JUMP_WINDOW_MS`] is a deliberate slide. Judging by how much motion
+/// follows, rather than by how long the burst lasts, keeps a set-down jump
+/// that runs into a small re-grip of the hand from being dismissed.
+pub const SLIDE_AFTER_MM: f64 = 2.0;
 /// A lift or set-down that moves the cursor further than this is a jump.
 /// Lifting straight up or setting down usually moves the mouse sideways by
 /// well under a millimetre; 2 mm is ~63 counts at 800 DPI, a clearly visible
@@ -47,6 +54,8 @@ pub const STILL_MM: f64 = 0.25;
 pub const DEFAULT_DPI: f64 = 800.0;
 /// Two or more jumps are a pattern; a single one may be a hand slip.
 const CONFIRMED_JUMPS: usize = 2;
+/// Lifts (SPACE presses) needed before "no jumps" counts as a clean result.
+pub const MIN_LIFTS: usize = 5;
 
 const MM_PER_INCH: f64 = 25.4;
 
@@ -65,22 +74,26 @@ pub fn run() -> TestOutcome {
     println!("  1. Rest the mouse on the pad and keep it still");
     println!("  2. Lift it straight up about 1 cm, hold it there a moment,");
     println!("     then set it straight back down - try not to slide it");
-    println!("  3. Wait about a second and repeat 5-10 times");
-    println!("  4. Press 'q' when done\n");
+    println!("  3. Press SPACE (with your other hand) after each lift and set-down,");
+    println!("     so the test knows how many lifts you made");
+    println!(
+        "  4. Wait about a second and repeat - at least {} times - then press 'q'\n",
+        MIN_LIFTS
+    );
 
     print!("Enter your mouse's DPI so jumps can be measured in mm [Enter = 800]: ");
     io::stdout().flush().ok();
     let mut dpi_input = String::new();
     io::stdin().read_line(&mut dpi_input).ok();
-    let dpi = match super::dpi::parse_dpi(&dpi_input) {
-        Some(d) => d,
+    let (dpi, dpi_note) = match super::dpi::parse_dpi(&dpi_input) {
+        Some(d) => (d, ""),
         None => {
             println!(
                 "Assuming {:.0} DPI. If your mouse is set differently, the distances below",
                 DEFAULT_DPI
             );
             println!("are off by the same factor.");
-            DEFAULT_DPI
+            (DEFAULT_DPI, " (assumed)")
         }
     };
     println!(
@@ -107,11 +120,12 @@ pub fn run() -> TestOutcome {
     let mut jumps: Vec<Burst> = Vec::new();
     let mut slides: Vec<Burst> = Vec::new();
     let mut largest_mm = 0.0f64;
+    let mut lifts = 0usize;
     let mut last_print = Instant::now();
 
     let _guard = terminal::TerminalGuard::new();
 
-    println!("\nMonitoring... (press 'q' to quit)\n");
+    println!("\nMonitoring... (SPACE after each lift, 'q' to finish)\n");
 
     let handle = |burst: Burst,
                   jumps: &mut Vec<Burst>,
@@ -123,10 +137,7 @@ pub fn run() -> TestOutcome {
                 *largest_mm = largest_mm.max(mm);
                 println!(
                     "\r\x1B[K⚠ JUMP: cursor moved {:.1} mm (dx {:+}, dy {:+} counts) within {:.0} ms",
-                    mm,
-                    burst.peak_dx,
-                    burst.peak_dy,
-                    burst.duration_ms.min(JUMP_WINDOW_MS)
+                    mm, burst.peak_dx, burst.peak_dy, burst.peak_ms
                 );
                 jumps.push(burst);
             }
@@ -144,12 +155,19 @@ pub fn run() -> TestOutcome {
     loop {
         if event::poll(Duration::from_millis(1)).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
-                code: KeyCode::Char('q'),
+                code,
                 kind: KeyEventKind::Press,
                 ..
             })) = event::read()
             {
-                break;
+                match code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char(' ') => {
+                        lifts += 1;
+                        println!("\r\x1B[K  Lift {} recorded", lifts);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -166,6 +184,7 @@ pub fn run() -> TestOutcome {
 
         if last_print.elapsed() >= Duration::from_millis(200) {
             print!("\r\x1B[K");
+            print!("Lifts: {} | ", lifts);
             print!("Jumps: {} | ", jumps.len());
             print!("Largest lift/set-down motion: {:.1} mm | ", largest_mm);
             print!("Slides ignored: {} | ", slides.len());
@@ -192,11 +211,13 @@ pub fn run() -> TestOutcome {
 
     println!("\n\n=== Lift-Off Jump Test Complete ===\n");
     println!(
-        "DPI used: {:.0} | jump threshold: {:.1} mm ({:.0} counts)",
+        "DPI used: {:.0}{} | jump threshold: {:.1} mm ({:.0} counts)",
         dpi,
+        dpi_note,
         JUMP_THRESHOLD_MM,
         mm_to_counts(JUMP_THRESHOLD_MM, dpi)
     );
+    println!("Lifts recorded: {}", lifts);
     println!("Total jumps detected: {}", jumps.len());
 
     if !jumps.is_empty() {
@@ -223,23 +244,11 @@ pub fn run() -> TestOutcome {
         }
     }
 
-    let outcome = if jumps.len() >= CONFIRMED_JUMPS {
-        println!("\n⚠ The cursor jumps when the mouse is lifted or set down.");
-        println!("  Likely causes:");
-        println!("  - High lift-off distance (LOD) setting - lower it in the mouse software");
-        println!("  - Sensor tracking issues");
-        println!("  - Surface compatibility problems");
-        TestOutcome::IssueFound
-    } else if jumps.len() == 1 {
-        println!("\n⚠ One jump. A single jump is often the hand sliding the mouse on set-down;");
-        println!("  repeat the test - a second jump points to a high lift-off distance.");
-        TestOutcome::PossibleIssue
-    } else {
-        println!("\n✓ No jumps detected. Lift-off behavior appears normal.");
-        println!("  (A clean lift produces little or no motion at all, so make sure you");
-        println!("  actually lifted the mouse several times.)");
-        TestOutcome::NoIssues
-    };
+    let (outcome, lines) = verdict(jumps.len(), lifts);
+    println!();
+    for line in lines {
+        println!("{}", line);
+    }
 
     if !slides.is_empty() {
         println!(
@@ -254,6 +263,55 @@ pub fn run() -> TestOutcome {
     outcome
 }
 
+/// Overall verdict for `jumps` found over `lifts` recorded lifts.
+pub fn verdict(jumps: usize, lifts: usize) -> (TestOutcome, Vec<String>) {
+    let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+    if jumps >= CONFIRMED_JUMPS {
+        (
+            TestOutcome::IssueFound,
+            lines(&[
+                "⚠ The cursor jumps when the mouse is lifted or set down.",
+                "  Likely causes:",
+                "  - High lift-off distance (LOD) setting - lower it in the mouse software",
+                "  - Sensor tracking issues",
+                "  - Surface compatibility problems",
+            ]),
+        )
+    } else if jumps == 1 {
+        (
+            TestOutcome::PossibleIssue,
+            lines(&[
+                "⚠ One jump. A single jump is often the hand sliding the mouse on set-down;",
+                "  repeat the test - a second jump points to a high lift-off distance.",
+            ]),
+        )
+    } else if lifts < MIN_LIFTS {
+        // A clean lift produces no motion, so "no jumps" only means
+        // something once the user has actually lifted the mouse.
+        (
+            TestOutcome::Inconclusive,
+            vec![
+                format!(
+                    "? Inconclusive - no jumps, but only {} lift(s) were recorded.",
+                    lifts
+                ),
+                format!(
+                    "  Lift and set down the mouse at least {} times, pressing SPACE after each.",
+                    MIN_LIFTS
+                ),
+            ],
+        )
+    } else {
+        (
+            TestOutcome::NoIssues,
+            vec![format!(
+                "✓ No jumps in {} lifts. Lift-off behavior appears normal.",
+                lifts
+            )],
+        )
+    }
+}
+
 /// Motion that started after the mouse had been still.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Burst {
@@ -262,6 +320,10 @@ pub struct Burst {
     pub peak_dy: i64,
     /// That furthest distance, in counts.
     pub peak_counts: f64,
+    /// Time from the start of the burst to that furthest point (ms).
+    pub peak_ms: f64,
+    /// Path length moved after the jump window (counts).
+    pub after_window_counts: f64,
     /// Time from when the motion began to its last report (ms).
     pub duration_ms: f64,
 }
@@ -273,13 +335,13 @@ pub enum BurstKind {
     Jump,
     /// Short burst within the threshold: a clean lift or set-down.
     Quiet,
-    /// Kept going: the hand slid the mouse.
+    /// Kept moving the mouse after the window: the hand slid it.
     Slide,
 }
 
 impl Burst {
     pub fn classify(&self, dpi: f64) -> BurstKind {
-        if self.duration_ms > MAX_LIFT_BURST_MS {
+        if self.after_window_counts > mm_to_counts(SLIDE_AFTER_MM, dpi) {
             BurstKind::Slide
         } else if self.peak_counts > mm_to_counts(JUMP_THRESHOLD_MM, dpi) {
             BurstKind::Jump
@@ -295,7 +357,10 @@ struct OpenBurst {
     last: f64,
     x: i64,
     y: i64,
-    peak: (i64, i64, f64),
+    /// Furthest point: (dx, dy, distance, seconds after start).
+    peak: (i64, i64, f64, f64),
+    /// Path length after the jump window.
+    after_window: f64,
 }
 
 impl OpenBurst {
@@ -304,6 +369,8 @@ impl OpenBurst {
             peak_dx: self.peak.0,
             peak_dy: self.peak.1,
             peak_counts: self.peak.2,
+            peak_ms: self.peak.3 * 1000.0,
+            after_window_counts: self.after_window,
             duration_ms: (self.last - self.start) * 1000.0,
         }
     }
@@ -387,7 +454,8 @@ impl LiftDetector {
                         last: t,
                         x,
                         y,
-                        peak: (x, y, (x as f64).hypot(y as f64)),
+                        peak: (x, y, (x as f64).hypot(y as f64), 0.0),
+                        after_window: 0.0,
                     });
                 }
             }
@@ -397,8 +465,10 @@ impl LiftDetector {
                     b.y += dy as i64;
                     let d = (b.x as f64).hypot(b.y as f64);
                     if d > b.peak.2 {
-                        b.peak = (b.x, b.y, d);
+                        b.peak = (b.x, b.y, d, t - b.start);
                     }
+                } else {
+                    b.after_window += (dx as f64).hypot(dy as f64);
                 }
                 b.last = t;
             }
@@ -565,6 +635,50 @@ mod tests {
             kinds(&bursts, dpi),
             vec![BurstKind::Jump, BurstKind::Jump, BurstKind::Jump]
         );
+    }
+
+    #[test]
+    fn test_jump_followed_by_regrip_is_still_a_jump() {
+        // 1600 DPI: a 4 mm set-down jump in 30 ms, then the hand re-grips
+        // the mouse (about 1 mm over 150 ms) before it has been still for a
+        // whole idle window. The burst lasts over 200 ms, which a
+        // duration-based slide rule dismissed as "sliding".
+        let dpi = 1600.0;
+        let mut det = LiftDetector::new(dpi);
+        let mut reports: Vec<(f64, i32, i32)> = (0..30).map(|i| (500.0 + i as f64, 8, 1)).collect();
+        reports.extend((0..30).map(|i| (580.0 + i as f64 * 5.0, 2, 1)));
+        let bursts = run(&mut det, &reports);
+        assert_eq!(bursts.len(), 1, "{:?}", bursts);
+        assert!(bursts[0].duration_ms > 200.0, "{:?}", bursts);
+        assert_eq!(bursts[0].classify(dpi), BurstKind::Jump, "{:?}", bursts);
+        assert!(bursts[0].peak_ms < JUMP_WINDOW_MS, "{:?}", bursts);
+    }
+
+    #[test]
+    fn test_short_fast_slide_is_not_a_jump() {
+        // 800 DPI: the hand pushes the mouse about 14 mm in 150 ms. It is
+        // still moving fast after the first 100 ms (5 mm more), so it is a
+        // slide even though it is over quickly; a duration-based rule called
+        // it a 9 mm jump.
+        let dpi = 800.0;
+        let mut det = LiftDetector::new(dpi);
+        let reports: Vec<(f64, i32, i32)> = (0..150)
+            .map(|i| (300.0 + i as f64, if i < 50 { 1 } else { 4 }, 0))
+            .collect();
+        let bursts = run(&mut det, &reports);
+        assert_eq!(kinds(&bursts, dpi), vec![BurstKind::Slide], "{:?}", bursts);
+    }
+
+    #[test]
+    fn test_verdict_needs_lifts_before_calling_it_clean() {
+        // Quitting at once, or never pressing SPACE, is not a clean result.
+        assert_eq!(verdict(0, 0).0, TestOutcome::Inconclusive);
+        assert_eq!(verdict(0, MIN_LIFTS - 1).0, TestOutcome::Inconclusive);
+        assert_eq!(verdict(0, MIN_LIFTS).0, TestOutcome::NoIssues);
+        // Jumps are evidence whether or not lifts were counted.
+        assert_eq!(verdict(1, 0).0, TestOutcome::PossibleIssue);
+        assert_eq!(verdict(2, 0).0, TestOutcome::IssueFound);
+        assert_eq!(verdict(3, 8).0, TestOutcome::IssueFound);
     }
 
     #[test]
