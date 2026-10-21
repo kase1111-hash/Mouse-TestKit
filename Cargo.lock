@@ -1477,6 +1477,7 @@ dependencies = [
  "eframe",
  "egui_plot",
  "evdev",
+ "libc",
  "raw-window-handle",
  "rfd",
  "serde",

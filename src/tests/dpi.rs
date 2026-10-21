@@ -7,7 +7,7 @@
 //! slanted (or vertical) move measures correctly. A longer distance shrinks
 //! the effect of placing the mouse a millimetre off at either end.
 
-use super::standard::TestOutcome;
+use super::standard::{self, TestOutcome};
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use mouse_testkit::analysis::dpi::SETUP_ERROR_FRACTION;
@@ -107,6 +107,7 @@ pub fn run() -> TestOutcome {
     let mut counting = false;
     let (mut total_x, mut total_y) = (0i64, 0i64);
     let mut last_print = Instant::now();
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
@@ -129,7 +130,20 @@ pub fn run() -> TestOutcome {
     say("");
 
     loop {
-        for (dx, dy) in drain_moves(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            if counting {
+                say("The mouse stopped responding - this sample was cancelled.");
+            }
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data && counting {
+            // Dropped reports took their counts with them
+            counting = false;
+            say("Some movement was lost (the computer fell behind reading the mouse), so this");
+            say("sample was cancelled. Put the mouse on the start mark and press SPACE.");
+        }
+        for (dx, dy) in moves(batch.events) {
             if counting {
                 total_x += dx as i64;
                 total_y += dy as i64;
@@ -289,15 +303,24 @@ pub fn run() -> TestOutcome {
         println!("No samples recorded.");
         TestOutcome::Inconclusive
     };
+    let outcome = if device_lost {
+        standard::after_device_lost(outcome)
+    } else {
+        outcome
+    };
 
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     outcome
 }
 
-/// The key just pressed, if any. Windows also reports key releases; those
-/// are skipped, or releasing SPACE would stop the sample it just started.
+/// The key just pressed, if any (without waiting: the loop waits on the
+/// mouse). Windows also reports key releases; those are skipped, or
+/// releasing SPACE would stop the sample it just started.
 fn poll_key_press() -> Option<KeyCode> {
-    if !event::poll(Duration::from_millis(1)).unwrap_or(false) {
+    if !event::poll(Duration::ZERO).unwrap_or(false) {
         return None;
     }
     match event::read() {
@@ -306,17 +329,7 @@ fn poll_key_press() -> Option<KeyCode> {
     }
 }
 
-/// Read pending motion as (dx, dy) per report.
-#[cfg(target_os = "linux")]
-fn drain_moves(device: &mut evdev::Device) -> Vec<(i32, i32)> {
-    moves(input::fetch_timed_events(device))
-}
-
-#[cfg(target_os = "windows")]
-fn drain_moves(device: &mut input::MouseDevice) -> Vec<(i32, i32)> {
-    moves(input::fetch_timed_events(device))
-}
-
+/// Motion as (dx, dy) per report.
 fn moves(events: Vec<input::TimedEvent>) -> Vec<(i32, i32)> {
     events
         .into_iter()

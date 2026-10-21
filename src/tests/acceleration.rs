@@ -56,6 +56,7 @@ pub fn run() -> bool {
     let mut fast_samples: Vec<AccelSample> = Vec::new();
     let mut last_print = Instant::now();
     let mut recording_slow = true;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
@@ -63,7 +64,8 @@ pub fn run() -> bool {
     println!("Press SPACE to record, 'r' to reset, 'q' to finish.\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Some(code) = event::read().ok().and_then(|e| pressed_key(&e)) {
                 match code {
                     KeyCode::Char('q') => break,
@@ -110,7 +112,18 @@ pub fn run() -> bool {
 
         // One Move per report, stamped when the device sent it, so the pass
         // duration is first to last movement (not until SPACE is pressed).
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data && pass.counts() > 0.0 {
+            // Dropped reports took their counts with them
+            pass = Pass::default();
+            println!(
+                "\r\x1B[KSome movement was lost (the computer fell behind) - repeat this pass."
+            );
+        }
+        for timed in batch.events {
             if let MouseEvent::Move { dx, dy } = timed.event {
                 pass.add(timed.time, dx, dy);
             }
@@ -212,6 +225,9 @@ pub fn run() -> bool {
         );
     }
 
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     true
 }

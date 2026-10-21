@@ -11,36 +11,45 @@
 //!
 //! Uses a background thread with a hidden window to receive WM_INPUT messages.
 //! Events are sent via an mpsc channel to the main thread for processing.
+//! The thread ends when the mouse is removed (`WM_INPUT_DEVICE_CHANGE`) or
+//! reading fails; the closed channel then tells the test the mouse is gone.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::ptr;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winapi::shared::hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
 use winapi::shared::minwindef::UINT;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use winapi::um::winuser::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetRawInputData,
-    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HRAWINPUT, MSG, RAWINPUT,
-    RAWINPUTHEADER, RID_INPUT, WM_INPUT, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GIDC_REMOVAL, HRAWINPUT, MSG,
+    RAWINPUT, RAWINPUTHEADER, RID_INPUT, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW,
 };
 use winapi::um::winuser::{
     GetRawInputDeviceInfoW, GetRawInputDeviceList, RegisterRawInputDevices, RAWINPUTDEVICE,
-    RAWINPUTDEVICELIST, RIDEV_INPUTSINK, RIDI_DEVICENAME, RIM_TYPEMOUSE,
+    RAWINPUTDEVICELIST, RIDEV_DEVNOTIFY, RIDEV_INPUTSINK, RIDI_DEVICENAME, RIM_TYPEMOUSE,
 };
 
 /// `RAWMOUSE::usFlags` bit for absolute coordinates.
 const MOUSE_MOVE_ABSOLUTE: u16 = 0x0001;
 
 // Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
+pub use mouse_testkit::types::{DeviceLost, InputBatch, MouseButton, MouseEvent, TimedEvent};
 
 /// A selected mouse on Windows: its reports arrive from the raw-input thread
-/// started by [`select_mouse`].
+/// started by [`select_mouse`]. Read it with [`read_events`].
 pub struct MouseDevice {
     receiver: Receiver<RawMouseData>,
+    /// Reports received while waiting and not yet returned.
+    pending: VecDeque<RawMouseData>,
+    /// The raw-input thread has ended: the mouse was removed or reading
+    /// failed.
+    gone: bool,
     /// Wheel movement not yet adding up to a whole notch (high-resolution
     /// wheels report fractions of `WHEEL_DELTA`).
     wheel_remainder: i32,
@@ -77,12 +86,26 @@ const RI_MOUSE_WHEEL: u16 = 0x0400;
 const WHEEL_DELTA: i32 = 120;
 
 impl MouseDevice {
-    /// Fetch pending events (non-blocking), each stamped with the time the
-    /// raw-input thread received it.
-    pub fn fetch_timed_events(&mut self) -> Vec<TimedEvent> {
+    /// Move everything the thread has sent into `pending`, noting when the
+    /// thread has ended.
+    fn take_sent(&mut self) {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(data) => self.pending.push_back(data),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.gone = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Turn the pending reports into events.
+    fn take_events(&mut self) -> Vec<TimedEvent> {
         let mut events = Vec::new();
 
-        while let Ok(data) = self.receiver.try_recv() {
+        while let Some(data) = self.pending.pop_front() {
             let mut push = |event| {
                 events.push(TimedEvent {
                     time: data.time,
@@ -120,10 +143,47 @@ impl MouseDevice {
 
         events
     }
+
+    /// Fetch pending events (non-blocking), each stamped with the time the
+    /// raw-input thread received it. Prefer [`read_events`]: here a removed
+    /// mouse only shows as missing events.
+    #[allow(dead_code)]
+    pub fn fetch_timed_events(&mut self) -> Vec<TimedEvent> {
+        self.take_sent();
+        self.take_events()
+    }
+}
+
+/// Read the mouse: wait up to `wait` for input (not at all when some is
+/// already pending), then return everything pending, each event stamped
+/// with the time the raw-input thread received it (same signature as the
+/// Linux `input::read_events`, so CLI tests need no `cfg`).
+///
+/// The raw-input thread drains Windows' queue as reports arrive, so no
+/// batch has `lost_data`. Returns [`DeviceLost`] once the mouse was removed
+/// (or the thread failed) and everything received before was returned.
+pub fn read_events(device: &mut MouseDevice, wait: Duration) -> Result<InputBatch, DeviceLost> {
+    device.take_sent();
+    if device.pending.is_empty() && !device.gone && !wait.is_zero() {
+        match device.receiver.recv_timeout(wait) {
+            Ok(data) => device.pending.push_back(data),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => device.gone = true,
+        }
+        device.take_sent();
+    }
+    if device.pending.is_empty() && device.gone {
+        return Err(DeviceLost);
+    }
+    Ok(InputBatch {
+        events: device.take_events(),
+        lost_data: false,
+    })
 }
 
 /// Fetch pending events with the time each was received (same signature as
-/// the Linux `input::fetch_timed_events`, so CLI tests need no `cfg`).
+/// the Linux `input::fetch_timed_events`). Prefer [`read_events`].
+#[allow(dead_code)]
 pub fn fetch_timed_events(device: &mut MouseDevice) -> Vec<TimedEvent> {
     device.fetch_timed_events()
 }
@@ -204,13 +264,18 @@ pub fn find_mouse_devices() -> Vec<MouseDeviceInfo> {
 
 /// Extract a user-friendly name from the device path
 fn extract_friendly_name(path: &str) -> String {
-    // Windows device paths look like: \\?\HID#VID_046D&PID_C52B#...
-    // Try to extract VID/PID for identification
+    // Windows device paths look like:
+    // \\?\HID#VID_046D&PID_C52B&MI_00#7&2a1b3c&0&0000#{...}
+    // VID/PID identify the model; the instance ID after it tells two units
+    // of the same model apart (it depends on the port they are plugged in).
     if let Some(hid_start) = path.find("HID#") {
         let remainder = &path[hid_start + 4..];
-        if let Some(hash_pos) = remainder.find('#') {
-            let vid_pid = &remainder[..hash_pos];
-            return format!("Mouse ({})", vid_pid.replace('&', " "));
+        if let Some((vid_pid, rest)) = remainder.split_once('#') {
+            let vid_pid = vid_pid.replace('&', " ");
+            return match rest.split('#').next().filter(|i| !i.is_empty()) {
+                Some(instance) => format!("Mouse ({}, instance {})", vid_pid, instance),
+                None => format!("Mouse ({})", vid_pid),
+            };
         }
     }
 
@@ -284,14 +349,21 @@ pub fn select_mouse() -> Option<MouseDevice> {
 
     // Create input receiver thread
     let (sender, receiver) = mpsc::channel();
+    let (ready_sender, ready) = mpsc::channel();
     let device_handle = selected.handle;
 
     let thread_handle = thread::spawn(move || {
-        run_input_loop(sender, device_handle);
+        run_input_loop(sender, device_handle, ready_sender);
     });
+    if ready.recv() != Ok(true) {
+        eprintln!("Error: could not start reading the mouse (Raw Input registration failed).");
+        return None;
+    }
 
     Some(MouseDevice {
         receiver,
+        pending: VecDeque::new(),
+        gone: false,
         wheel_remainder: 0,
         _thread_handle: Some(thread_handle),
     })
@@ -299,8 +371,11 @@ pub fn select_mouse() -> Option<MouseDevice> {
 
 /// Run the Raw Input message loop in a background thread, forwarding reports
 /// from the device with the given raw-input handle only (Raw Input delivers
-/// every mouse and touchpad to the same window).
-fn run_input_loop(sender: Sender<RawMouseData>, device_handle: usize) {
+/// every mouse and touchpad to the same window). Reports through `ready`
+/// whether registration succeeded. Returns, closing the channel, when the
+/// device is removed, the test has dropped the receiver, or the message
+/// loop fails.
+fn run_input_loop(sender: Sender<RawMouseData>, device_handle: usize, ready: Sender<bool>) {
     unsafe {
         // Register window class
         let class_name: Vec<u16> = "MouseTrapInput\0".encode_utf16().collect();
@@ -339,21 +414,25 @@ fn run_input_loop(sender: Sender<RawMouseData>, device_handle: usize) {
 
         if hwnd.is_null() {
             eprintln!("Failed to create input window");
+            let _ = ready.send(false);
             return;
         }
 
-        // Register for raw mouse input
+        // Register for raw mouse input. DEVNOTIFY: WM_INPUT_DEVICE_CHANGE
+        // when a mouse is plugged in or removed.
         let rid = RAWINPUTDEVICE {
             usUsagePage: HID_USAGE_PAGE_GENERIC,
             usUsage: HID_USAGE_GENERIC_MOUSE,
-            dwFlags: RIDEV_INPUTSINK,
+            dwFlags: RIDEV_INPUTSINK | RIDEV_DEVNOTIFY,
             hwndTarget: hwnd,
         };
 
         if RegisterRawInputDevices(&rid, 1, mem::size_of::<RAWINPUTDEVICE>() as UINT) == 0 {
             eprintln!("Failed to register for raw input");
+            let _ = ready.send(false);
             return;
         }
+        let _ = ready.send(true);
 
         // Blocking message loop — no heartbeat or busy-wait needed.
         // GetMessageW blocks until a message arrives, yielding the CPU.
@@ -365,21 +444,30 @@ fn run_input_loop(sender: Sender<RawMouseData>, device_handle: usize) {
                 break;
             }
 
-            if msg.message == WM_INPUT {
-                process_raw_input(msg.lParam as HRAWINPUT, &sender, device_handle);
-            }
+            let keep_going = match msg.message {
+                WM_INPUT => process_raw_input(msg.lParam as HRAWINPUT, &sender, device_handle),
+                // The tested mouse was unplugged: nothing more will come
+                WM_INPUT_DEVICE_CHANGE => {
+                    !(msg.wParam as u32 == GIDC_REMOVAL && msg.lParam as usize == device_handle)
+                }
+                _ => true,
+            };
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            if !keep_going {
+                break;
+            }
         }
     }
 }
 
-/// Process a WM_INPUT message
+/// Process a WM_INPUT message. Returns `false` when the test has dropped
+/// its receiver and the thread should end.
 unsafe fn process_raw_input(
     handle: HRAWINPUT,
     sender: &Sender<RawMouseData>,
     device_handle: usize,
-) {
+) -> bool {
     let time = Instant::now();
     let mut size: UINT = 0;
 
@@ -392,10 +480,11 @@ unsafe fn process_raw_input(
     );
 
     if size == 0 {
-        return;
+        return true;
     }
 
-    let mut buffer: Vec<u8> = vec![0; size as usize];
+    // u64 storage keeps the RAWINPUT cast aligned.
+    let mut buffer: Vec<u64> = vec![0; (size as usize).div_ceil(8)];
 
     if GetRawInputData(
         handle,
@@ -405,7 +494,7 @@ unsafe fn process_raw_input(
         mem::size_of::<RAWINPUTHEADER>() as UINT,
     ) != size
     {
-        return;
+        return true;
     }
 
     let raw = &*(buffer.as_ptr() as *const RAWINPUT);
@@ -425,7 +514,8 @@ unsafe fn process_raw_input(
 
         // Only send if there's actual data
         if data.dx != 0 || data.dy != 0 || data.button_flags != 0 {
-            let _ = sender.send(data);
+            return sender.send(data).is_ok();
         }
     }
+    true
 }

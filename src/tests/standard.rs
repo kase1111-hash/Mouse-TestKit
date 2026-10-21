@@ -17,6 +17,8 @@ use crate::input_windows as input;
 /// What a CLI test found, so the batch runner can summarise honestly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestOutcome {
+    /// The user quit at the test's start prompt, so nothing was measured.
+    NotRun,
     /// No mouse was selected, so nothing was measured.
     NoDevice,
     /// The test ran but collected too little data for a verdict.
@@ -48,6 +50,7 @@ impl TestStatus {
             TestStatus::NotRun => "- Not run",
             TestStatus::Ran => "Ran - see its result above",
             TestStatus::Finished(outcome) => match outcome {
+                TestOutcome::NotRun => "- Not run",
                 TestOutcome::NoDevice => "✗ Not run (no mouse selected)",
                 TestOutcome::Inconclusive => "? Inconclusive (not enough data)",
                 TestOutcome::Measured => "Measured (no pass/fail)",
@@ -149,7 +152,7 @@ pub fn run_all() {
         println!("TEST {}/{}: {}", i + 1, total, name);
         println!("══════════════════════════════════════════════════════════");
         statuses[i] = match runner {
-            Runner::Reports(run) => TestStatus::Finished(run()),
+            Runner::Reports(run) => reported_status(run()),
             Runner::Plain(run) => plain_status(run()),
         };
     }
@@ -173,6 +176,25 @@ pub fn run_all() {
     println!("\nPress Enter to return to menu...");
     input.clear();
     io::stdin().read_line(&mut input).ok();
+}
+
+/// Status of a test that reports what it found: one the user quit before
+/// it started did not run.
+fn reported_status(outcome: TestOutcome) -> TestStatus {
+    match outcome {
+        TestOutcome::NotRun => TestStatus::NotRun,
+        outcome => TestStatus::Finished(outcome),
+    }
+}
+
+/// What a test found once its mouse disconnected part way: problems seen
+/// before stay (they came from real input), but a clean result cannot be
+/// claimed for a test that was cut short.
+pub fn after_device_lost(outcome: TestOutcome) -> TestOutcome {
+    match outcome {
+        TestOutcome::NoIssues => TestOutcome::Inconclusive,
+        outcome => outcome,
+    }
 }
 
 /// Status of a test that only prints its result, from whether it measured
@@ -222,7 +244,7 @@ pub fn summary(statuses: &[TestStatus]) -> String {
     let not_run = count(&|s| {
         matches!(
             s,
-            TestStatus::NotRun | TestStatus::Finished(TestOutcome::NoDevice)
+            TestStatus::NotRun | TestStatus::Finished(TestOutcome::NoDevice | TestOutcome::NotRun)
         )
     });
 
@@ -319,6 +341,36 @@ mod tests {
         assert!(s.contains("No problems found by the 2 test(s)"), "{}", s);
         assert!(s.contains("1 test(s) were inconclusive"), "{}", s);
         assert!(s.contains("1 test(s) did not run"), "{}", s);
+    }
+
+    #[test]
+    fn test_quit_at_the_start_prompt_is_not_run() {
+        // 'q' at the reaction test's "press any key to start" prompt
+        let statuses = [
+            reported_status(TestOutcome::NotRun),
+            reported_status(TestOutcome::NoIssues),
+        ];
+        assert_eq!(statuses[0], TestStatus::NotRun);
+        let s = summary(&statuses);
+        assert!(s.contains("1 test(s) did not run"), "{}", s);
+        assert!(!s.contains("inconclusive"), "{}", s);
+    }
+
+    #[test]
+    fn test_a_disconnect_never_leaves_a_clean_verdict() {
+        assert_eq!(
+            after_device_lost(TestOutcome::NoIssues),
+            TestOutcome::Inconclusive
+        );
+        // What was found before the mouse went away still stands
+        for kept in [
+            TestOutcome::IssueFound,
+            TestOutcome::PossibleIssue,
+            TestOutcome::Measured,
+            TestOutcome::Inconclusive,
+        ] {
+            assert_eq!(after_device_lost(kept), kept);
+        }
     }
 
     #[test]

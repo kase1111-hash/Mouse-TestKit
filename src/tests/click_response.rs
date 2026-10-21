@@ -12,7 +12,6 @@
 use super::standard::TestOutcome;
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use mouse_testkit::types::TimedEvent;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::io::{self, Write};
@@ -124,12 +123,18 @@ fn ms_after(cue: Instant, t: Instant) -> f64 {
 }
 
 /// How one trial ended.
+#[derive(Debug, PartialEq)]
 enum Trial {
     Reaction(f64, MouseButton),
     FalseStart,
     Anticipation(f64),
     Timeout,
     Quit,
+    /// Some of the mouse's reports were dropped (the program fell behind):
+    /// a press may be missing, so the trial is repeated.
+    InputGap,
+    /// The mouse stopped responding.
+    DeviceLost,
 }
 
 pub fn run() -> TestOutcome {
@@ -153,7 +158,8 @@ pub fn run() -> TestOutcome {
                         continue;
                     }
                     if key.code == KeyCode::Char('q') {
-                        return TestOutcome::Inconclusive; // _guard drops on return
+                        // Nothing was measured: the test did not run
+                        return TestOutcome::NotRun; // _guard drops on return
                     }
                     break;
                 }
@@ -177,6 +183,7 @@ pub fn run() -> TestOutcome {
     let mut false_starts = 0usize;
     let mut timeouts = 0usize;
     let mut quit = false;
+    let mut device_lost = false;
 
     {
         // Raw mode so 'q' can stop the test between and during trials.
@@ -192,8 +199,8 @@ pub fn run() -> TestOutcome {
                     trial + 1,
                     NUM_TRIALS
                 ));
-                let mut fetch = || input::fetch_timed_events(&mut device);
-                match run_trial(&mut fetch, rng.next_delay_ms()) {
+                let mut read = |wait| input::read_events(&mut device, wait);
+                match run_trial(&mut read, rng.next_delay_ms()) {
                     Trial::Reaction(ms, button) => {
                         say(&format!("Reaction time: {:.0} ms ({:?})", ms, button));
                         results.push(ClickResult {
@@ -210,6 +217,19 @@ pub fn run() -> TestOutcome {
                     Trial::Quit => {
                         quit = true;
                         break 'trials;
+                    }
+                    Trial::DeviceLost => {
+                        device_lost = true;
+                        break 'trials;
+                    }
+                    Trial::InputGap => {
+                        say("Some input from the mouse was lost (the computer fell behind).");
+                        attempts += 1;
+                        if attempts >= MAX_FALSE_STARTS_PER_TRIAL {
+                            say("Skipping this trial.");
+                            break;
+                        }
+                        say("Repeating this trial...");
                     }
                     early => {
                         false_starts += 1;
@@ -269,27 +289,36 @@ pub fn run() -> TestOutcome {
         TestOutcome::Inconclusive
     };
 
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     outcome
 }
 
 /// Run one trial: random wait (a press here is a false start), then the
-/// cue, then wait for the first press.
-fn run_trial(fetch: &mut dyn FnMut() -> Vec<TimedEvent>, delay_ms: u64) -> Trial {
+/// cue, then wait for the first press. `read` reads the mouse, waiting up
+/// to the given time for input.
+fn run_trial(read: &mut dyn FnMut(Duration) -> terminal::ReadResult, delay_ms: u64) -> Trial {
     // Discard anything from before this trial (e.g. the last click's release).
-    let _ = fetch();
+    terminal::discard_queued(&mut *read);
 
     let wait_end = Instant::now() + Duration::from_millis(delay_ms);
     while Instant::now() < wait_end {
         if quit_pressed() {
             return Trial::Quit;
         }
-        for timed in fetch() {
+        let Ok(batch) = read(terminal::READ_WAIT) else {
+            return Trial::DeviceLost;
+        };
+        if batch.lost_data {
+            return Trial::InputGap;
+        }
+        for timed in batch.events {
             if let MouseEvent::ButtonPress(_) = timed.event {
                 return Trial::FalseStart;
             }
         }
-        std::thread::sleep(Duration::from_millis(1));
     }
 
     say(">>> CLICK NOW! <<<");
@@ -299,7 +328,14 @@ fn run_trial(fetch: &mut dyn FnMut() -> Vec<TimedEvent>, delay_ms: u64) -> Trial
         if quit_pressed() {
             return Trial::Quit;
         }
-        for timed in fetch() {
+        let Ok(batch) = read(terminal::READ_WAIT) else {
+            return Trial::DeviceLost;
+        };
+        // The first press may be among the dropped reports
+        if batch.lost_data {
+            return Trial::InputGap;
+        }
+        for timed in batch.events {
             if let MouseEvent::ButtonPress(button) = timed.event {
                 // The device timestamp: a press made before the cue but read
                 // after it is still a false start.
@@ -311,7 +347,6 @@ fn run_trial(fetch: &mut dyn FnMut() -> Vec<TimedEvent>, delay_ms: u64) -> Trial
                 };
             }
         }
-        std::thread::sleep(Duration::from_millis(1));
     }
     Trial::Timeout
 }
@@ -335,6 +370,7 @@ pub struct ClickResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mouse_testkit::types::{DeviceLost, InputBatch, TimedEvent};
 
     #[test]
     fn test_press_before_cue_is_false_start_not_zero_ms() {
@@ -397,6 +433,63 @@ mod tests {
         let later = cue + Duration::from_millis(250);
         assert!((ms_after(cue, later) - 250.0).abs() < 1e-6);
         assert!((ms_after(later, cue) + 250.0).abs() < 1e-6);
+    }
+
+    fn batch(events: Vec<TimedEvent>, lost_data: bool) -> terminal::ReadResult {
+        Ok(InputBatch { events, lost_data })
+    }
+
+    fn press_at(time: Instant) -> TimedEvent {
+        TimedEvent {
+            time,
+            event: MouseEvent::ButtonPress(MouseButton::Left),
+        }
+    }
+
+    #[test]
+    fn test_a_trial_needs_unbroken_input() {
+        // A healthy click 250 ms after the cue is a reaction
+        let mut reads = 0;
+        let trial = run_trial(
+            &mut |_| {
+                reads += 1;
+                match reads {
+                    1 => batch(vec![], false), // nothing queued
+                    _ => batch(
+                        vec![press_at(Instant::now() + Duration::from_millis(250))],
+                        false,
+                    ),
+                }
+            },
+            0,
+        );
+        assert!(
+            matches!(trial, Trial::Reaction(ms, MouseButton::Left) if (200.0..400.0).contains(&ms)),
+            "{:?}",
+            trial
+        );
+
+        // Reports dropped while waiting for the click: the press may be
+        // among them, so the trial is repeated rather than timed
+        let mut reads = 0;
+        let trial = run_trial(
+            &mut |_| {
+                reads += 1;
+                match reads {
+                    1 => batch(vec![], false),
+                    _ => batch(
+                        vec![press_at(Instant::now() + Duration::from_millis(900))],
+                        true,
+                    ),
+                }
+            },
+            0,
+        );
+        assert_eq!(trial, Trial::InputGap);
+
+        // The mouse disappears
+        let trial = run_trial(&mut |_| Err(DeviceLost), 0);
+        assert_eq!(trial, Trial::DeviceLost);
     }
 
     #[test]

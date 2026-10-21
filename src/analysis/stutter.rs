@@ -316,6 +316,13 @@ impl StutterDetector {
         }
     }
 
+    /// Reports were lost before the next one (the reader fell behind and
+    /// the system dropped them): the interval from the last report to the
+    /// next is no gap of the mouse's, so it is not judged.
+    pub fn break_continuity(&mut self) {
+        self.last = None;
+    }
+
     fn refresh_baseline(&mut self) {
         let mut values: Vec<f64> = self.recent.iter().copied().collect();
         self.median_ms = median_in_place(&mut values);
