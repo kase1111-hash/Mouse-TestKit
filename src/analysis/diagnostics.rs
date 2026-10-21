@@ -396,6 +396,32 @@ fn low_polling_finding(hz: u32) -> Option<(Severity, &'static str, String)> {
     }
 }
 
+/// Switch bounces in one run at which the switch is failing. Neither a
+/// finger nor a healthy switch can re-press within the bounce gaps
+/// (`Config::bounce_gap_ms`, `Config::bounce_threshold_ms`), but one or two
+/// can be a fluke, so they ask for a re-test, as scroll skips do
+/// (`scroll::SKIP_FAULT_COUNT`). Every test that counts bounces (Auto
+/// Diagnostics, the GUI and CLI Double-Click tests) uses this rule.
+pub const CONFIRMED_BOUNCES: usize = 3;
+
+/// What a number of switch bounces in one run means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BounceVerdict {
+    None,
+    /// One or two: re-run, a repeat means the switch is starting to fail.
+    Possible,
+    /// [`CONFIRMED_BOUNCES`] or more: a failing switch.
+    Failing,
+}
+
+pub fn bounce_verdict(bounces: usize) -> BounceVerdict {
+    match bounces {
+        0 => BounceVerdict::None,
+        n if n < CONFIRMED_BOUNCES => BounceVerdict::Possible,
+        _ => BounceVerdict::Failing,
+    }
+}
+
 /// Rest movement (counts) below which it is ordinary sensor noise.
 const REST_NOISE_COUNTS: f64 = 3.0;
 
@@ -1319,15 +1345,14 @@ impl AutoTest {
 
         // Bounce evidence counts even in a short run. Neither a finger nor a
         // healthy switch can re-press within these gaps, so severity follows
-        // the number of bounces, not their share: one could be a fluke worth
-        // a re-run, a repeat in the same run is a failing switch.
+        // the number of bounces, not their share (see `bounce_verdict`).
         let bounce_rate = if total_presses > 0 {
             bounces as f64 / total_presses as f64 * 100.0
         } else {
             0.0
         };
-        if bounces >= 2 {
-            self.push(
+        match bounce_verdict(bounces) {
+            BounceVerdict::Failing => self.push(
                 Severity::Critical,
                 Phase::Clicks,
                 "Switch bounce (accidental double clicks)",
@@ -1335,17 +1360,17 @@ impl AutoTest {
                     "{} press(es) came within {:.0} ms of the previous release, or within {:.0} ms of the previous press, of the same button ({:.1}% of presses). This is the classic sign of a worn microswitch.",
                     bounces, self.cfg.bounce_gap_ms, self.cfg.bounce_threshold_ms, bounce_rate
                 ),
-            );
-        } else if bounces == 1 {
-            self.push(
+            ),
+            BounceVerdict::Possible => self.push(
                 Severity::Warning,
                 Phase::Clicks,
                 "Possible switch bounce",
                 format!(
-                    "One press came within {:.0} ms of the previous release, or within {:.0} ms of the previous press, of the same button. Re-run the test; a repeat means the switch is starting to fail.",
-                    self.cfg.bounce_gap_ms, self.cfg.bounce_threshold_ms
+                    "{} press(es) came within {:.0} ms of the previous release, or within {:.0} ms of the previous press, of the same button. Re-run the test; if it happens again the switch is starting to fail.",
+                    bounces, self.cfg.bounce_gap_ms, self.cfg.bounce_threshold_ms
                 ),
-            );
+            ),
+            BounceVerdict::None => {}
         }
         if micro > 0 {
             self.push(
@@ -3115,25 +3140,43 @@ mod tests {
             .iter()
             .any(|f| f.title == "Possible switch bounce" && f.severity == Severity::Warning));
 
-        // Two bounces in a long run: a repeat, so a fault
-        let mut sim = Sim::new(cfg());
-        sim.good_rest();
-        sim.good_movement();
-        for i in 0..40 {
-            sim.click(MouseButton::Left, 70.0, 150.0);
-            if i == 10 || i == 30 {
-                sim.t -= 0.142;
-                sim.click(MouseButton::Left, 30.0, 150.0);
+        // In a long run two bounces still only ask for a re-test, and
+        // three are a failing switch, as in the Double-Click test
+        for (bounced_at, fault) in [(vec![10, 30], false), (vec![5, 20, 35], true)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            sim.good_movement();
+            for i in 0..40 {
+                sim.click(MouseButton::Left, 70.0, 150.0);
+                if bounced_at.contains(&i) {
+                    sim.t -= 0.142;
+                    sim.click(MouseButton::Left, 30.0, 150.0);
+                }
             }
+            for _ in 0..5 {
+                sim.click(MouseButton::Right, 80.0, 200.0);
+            }
+            let f = sim.at.findings_so_far();
+            assert_eq!(sim.at.metrics.bounce_events, bounced_at.len());
+            let severity = if fault {
+                Severity::Critical
+            } else {
+                Severity::Warning
+            };
+            let title = if fault {
+                "Switch bounce (accidental double clicks)"
+            } else {
+                "Possible switch bounce"
+            };
+            assert!(
+                f.iter().any(|f| f.title == title && f.severity == severity),
+                "{:?}",
+                f.iter().map(|f| &f.title).collect::<Vec<_>>()
+            );
         }
-        for _ in 0..5 {
-            sim.click(MouseButton::Right, 80.0, 200.0);
-        }
-        let f = sim.at.findings_so_far();
-        assert_eq!(sim.at.metrics.bounce_events, 2);
-        assert!(f
-            .iter()
-            .any(|f| f.title.starts_with("Switch bounce") && f.severity == Severity::Critical));
+        assert_eq!(bounce_verdict(0), BounceVerdict::None);
+        assert_eq!(bounce_verdict(2), BounceVerdict::Possible);
+        assert_eq!(bounce_verdict(CONFIRMED_BOUNCES), BounceVerdict::Failing);
     }
 
     #[test]

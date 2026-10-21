@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::config::DOUBLE_CLICK_THRESHOLD_RANGE;
 use crate::export::DoubleClickExport;
 use crate::input_bridge::{RawButton, RawInputEvent, RawInputKind};
-use mouse_testkit::analysis::diagnostics::Config as DiagConfig;
+use mouse_testkit::analysis::diagnostics::{bounce_verdict, BounceVerdict, Config as DiagConfig};
 
 /// A press this soon after the previous release of the button is switch
 /// bounce (the contact re-closing as it opens), whatever the press-to-press
@@ -276,7 +276,8 @@ impl DoubleClickPanel {
             let consistency = self.calculate_consistency();
             // Primary concern is detecting switch issues (accidental double-clicks)
             // Consistency is secondary - humans naturally vary in click timing
-            let (rating, color, message) = if self.accidental_double_clicks > 2 {
+            let bounces = bounce_verdict(self.accidental_double_clicks as usize);
+            let (rating, color, message) = if bounces == BounceVerdict::Failing {
                 (
                     "Switch Issue",
                     egui::Color32::RED,
@@ -285,12 +286,12 @@ impl DoubleClickPanel {
                         self.accidental_double_clicks
                     ),
                 )
-            } else if self.accidental_double_clicks > 0 {
+            } else if bounces == BounceVerdict::Possible {
                 (
-                    "Minor Issue",
+                    "Possible Issue",
                     egui::Color32::YELLOW,
                     format!(
-                        "{} accidental double-click(s) detected. Monitor for worsening.",
+                        "{} accidental double-click(s) detected. Run the test again; if it happens again the switch is starting to fail.",
                         self.accidental_double_clicks
                     ),
                 )

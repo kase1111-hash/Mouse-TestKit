@@ -11,7 +11,7 @@
 use super::standard::TestOutcome;
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use mouse_testkit::analysis::diagnostics::Config;
+use mouse_testkit::analysis::diagnostics::{bounce_verdict, BounceVerdict, Config};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
@@ -24,9 +24,6 @@ use crate::input_windows::{self as input, MouseButton, MouseEvent};
 fn min_clicks() -> usize {
     Config::default().clicks_min_left
 }
-
-/// This many bounces is a failing switch; fewer could be a one-off.
-const CONFIRMED_BOUNCES: usize = 3;
 
 pub fn run() -> TestOutcome {
     let cfg = Config::default();
@@ -160,7 +157,8 @@ pub fn verdict(bounces: usize, presses: usize, min_presses: usize) -> (TestOutco
     } else {
         0.0
     };
-    if bounces >= CONFIRMED_BOUNCES {
+    let judged = bounce_verdict(bounces);
+    if judged == BounceVerdict::Failing {
         (
             TestOutcome::IssueFound,
             vec![
@@ -170,7 +168,7 @@ pub fn verdict(bounces: usize, presses: usize, min_presses: usize) -> (TestOutco
                 "  Consider switch replacement or mouse replacement.".to_string(),
             ],
         )
-    } else if bounces > 0 {
+    } else if judged == BounceVerdict::Possible {
         (
             TestOutcome::PossibleIssue,
             vec![
@@ -377,6 +375,7 @@ mod tests {
     fn test_verdict_levels() {
         assert_eq!(verdict(3, 40, 5).0, TestOutcome::IssueFound);
         assert_eq!(verdict(1, 40, 5).0, TestOutcome::PossibleIssue);
+        assert_eq!(verdict(2, 40, 5).0, TestOutcome::PossibleIssue);
         assert_eq!(verdict(0, 40, 5).0, TestOutcome::NoIssues);
         assert_eq!(verdict(0, 2, 5).0, TestOutcome::Inconclusive);
     }
