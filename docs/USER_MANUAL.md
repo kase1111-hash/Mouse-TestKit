@@ -70,7 +70,7 @@ Counts clicks and measures hold duration. Click latency (the delay inside the mo
 3. Click inside the test area (only presses there count)
 4. View clicks count, CPS (clicks per second), and hold times
 
-Without raw input every click is still counted, even a press and release within one display frame, but press and release times are only known to the frame (about 16 ms): hold times are rounded to frames, the shortest hold is not shown, and the export says so.
+Without raw input every click is still counted, even a press and release within one display frame, but press and release times are only known to the frame (about 16 ms): hold times are rounded to frames, the shortest hold is not shown, and the export says so. A run ends if raw input is lost or gained part way, so one run never mixes the two timings.
 
 ---
 

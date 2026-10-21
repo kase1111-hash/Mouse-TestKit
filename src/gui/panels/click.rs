@@ -245,6 +245,16 @@ pub struct ClickPanel {
 }
 
 impl ClickPanel {
+    /// End the Click Test run. A press still open never gets its release
+    /// here, so it is dropped.
+    fn stop_response(&mut self) {
+        self.response_running = false;
+        self.response_press_start = None;
+        self.response_right_press_start = None;
+        self.response_is_pressed = false;
+        self.response_right_is_pressed = false;
+    }
+
     pub fn new() -> Self {
         Self {
             response_running: false,
@@ -315,16 +325,18 @@ impl ClickPanel {
 
         ui.add_space(10.0);
 
+        // Device-timed and frame-timed holds cannot be mixed in one run, and
+        // the export names one timing for it: a change of input source ends
+        // the run, keeping the clicks measured so far.
+        if self.response_running && has_bridge != self.response_raw {
+            self.stop_response();
+        }
+
         // Controls
         ui.horizontal(|ui| {
             if self.response_running {
                 if ui.button("Stop").clicked() {
-                    // A press still open never gets its release here
-                    self.response_running = false;
-                    self.response_press_start = None;
-                    self.response_right_press_start = None;
-                    self.response_is_pressed = false;
-                    self.response_right_is_pressed = false;
+                    self.stop_response();
                 }
             } else if ui.button("Start").clicked() {
                 self.response_running = true;
@@ -1417,6 +1429,33 @@ mod tests {
         );
         assert_eq!(panel.response_click_count, 2);
         assert_eq!(panel.response_hold_times.len(), 2);
+    }
+
+    #[test]
+    fn click_test_stops_when_the_input_source_changes() {
+        // A raw run whose mouse is unplugged: its frame-timed clicks must
+        // not join holds the export calls device-timed
+        let mut panel = ClickPanel::new();
+        panel.response_running = true;
+        panel.response_raw = true;
+        response_frame(&mut panel, IN_TEST_AREA, &left_clicks(&[90]), vec![], true);
+        assert_eq!(panel.response_click_count, 1);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: IN_TEST_AREA,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        response_frame(
+            &mut panel,
+            IN_TEST_AREA,
+            &[],
+            vec![button(true), button(false)],
+            false,
+        );
+        assert!(!panel.response_running);
+        assert_eq!(panel.response_click_count, 1);
+        assert_eq!(panel.export_response().unwrap().hold_timing, "device");
     }
 
     #[test]
