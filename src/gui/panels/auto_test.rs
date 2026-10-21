@@ -651,17 +651,32 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Movement: unstable intervals",
-                                    format!("{:.1}%", m.unstable_interval_percent),
+                                    or_not_tested(
+                                        report.stutter_rate_percent().map(|_| {
+                                            format!("{:.1}%", m.unstable_interval_percent)
+                                        }),
+                                    ),
                                 ),
                                 (
                                     "Movement: worst interval",
-                                    format!("{:.1} ms", m.max_interval_ms),
+                                    or_not_tested(
+                                        report
+                                            .stutter_rate_percent()
+                                            .map(|_| format!("{:.1} ms", m.max_interval_ms)),
+                                    ),
                                 ),
                                 (
                                     "Movement: freezes (0.1-1 s)",
-                                    m.movement_freezes.to_string(),
+                                    or_not_tested(report.movement_freezes().map(|v| v.to_string())),
                                 ),
-                                ("Movement: pauses > 1 s", m.movement_pauses.to_string()),
+                                (
+                                    "Movement: pauses > 1 s",
+                                    or_not_tested(
+                                        report
+                                            .movement_freezes()
+                                            .map(|_| m.movement_pauses.to_string()),
+                                    ),
+                                ),
                                 (
                                     "Clicks: left / right / other",
                                     format!(
@@ -673,7 +688,10 @@ impl AutoTestPanel {
                                     "Clicks: bounce events",
                                     or_not_tested(report.bounce_events().map(|v| v.to_string())),
                                 ),
-                                ("Clicks: micro presses", m.micro_presses.to_string()),
+                                (
+                                    "Clicks: micro presses",
+                                    or_not_tested(report.micro_presses().map(|v| v.to_string())),
+                                ),
                                 ("Clicks: sticky releases", m.sticky_releases.to_string()),
                                 ("Clicks: stuck buttons", m.stuck_buttons.to_string()),
                                 (
@@ -700,7 +718,11 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Lift: largest jump",
-                                    format!("{:.0} counts", m.lift_max_jump_counts),
+                                    or_not_tested(
+                                        report.lift_jumps().map(|_| {
+                                            format!("{:.0} counts", m.lift_max_jump_counts)
+                                        }),
+                                    ),
                                 ),
                             ];
                             for (k, v) in rows {

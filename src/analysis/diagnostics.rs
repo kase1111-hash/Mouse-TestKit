@@ -239,6 +239,19 @@ impl Report {
             .then_some(self.metrics.bounce_events)
     }
 
+    /// Movement freezes, when the movement step ran (they are judged even
+    /// when too little fast movement was timed for the other checks).
+    pub fn movement_freezes(&self) -> Option<usize> {
+        self.step_ran(Phase::Movement)
+            .then_some(self.metrics.movement_freezes)
+    }
+
+    /// Presses shorter than `Config::micro_press_ms`, judged only on device
+    /// timestamps.
+    pub fn micro_presses(&self) -> Option<usize> {
+        self.bounce_events().map(|_| self.metrics.micro_presses)
+    }
+
     /// Scroll notches reversed within the skip window, judged only on device
     /// timestamps.
     pub fn scroll_reversals(&self) -> Option<usize> {
@@ -3365,6 +3378,8 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Healthy);
         assert_eq!(r.stutter_rate_percent(), None);
         assert_eq!(r.bounce_events(), None);
+        assert_eq!(r.micro_presses(), None);
+        assert_eq!(r.movement_freezes(), None);
         assert_eq!(r.scroll_reversals(), None);
         assert_eq!(r.lift_jumps(), None);
         assert_eq!(r.rest_unit(), "pointer units");
@@ -3379,8 +3394,10 @@ mod tests {
         sim.idle(10.5);
         let r = sim.at.report().unwrap();
         assert_eq!(r.stutter_rate_percent(), None);
+        assert_eq!(r.movement_freezes(), Some(0));
         assert_eq!(r.lift_jumps(), None);
         assert_eq!(r.bounce_events(), Some(0));
+        assert_eq!(r.micro_presses(), Some(0));
         assert_eq!(r.scroll_reversals(), Some(0));
         assert_eq!(r.rest_unit(), "counts");
 
