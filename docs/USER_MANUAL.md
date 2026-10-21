@@ -151,11 +151,11 @@ With raw input this covers the mouse's **sensor/firmware** only: OS pointer acce
 1. Pick a fixed physical distance (for example the full width of your mousepad, or between two marks)
 2. Click **Start Test**
 3. Move across that exact distance, pause, move back, pause - about 5 passes slowly
-4. Do about 5 more passes quickly, then click **Stop Test**
+4. Do about 5 more passes quickly, then press **Enter** (or **Esc**) to stop without moving the mouse. **Stop Test** works too: the move to the button is not counted as a pass
 
-Each pass must be at least 50 counts and the fast passes must be clearly faster than the slow ones, otherwise the result is **Inconclusive**.
+Each pass must be at least 50 counts and the fast passes must be clearly faster than the slow ones, otherwise the result is **Inconclusive**. A movement that goes there and back without the pause is left out (the panel says how many). The slow and fast passes are compared by their medians, so one stray movement cannot decide the result.
 
-**1.0x factor** = No acceleration (ideal). Above 1.15x or below 0.85x is reported as acceleration.
+**1.0x factor** = No acceleration (ideal). Above 1.15x is reported as acceleration; below 0.85x as fast passes losing counts, which is almost always the sensor losing tracking at speed (or the pointer hitting the screen edge), not an acceleration setting. The export records the verdict and whether raw counts or the on-screen pointer were measured. The result keeps describing the input the run used, and a run is stopped if raw input is lost or gained part way.
 
 ---
 

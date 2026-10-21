@@ -93,8 +93,8 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 | Specification | Description |
 |---------------|-------------|
 | Function | Tests for unwanted acceleration curves in the mouse's sensor/firmware |
-| Method | Compares movement distance at different speeds |
-| Output | Acceleration coefficient and consistency |
+| Method | Compares the median counts of slow and fast passes over the same distance; strokes that turn back on themselves are left out |
+| Output | Fast/slow count factor and verdict (acceleration above 1.15x, lost counts below 0.85x), with the input measured |
 | Scope | Raw counts are read before OS pointer acceleration, which is not covered |
 | Use Case | Ensuring the mouse itself reports 1:1 for precision tasks |
 

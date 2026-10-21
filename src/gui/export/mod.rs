@@ -206,13 +206,22 @@ pub struct DpiSampleExport {
     pub accuracy_percent: f32,
 }
 
-/// Acceleration detection results (pointer acceleration enabled).
+/// Acceleration detection results.
 #[derive(Serialize)]
 pub struct AccelerationExport {
+    /// The panel's verdict: "acceleration", "no acceleration", "fast passes
+    /// lose counts" (the sensor losing tracking, not acceleration) or
+    /// "inconclusive".
+    pub verdict: String,
+    /// What was measured: raw sensor counts, which cannot show OS pointer
+    /// acceleration, or the on-screen pointer, which includes it.
+    pub input: String,
+    /// True only when fast passes produced more counts (the verdict is
+    /// "acceleration").
     pub has_acceleration: bool,
     /// False when the slow and fast passes were too similar in speed to judge.
     pub conclusive: bool,
-    /// Mean counts of fast passes divided by mean counts of slow passes.
+    /// Median counts of fast passes divided by median counts of slow passes.
     pub accel_factor: f64,
     /// Median speed of fast passes divided by median speed of slow passes.
     pub speed_ratio: f64,
@@ -448,6 +457,8 @@ impl TestResultsExport {
 
         // Acceleration
         if let Some(ref a) = self.acceleration {
+            csv.push_str(&format!("Acceleration,Verdict,{}\n", a.verdict));
+            csv.push_str(&format!("Acceleration,Input,{}\n", a.input));
             csv.push_str(&format!("Acceleration,Detected,{}\n", a.has_acceleration));
             csv.push_str(&format!("Acceleration,Conclusive,{}\n", a.conclusive));
             csv.push_str(&format!("Acceleration,Factor,{:.2}\n", a.accel_factor));
