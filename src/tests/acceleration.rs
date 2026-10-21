@@ -30,7 +30,9 @@ pub fn run() {
     println!("  2. Press SPACE to record slow movement");
     println!("  3. Move mouse QUICKLY across the same distance");
     println!("  4. Press SPACE to record fast movement");
-    println!("  5. Record at least {} of each\n", MIN_STROKES_PER_GROUP);
+    println!("  5. Record at least {} of each", MIN_STROKES_PER_GROUP);
+    println!("Press SPACE as soon as a pass reaches its end mark. Sliding the mouse");
+    println!("back to the start first is fine: only the last movement is recorded.\n");
     println!("With acceleration: fast movement = more counts");
     println!("Without acceleration: same distance = same counts\n");
 
@@ -116,7 +118,7 @@ pub fn run() {
             print!(
                 "[{}] Counts: {:.0} | Slow: {} | Fast: {} | ",
                 if recording_slow { "SLOW" } else { "FAST" },
-                pass.counts,
+                pass.counts(),
                 slow_samples.len(),
                 fast_samples.len()
             );
@@ -211,39 +213,69 @@ pub fn run() {
     terminal::wait_for_enter();
 }
 
-/// Movement accumulated since the last SPACE press.
+/// Movement since the last SPACE press.
 #[derive(Default)]
 struct Pass {
-    counts: f64,
-    first: Option<Instant>,
-    last: Option<Instant>,
+    /// Every motion report: (time, dx, dy).
+    reports: Vec<(Instant, i32, i32)>,
 }
 
 impl Pass {
     fn add(&mut self, t: Instant, dx: i32, dy: i32) {
-        if dx == 0 && dy == 0 {
-            return;
+        if dx != 0 || dy != 0 {
+            self.reports.push((t, dx, dy));
         }
-        self.counts += ((dx as f64).powi(2) + (dy as f64).powi(2)).sqrt();
-        self.first.get_or_insert(t);
-        self.last = Some(t);
+    }
+
+    /// The pass itself: the movement from the point farthest from where the
+    /// mouse ended up. Between passes the mouse has to get back to the start
+    /// mark; when it is slid back rather than lifted, that return trip is
+    /// left out instead of being added to the next pass's counts and time.
+    fn leg(&self) -> &[(Instant, i32, i32)] {
+        let end = self
+            .reports
+            .iter()
+            .fold((0i64, 0i64), |(x, y), &(_, dx, dy)| {
+                (x + dx as i64, y + dy as i64)
+            });
+        let (mut pos, mut start, mut farthest) = ((0i64, 0i64), 0, -1.0);
+        for (i, &(_, dx, dy)) in self.reports.iter().enumerate() {
+            // Distance to the end from where the mouse was before report i
+            let to_end = ((end.0 - pos.0) as f64).hypot((end.1 - pos.1) as f64);
+            if to_end >= farthest {
+                farthest = to_end;
+                start = i;
+            }
+            pos = (pos.0 + dx as i64, pos.1 + dy as i64);
+        }
+        &self.reports[start..]
+    }
+
+    /// Counts travelled during the pass.
+    fn counts(&self) -> f64 {
+        self.leg()
+            .iter()
+            .map(|&(_, dx, dy)| (dx as f64).hypot(dy as f64))
+            .sum()
     }
 
     /// The pass as a sample, or `None` when it is too short to judge.
     fn sample(&self) -> Option<AccelSample> {
-        if self.counts < MIN_PASS_COUNTS {
+        let counts = self.counts();
+        if counts < MIN_PASS_COUNTS {
             return None;
         }
-        let secs = match (self.first, self.last) {
-            (Some(first), Some(last)) => last.saturating_duration_since(first).as_secs_f64(),
+        let leg = self.leg();
+        let secs = match (leg.first(), leg.last()) {
+            (Some(first), Some(last)) => last.0.saturating_duration_since(first.0).as_secs_f64(),
             _ => 0.0,
         }
         // A pass shorter than a millisecond counts as one, to avoid dividing by zero
         .max(0.001);
         Some(AccelSample {
-            counts: self.counts,
+            counts,
             secs,
-            speed: self.counts / secs,
+            speed: counts / secs,
         })
     }
 }
@@ -295,6 +327,33 @@ mod tests {
         assert!((s.counts - 500.0).abs() < 1e-9);
         assert!((s.secs - 0.198).abs() < 1e-6);
         assert!(Pass::default().sample().is_none());
+    }
+
+    #[test]
+    fn sliding_back_to_the_start_is_not_part_of_the_pass() {
+        // After the previous pass the mouse is slid back 800 counts quickly,
+        // rests on the start mark, then makes a slow 800-count pass (with a
+        // little wobble) and stops on the end mark.
+        let t0 = Instant::now();
+        let mut pass = Pass::default();
+        for i in 0..40u64 {
+            pass.add(t0 + Duration::from_millis(i), -20, 0);
+        }
+        let start = t0 + Duration::from_millis(600);
+        for i in 0..200u64 {
+            let dy = [1, 0, -1, 0][i as usize % 4];
+            pass.add(start + Duration::from_millis(5 * i), 4, dy);
+        }
+        let s = pass.sample().unwrap();
+        assert!((s.counts - 800.0).abs() < 25.0, "{}", s.counts);
+        assert!((s.secs - 0.995).abs() < 1e-6, "{}", s.secs);
+        // Counting everything would double the counts and halve the speed
+        let all: f64 = pass
+            .reports
+            .iter()
+            .map(|&(_, dx, dy)| (dx as f64).hypot(dy as f64))
+            .sum();
+        assert!(all > 1500.0);
     }
 
     #[test]
