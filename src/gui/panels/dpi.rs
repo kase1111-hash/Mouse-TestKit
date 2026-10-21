@@ -399,6 +399,7 @@ impl DpiPanel {
                     target_dpi: s.target_dpi,
                     measured_dpi: s.measured_dpi,
                     accuracy_percent: s.accuracy,
+                    rating: dpi_rating(s.measured_dpi, s.target_dpi).to_string(),
                 })
                 .collect(),
             avg_accuracy_percent: avg_accuracy,
@@ -458,6 +459,19 @@ mod tests {
         let dpi = measure(&mut p, &events);
         assert!((dpi - 864.0).abs() < 0.5);
         assert_eq!(dpi_rating(dpi, 800), "Fair");
+    }
+
+    #[test]
+    fn export_keeps_the_check_setup_rating() {
+        // A 1600 DPI stage measured against a target of 800: 0% accuracy
+        // in the export must not read as a dead sensor
+        let mut p = DpiPanel::new();
+        p.set_target_dpi(800);
+        p.set_target_distance(2.0);
+        let events: Vec<_> = (0..1600).map(|_| mv(2, 0)).collect();
+        measure(&mut p, &events);
+        let e = p.export().unwrap();
+        assert_eq!(e.samples[0].rating, "Check setup");
     }
 
     #[test]

@@ -67,6 +67,11 @@ pub struct PollingRateExport {
 /// Stutter detection results with timing deltas and stutter events.
 #[derive(Serialize)]
 pub struct StutterExport {
+    /// The panel's rating, e.g. "Inconclusive" when too little fast
+    /// movement was judged for the counts below to mean anything.
+    pub rating: String,
+    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts).
+    pub freezes: usize,
     pub total_stutter_count: usize,
     pub total_samples: usize,
     pub avg_delta_ms: f64,
@@ -211,6 +216,9 @@ pub struct DpiSampleExport {
     pub target_dpi: u32,
     pub measured_dpi: f32,
     pub accuracy_percent: f32,
+    /// The panel's rating; "Check setup" means the sample is too far off to
+    /// be the sensor (another DPI stage, a wrong distance, a missed mark).
+    pub rating: String,
 }
 
 /// Acceleration detection results.
@@ -320,6 +328,8 @@ impl TestResultsExport {
 
         // Stutter
         if let Some(ref s) = self.stutter {
+            csv.push_str(&format!("Stutter,Rating,{}\n", csv_escape(&s.rating)));
+            csv.push_str(&format!("Stutter,Freezes (0.1-1 s),{}\n", s.freezes));
             csv.push_str(&format!(
                 "Stutter,Total Stutters,{}\n",
                 s.total_stutter_count
@@ -463,6 +473,11 @@ impl TestResultsExport {
                     "DPI,Sample {} Accuracy (%),{:.1}\n",
                     i + 1,
                     sample.accuracy_percent
+                ));
+                csv.push_str(&format!(
+                    "DPI,Sample {} Rating,{}\n",
+                    i + 1,
+                    csv_escape(&sample.rating)
                 ));
             }
         }
@@ -663,6 +678,37 @@ mod tests {
             scroll: None,
             auto_diagnostics: None,
         }
+    }
+
+    #[test]
+    fn test_csv_keeps_dpi_and_stutter_qualifiers() {
+        let mut export = empty_export();
+        export.dpi = Some(DpiExport {
+            target_dpi: 800,
+            samples: vec![DpiSampleExport {
+                target_dpi: 800,
+                measured_dpi: 1600.0,
+                accuracy_percent: 0.0,
+                rating: "Check setup".to_string(),
+            }],
+            avg_accuracy_percent: 0.0,
+        });
+        export.stutter = Some(StutterExport {
+            rating: "Inconclusive".to_string(),
+            freezes: 0,
+            total_stutter_count: 3,
+            total_samples: 1500,
+            avg_delta_ms: 1.0,
+            min_delta_ms: 1.0,
+            max_delta_ms: 8.0,
+            polling_rate_hz: 1000.0,
+            threshold_multiplier: 2.0,
+            stutter_rate_percent: 0.2,
+            deltas: Vec::new(),
+        });
+        let csv = export.to_csv();
+        assert!(csv.contains("DPI,Sample 1 Rating,Check setup\n"), "{}", csv);
+        assert!(csv.contains("Stutter,Rating,Inconclusive\n"), "{}", csv);
     }
 
     fn jitter(unit: &str) -> JitterExport {
