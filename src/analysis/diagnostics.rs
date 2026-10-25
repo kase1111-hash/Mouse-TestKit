@@ -560,10 +560,11 @@ pub struct AutoTest {
     /// ... with the size (counts) of the smaller of the two reports and of
     /// the later one, to leave out the small reports around a brief stop.
     fast_sizes: Vec<(f64, f64)>,
-    /// Longer gaps between the reports of a saturated pair, up to
-    /// `MAX_FREEZE_MS`, with the sizes of the smaller report and of the
-    /// later one: a stop, a lift or a freeze, told apart by those sizes once
-    /// the median is known (see `stutter::is_freeze`).
+    /// Longer gaps between the reports of a saturated pair or a
+    /// `stutter::turned_gap`, up to `MAX_FREEZE_MS`, with the sizes of the
+    /// smaller report and of the later one: a stop, a lift or a freeze, told
+    /// apart by those sizes once the median is known (see
+    /// `stutter::is_freeze`).
     long_gaps: Vec<(f64, f64, f64)>,
     /// Motion reports seen in the movement step, numbering them for...
     move_reports: usize,
@@ -1153,26 +1154,28 @@ impl AutoTest {
                     let size = (dx as f64).hypot(dy as f64);
                     let last_size = (ldx as f64).hypot(ldy as f64);
                     let saturated = is_saturated_pair((ldx, ldy), (dx, dy));
+                    let turned = turned_gap((ldx, ldy), (dx, dy), interval_ms);
                     // The reports around long gaps, as in the Stutter test
-                    if saturated || turned_gap((ldx, ldy), (dx, dy), interval_ms) {
+                    if saturated || turned {
                         let done = self.gap_edges.pair(index, interval_ms, last_size, size);
                         self.dropout_gaps.extend(done.map(|(_, edges)| edges));
                     }
+                    let smaller = last_size.min(size);
                     // Only fast movement in a steady direction is certain to
                     // report on every poll (a reversal inside one poll
                     // cancels its counts), as in the Stutter test.
-                    if saturated {
-                        let smaller = last_size.min(size);
+                    if saturated && interval_ms <= MAX_POLL_INTERVAL_MS {
+                        self.fast_intervals_ms.push(interval_ms);
+                        self.fast_sizes.push((smaller, size));
+                        self.fast_total_ms += interval_ms;
+                    } else if saturated || turned {
                         // Longer gaps are a stop or a freeze, not a poll (as
                         // in `estimate_hz`), and must not count as timed
-                        // movement.
-                        if interval_ms <= MAX_POLL_INTERVAL_MS {
-                            self.fast_intervals_ms.push(interval_ms);
-                            self.fast_sizes.push((smaller, size));
-                            self.fast_total_ms += interval_ms;
-                        } else {
-                            self.long_gaps.push((interval_ms, smaller, size));
-                        }
+                        // movement. A freeze is told by the size of the
+                        // report after it, whichever way that points: while
+                        // circling, the held-back movement is the chord of
+                        // the arc missed.
+                        self.long_gaps.push((interval_ms, smaller, size));
                     }
                 }
             }
@@ -2350,6 +2353,59 @@ mod tests {
         let f = movement_findings(&sim);
         assert!(f.iter().all(|(s, _)| *s == Severity::Info), "{:?}", f);
         assert!(f.iter().any(|(_, t)| t == "One freeze during movement"));
+    }
+
+    #[test]
+    fn test_freezes_that_turn_while_circling_are_flagged() {
+        // Circles at two turns a second while the link drops out for
+        // 300-700 ms every 2 s: the cursor turns half a circle or more in
+        // the gap, so the held-back movement (the chord of that arc) points
+        // well away from the report before it (no gap is a whole turn)
+        let lost = |t: f64| {
+            let n = (t / 2.0).floor();
+            let start = n * 2.0 + 1.0;
+            (start..start + 0.3 + 0.08 * (n % 6.0)).contains(&t)
+        };
+        for (hz, radius) in [(1000.0, 300.0), (125.0, 400.0)] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            let circle = move |t: f64| {
+                let a = 2.0 * std::f64::consts::TAU * t;
+                (radius * a.cos(), radius * a.sin())
+            };
+            path_stream(&mut sim, 12.5, hz, circle, lost);
+            let f = movement_findings(&sim);
+            assert!(
+                f.contains(&(Severity::Warning, "Movement froze".to_string())),
+                "{} Hz: {:?}",
+                hz,
+                f
+            );
+            let freezes = sim.at.metrics.movement_freezes;
+            assert!((2..=6).contains(&freezes), "{} Hz: {}", hz, freezes);
+        }
+
+        // At 125-250 Hz a hand can stop within a poll or two. One that
+        // stops for 150-650 ms and sets off at 135 degrees to its last
+        // heading sends an ordinary report first, not a catch-up
+        let passes = |t: f64| {
+            let (mut x, mut y, mut start) = (0.0, 0.0, 0.0);
+            for i in 0..20 {
+                let heading = 0.375 * std::f64::consts::TAU * i as f64;
+                let moved = 5000.0 * (t - start).clamp(0.0, 0.8);
+                x += moved * heading.cos();
+                y += moved * heading.sin();
+                start += 0.8 + 0.15 + 0.1 * (i % 6) as f64;
+            }
+            (x, y)
+        };
+        for hz in [125.0, 250.0] {
+            let mut sim = Sim::new(cfg());
+            sim.good_rest();
+            path_stream(&mut sim, 12.5, hz, passes, |_| false);
+            assert!(sim.at.long_gaps.len() >= 5, "{} Hz", hz);
+            assert_eq!(sim.at.metrics.movement_freezes, 0, "{} Hz", hz);
+        }
     }
 
     /// Like [`path_stream`], but the movement of lost polls is lost too
