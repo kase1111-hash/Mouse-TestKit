@@ -64,6 +64,9 @@ pub struct ReportReader {
     skipping: bool,
     /// When the last drop not yet resynchronised happened.
     dropped_at: Option<Instant>,
+    /// Buttons in `down` whose press came after that drop: their release
+    /// cannot have been dropped in it.
+    pressed_since_drop: Vec<MouseButton>,
 }
 
 impl ReportReader {
@@ -97,6 +100,7 @@ impl ReportReader {
                     motion = None;
                     self.skipping = true;
                     self.dropped_at = Some(to_instant(ev.timestamp()));
+                    self.pressed_since_drop.clear();
                     let last = batches.last_mut().expect("never empty");
                     if last.events.is_empty() {
                         last.lost_data = true;
@@ -147,10 +151,14 @@ impl ReportReader {
                             if !self.down.contains(&button) {
                                 self.down.push(button);
                             }
+                            if !self.pressed_since_drop.contains(&button) {
+                                self.pressed_since_drop.push(button);
+                            }
                             MouseEvent::ButtonPress(button)
                         }
                         0 => {
                             self.down.retain(|&b| b != button);
+                            self.pressed_since_drop.retain(|&b| b != button);
                             MouseEvent::ButtonRelease(button)
                         }
                         _ => continue, // autorepeat (2)
@@ -172,22 +180,44 @@ impl ReportReader {
     }
 
     /// After a drop: release every button passed on as pressed that
-    /// `is_down` (the device's own key state) says is up, since its release
-    /// was among the dropped events. The releases go at the start of the
-    /// last batch with `lost_data` in `batches` (added if there is none),
-    /// stamped with the time of the drop, which is no later than the events
-    /// after it. A button pressed during the gap is not invented: its press
+    /// `is_down` (the device's own key state) says is up. One held at the
+    /// drop lost its release among the dropped events: that release goes at
+    /// the start of the last batch with `lost_data` in `batches` (added if
+    /// there is none), stamped with the time of the drop, which is no later
+    /// than the events after it. One first pressed after the drop was
+    /// released after the queue was read (reading the key state discards
+    /// that release from the queue): its release goes at the end, stamped
+    /// `read_at`. A button pressed during the gap is not invented: its press
     /// time is unknown.
-    pub fn resync(&mut self, batches: &mut Vec<InputBatch>, is_down: impl Fn(MouseButton) -> bool) {
+    pub fn resync(
+        &mut self,
+        batches: &mut Vec<InputBatch>,
+        read_at: Instant,
+        is_down: impl Fn(MouseButton) -> bool,
+    ) {
         let Some(at) = self.dropped_at.take() else {
             return;
         };
+        let pressed_since = std::mem::take(&mut self.pressed_since_drop);
         let released: Vec<MouseButton> =
             self.down.iter().copied().filter(|&b| !is_down(b)).collect();
         if released.is_empty() {
             return;
         }
         self.down.retain(|b| !released.contains(b));
+        let (late, dropped): (Vec<MouseButton>, Vec<MouseButton>) = released
+            .into_iter()
+            .partition(|b| pressed_since.contains(b));
+        if let Some(last) = batches.last_mut() {
+            last.events
+                .extend(late.into_iter().map(|button| TimedEvent {
+                    time: read_at,
+                    event: MouseEvent::ButtonRelease(button),
+                }));
+        }
+        if dropped.is_empty() {
+            return;
+        }
         let index = match batches.iter().rposition(|b| b.lost_data) {
             Some(index) => index,
             None => {
@@ -198,7 +228,7 @@ impl ReportReader {
                 batches.len() - 1
             }
         };
-        let releases = released.into_iter().map(|button| TimedEvent {
+        let releases = dropped.into_iter().map(|button| TimedEvent {
             time: at,
             event: MouseEvent::ButtonRelease(button),
         });
@@ -208,6 +238,7 @@ impl ReportReader {
     /// Forget a drop that needs no resynchronisation.
     fn drop_settled(&mut self) {
         self.dropped_at = None;
+        self.pressed_since_drop.clear();
     }
 }
 
@@ -325,7 +356,7 @@ impl EvdevMouse {
             // Everything queued was just read, so the key events the ioctl
             // discards from the queue are at most a few microseconds old.
             match self.device.get_key_state() {
-                Ok(keys) => self.reader.resync(&mut batches, |button| {
+                Ok(keys) => self.reader.resync(&mut batches, ref_instant, |button| {
                     button.key_code().is_some_and(|code| keys.contains(code))
                 }),
                 Err(_) => self.gone = true,
@@ -602,7 +633,7 @@ mod tests {
             ],
         );
         assert!(reader.needs_resync());
-        reader.resync(&mut batches, |b| b == MouseButton::Right);
+        reader.resync(&mut batches, Instant::now(), |b| b == MouseButton::Right);
         assert_eq!(batches.len(), 2);
         assert_eq!(kinds(&batches[0]), ["ButtonPress(Left)"]);
         assert!(batches[1].lost_data);
@@ -618,7 +649,7 @@ mod tests {
             &mut reader,
             &[key(KeyCode::BTN_LEFT, 1), syn(), dropped(), x(5), syn()],
         );
-        reader.resync(&mut batches, |b| b == MouseButton::Left);
+        reader.resync(&mut batches, Instant::now(), |b| b == MouseButton::Left);
         assert!(batches.iter().all(|b| b
             .events
             .iter()
@@ -626,6 +657,29 @@ mod tests {
         // ...and its real release later still passes
         let later = translate(&mut reader, &[key(KeyCode::BTN_LEFT, 0), syn()]);
         assert_eq!(kinds(&later[0]), ["ButtonRelease(Left)"]);
+    }
+
+    #[test]
+    fn a_press_after_the_drop_released_before_the_key_read_stays_in_order() {
+        // Left was up at the drop and pressed after it; it was released
+        // after the queue was drained, and the key-state read discarded that
+        // release from the queue. The release must come after the press.
+        let mut reader = ReportReader::new();
+        let mut batches = translate(
+            &mut reader,
+            &[dropped(), x(4), syn(), key(KeyCode::BTN_LEFT, 1), syn()],
+        );
+        assert!(reader.needs_resync());
+        let read_at = Instant::now();
+        reader.resync(&mut batches, read_at, |_| false);
+        let events: Vec<String> = batches.iter().flat_map(kinds).collect();
+        assert_eq!(events, ["ButtonPress(Left)", "ButtonRelease(Left)"]);
+        let release = batches.last().unwrap().events.last().unwrap();
+        assert_eq!(release.time, read_at, "not stamped at the drop");
+        assert!(!reader.needs_resync());
+        // Pressed again and released, both seen: nothing left to restore
+        let later = translate(&mut reader, &[key(KeyCode::BTN_LEFT, 1), syn()]);
+        assert_eq!(kinds(&later[0]), ["ButtonPress(Left)"]);
     }
 
     #[test]
@@ -644,7 +698,7 @@ mod tests {
                 syn(),
             ],
         );
-        reader.resync(&mut batches, |_| false);
+        reader.resync(&mut batches, Instant::now(), |_| false);
         let released = batches
             .iter()
             .flat_map(|b| &b.events)
