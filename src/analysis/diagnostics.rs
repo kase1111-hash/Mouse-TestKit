@@ -2818,6 +2818,17 @@ mod tests {
             "{:?}",
             f
         );
+
+        // Four reports per 15 ms event and mild interference (one event in
+        // twelve missed, its reports sent with the next): still judged per
+        // delivery, not as a 2000 Hz mouse that stutters all the time
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        bluetooth_stream(&mut sim, 12.5, 4.0, 15.0, |k| k % 12 == 0);
+        let f = movement_findings(&sim);
+        assert!(sim.at.metrics.batched_delivery, "{:?}", f);
+        assert!(f.iter().all(|(s, _)| *s != Severity::Critical), "{:?}", f);
+        assert_eq!(sim.at.metrics.polling_nominal_hz, None);
     }
 
     #[test]

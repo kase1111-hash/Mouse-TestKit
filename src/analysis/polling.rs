@@ -203,10 +203,12 @@ const MIN_BATCHED_SHARE: f64 = 0.05;
 /// gap: a catch-up, the instability batching must not excuse.
 const CATCH_UP_PERIODS: f64 = 1.5;
 
-/// ... and a delivery carries at most this many reports on average. A
-/// Bluetooth mouse samples at about 125-250 Hz, so even a 15 ms connection
-/// event holds no more than about four reports. A USB mouse whose reports
-/// stall now and then sends dozens at its poll rate between the stalls.
+/// ... and a delivery that comes on schedule carries at most this many
+/// reports on average. A Bluetooth mouse samples at about 125-250 Hz, so
+/// even a 15 ms connection event holds no more than about four reports
+/// (one after missed events also carries theirs, so it is left out). A USB
+/// mouse whose reports stall now and then sends dozens at its poll rate
+/// between the stalls.
 const MAX_REPORTS_PER_EVENT: f64 = 4.0;
 
 /// Fewest fast-movement intervals batching is judged on.
@@ -217,7 +219,8 @@ const MIN_BATCH_INTERVALS: usize = 20;
 pub struct Batching {
     /// Median time (ms) from one delivery to the next.
     pub event_period_ms: f64,
-    /// Average reports per delivery.
+    /// Average reports per delivery that came on schedule (one per
+    /// connection event).
     pub reports_per_event: f64,
 }
 
@@ -290,11 +293,19 @@ pub fn batched_delivery(intervals_ms: &[f64]) -> Option<Batching> {
     if between == 0 || (within as f64) < MIN_BATCHED_SHARE * intervals_ms.len() as f64 {
         return None;
     }
-    let reports_per_event = intervals_ms.len() as f64 / between as f64;
+    let deliveries = deliveries(intervals_ms);
+    let mut periods: Vec<f64> = deliveries.iter().map(|d| d.0).collect();
+    let event_period_ms = median_in_place(&mut periods)?;
+    // A delivery after missed connection events also carries their reports
+    let on_schedule: Vec<usize> = deliveries
+        .iter()
+        .filter(|d| d.0 < CATCH_UP_PERIODS * event_period_ms)
+        .map(|d| d.1)
+        .collect();
+    let reports_per_event = on_schedule.iter().sum::<usize>() as f64 / on_schedule.len() as f64;
     if reports_per_event > MAX_REPORTS_PER_EVENT {
         return None;
     }
-    let deliveries = deliveries(intervals_ms);
     let batches: Vec<(f64, f64)> = deliveries
         .iter()
         .filter(|d| d.1 >= 2)
@@ -304,8 +315,6 @@ pub fn batched_delivery(intervals_ms: &[f64]) -> Option<Batching> {
     if median_in_place(&mut spans)? > MAX_BATCH_SPAN_MS {
         return None;
     }
-    let mut periods: Vec<f64> = deliveries.iter().map(|d| d.0).collect();
-    let event_period_ms = median_in_place(&mut periods)?;
     let catch_ups = batches
         .iter()
         .filter(|b| b.0 >= CATCH_UP_PERIODS * event_period_ms)
@@ -677,6 +686,21 @@ mod tests {
         let events = event_intervals_ms(&i);
         assert!(events.iter().filter(|&&e| e > 20.0).count() >= 20);
         assert!(batched_delivery(&i).is_some());
+        // Four reports per 15 ms event, with 5-10% of the events missed:
+        // their reports arrive with the next event, which then holds seven
+        // or eight. Per connection event it is still under four.
+        for every in [20, 12, 10] {
+            let i = intervals(&bluetooth_arrivals(10.0, 250.0, 15.0, |k| k % every == 0));
+            let b = batched_delivery(&i).expect("batched");
+            assert!((b.event_period_ms - 15.0).abs() < 0.3, "{} {:?}", every, b);
+            assert!(
+                (b.reports_per_event - 3.75).abs() < 0.2,
+                "{} {:?}",
+                every,
+                b
+            );
+            assert_eq!(rate_hz(&i, 10), Some(67), "{}", every);
+        }
     }
 
     #[test]
