@@ -33,7 +33,7 @@ Mouse TRAP is a comprehensive mouse testing utility designed to analyze and diag
 |---------------|-------------|
 | Function | Displays real-time mouse polling rate |
 | Measurement | Hz (polls per second), from the median interval of fast movement only (slow movement and reversals skip polls); deliveries per second when a Bluetooth mouse delivers reports in batches; GUI and CLI |
-| Common Values | 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz; under 110 Hz no USB rate is named (normal for Bluetooth) |
+| Common Values | 125Hz, 250Hz, 500Hz, 1000Hz, 4000Hz, 8000Hz; under 110 Hz no USB rate is named (normal for Bluetooth), nor more than 4% above a standard rate (133 Hz: Bluetooth at 7.5 ms) |
 | Use Case | Verifying advertised polling rates and consistency |
 
 ### 3. USB Conflict Detection

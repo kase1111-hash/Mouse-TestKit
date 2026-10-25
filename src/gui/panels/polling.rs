@@ -64,6 +64,10 @@ pub(super) fn input_lost_notice(ui: &mut egui::Ui) {
     );
 }
 
+/// Shown for a reading of 110 Hz or more that is well above every standard
+/// USB rate (see `analysis::polling::usb_nominal_rate`).
+const NO_USB_RATE_FITS: &str = "No standard USB rate fits this reading: the computer polls a USB mouse on a fixed clock, so it measures at or just under its rate (125, 250, 500, 1000 Hz and up), never well above it. About 133 Hz is normal for a Bluetooth mouse on its shortest connection interval (7.5 ms).";
+
 /// Panel for measuring mouse polling rate.
 ///
 /// Calculates the polling rate from the median interval between consecutive
@@ -236,12 +240,15 @@ impl PollingPanel {
             ));
         }
 
-        if self.samples > 0 && usb_nominal_rate(self.avg_hz).is_none() {
+        if self.samples > 0 && self.avg_hz < USB_MIN_POLLING_HZ as f64 {
             ui.add_space(8.0);
             ui.label(format!(
                 "Under {} Hz no USB rate fits. That is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: check its polling rate setting.",
                 USB_MIN_POLLING_HZ
             ));
+        } else if self.samples > 0 && !self.ever_batched && self.nominal_hz().is_none() {
+            ui.add_space(8.0);
+            ui.label(NO_USB_RATE_FITS);
         }
 
         if self.is_running && !self.live {
@@ -556,6 +563,16 @@ mod tests {
         let avg = p.export().unwrap().avg_hz;
         assert!((avg - 89.0).abs() < 1.0, "{}", avg);
         assert_eq!(usb_nominal_rate(avg), None);
+        // ... or one report per 7.5 ms interval: 133 Hz, not a 125 Hz mouse
+        let mut p = PollingPanel::new();
+        p.start();
+        let events: Vec<_> = (0..300u64)
+            .map(|i| mv(t0 + Duration::from_micros(7_500 * i), 8, 2))
+            .collect();
+        drive(&mut p, &events);
+        assert!(!p.ever_batched);
+        assert!((p.avg_hz - 133.3).abs() < 1.0, "{}", p.avg_hz);
+        assert_eq!(p.nominal_hz(), None);
     }
 
     #[test]

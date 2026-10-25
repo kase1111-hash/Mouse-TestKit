@@ -10,7 +10,9 @@
 
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
-use mouse_testkit::analysis::polling::{usb_nominal_rate, window_hz, PollingStats};
+use mouse_testkit::analysis::polling::{
+    usb_nominal_rate, window_hz, PollingStats, USB_MIN_POLLING_HZ,
+};
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -119,9 +121,8 @@ pub fn run() -> bool {
             stats.avg_hz,
             nominal_label(stats.avg_hz)
         );
-        if usb_nominal_rate(stats.avg_hz).is_none() {
-            println!("Under 110 Hz no USB rate fits: normal for a Bluetooth mouse (67-133 Hz),");
-            println!("low for a USB mouse, which should report 125 Hz or more.");
+        if let Some(note) = no_usb_rate_note(stats.avg_hz) {
+            println!("{}", note);
         }
     } else {
         println!("No rate measured: move the mouse quickly and continuously.");
@@ -151,8 +152,19 @@ fn window_rate(reports: &[(Instant, i32, i32)]) -> Option<u32> {
     window_hz(&reports)
 }
 
+/// Why no USB rate is named for an average rate, if none is.
+fn no_usb_rate_note(avg_hz: f64) -> Option<&'static str> {
+    if usb_nominal_rate(avg_hz).is_some() {
+        None
+    } else if avg_hz < USB_MIN_POLLING_HZ as f64 {
+        Some("Under 110 Hz no USB rate fits: normal for a Bluetooth mouse (67-133 Hz),\nlow for a USB mouse, which should report 125 Hz or more.")
+    } else {
+        Some("No USB rate fits: a USB mouse measures at or just under its rate, never well\nabove it. About 133 Hz is a Bluetooth mouse on a 7.5 ms connection interval.")
+    }
+}
+
 /// " (~1000 Hz)" for a rate a USB mouse runs at; nothing for the Bluetooth
-/// range, where a USB rate would read as a USB mouse running slow.
+/// range, where a USB rate would read as a USB mouse running slow or fast.
 fn nominal_label(hz: f64) -> String {
     usb_nominal_rate(hz)
         .map(|n| format!(" (~{} Hz)", n))
@@ -187,6 +199,10 @@ mod tests {
     #[test]
     fn bluetooth_rate_names_no_usb_rate() {
         assert_eq!(nominal_label(89.0), "");
+        assert_eq!(nominal_label(133.0), "");
         assert_eq!(nominal_label(997.0), " (~1000 Hz)");
+        assert!(no_usb_rate_note(89.0).unwrap().starts_with("Under 110 Hz"));
+        assert!(no_usb_rate_note(133.0).unwrap().contains("7.5 ms"));
+        assert_eq!(no_usb_rate_note(997.0), None);
     }
 }

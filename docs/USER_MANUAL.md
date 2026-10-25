@@ -40,7 +40,7 @@ Measures how often your mouse reports its position to the computer. Requires raw
 
 1. Click **Start**
 2. Move the mouse quickly and continuously, e.g. in circles
-3. View real-time Hz readings and graph. "Nominal" is the nearest standard USB rate the measurement corresponds to. Under 110 Hz none is named: that is normal for a Bluetooth mouse (67-133 Hz), and the panel says so
+3. View real-time Hz readings and graph. "Nominal" is the nearest standard USB rate the measurement corresponds to. Under 110 Hz none is named: that is normal for a Bluetooth mouse (67-133 Hz), and the panel says so. Nor is one named for a reading more than 4% above a standard rate, which no USB mouse gives (the computer polls it on a fixed clock): about 133 Hz is a Bluetooth mouse on a 7.5 ms connection interval
 4. Each **Start** begins a new measurement, so switching the polling-rate setting or the mouse between runs does not blend the readings. If the mouse's raw input stops (unplugged, link dropped, or another input chosen) the run ends and says so; it does not carry on with whatever input comes next
 
 A Bluetooth mouse can deliver two or more reports at once, one connection event apart: the panel then says so and shows deliveries per second, which is how often the cursor moves, and names no USB rate.

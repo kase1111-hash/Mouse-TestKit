@@ -28,8 +28,8 @@ pub const MIN_FAST_INTERVALS: usize = 20;
 /// The slowest rate a USB mouse runs at is 125 Hz; this leaves room for
 /// timing error. Below it a mouse is on Bluetooth, where one report per
 /// 7.5-15 ms connection interval (67-133 Hz) is normal, or is a USB mouse
-/// set to a low rate. No USB rate is named for such a reading (see
-/// [`usb_nominal_rate`]).
+/// set to a low rate. No USB rate is named for such a reading, nor for one
+/// well above a USB rate, such as 133 Hz (see [`usb_nominal_rate`]).
 pub const USB_MIN_POLLING_HZ: u32 = 110;
 
 /// Counts a report must carry on its larger axis to prove the mouse had a
@@ -338,11 +338,22 @@ pub fn rate_hz(intervals_ms: &[f64], min_samples: usize) -> Option<u32> {
     }
 }
 
+/// How far above a standard rate (as a share of it) a measurement may be
+/// and still be named that rate. The host polls a USB mouse on its own
+/// frame clock (1 ms, or 125 us at high speed), so a missed or late report
+/// can lengthen an interval but none is shorter than the poll; the median
+/// keeps timestamp noise to a percent or two. A 7.5 ms Bluetooth
+/// connection interval reads 133 Hz, 6.7% above 125.
+const MAX_ABOVE_NOMINAL: f64 = 0.04;
+
 /// The standard USB rate nearest a measurement, or `None` below
-/// [`USB_MIN_POLLING_HZ`]: there "nominal 125 Hz" would read as a USB mouse
-/// running slow, while the rate is normal for Bluetooth.
+/// [`USB_MIN_POLLING_HZ`] (there "nominal 125 Hz" would read as a USB mouse
+/// running slow, while the rate is normal for Bluetooth) and when it is
+/// well above that rate ([`MAX_ABOVE_NOMINAL`]), which no USB mouse is.
 pub fn usb_nominal_rate(hz: f64) -> Option<u32> {
-    (hz >= USB_MIN_POLLING_HZ as f64).then(|| nominal_rate(hz))
+    let nominal = nominal_rate(hz);
+    (hz >= USB_MIN_POLLING_HZ as f64 && hz <= nominal as f64 * (1.0 + MAX_ABOVE_NOMINAL))
+        .then_some(nominal)
 }
 
 /// Nearest standard report rate for a measured value (e.g. 986 Hz -> 1000).
@@ -582,6 +593,14 @@ mod tests {
         assert_eq!(usb_nominal_rate(109.9), None);
         assert_eq!(usb_nominal_rate(110.0), Some(125));
         assert_eq!(usb_nominal_rate(986.0), Some(1000));
+        // A USB rate is never measured well above itself: 133 Hz is a
+        // Bluetooth mouse on a 7.5 ms connection interval
+        assert_eq!(usb_nominal_rate(133.0), None);
+        assert_eq!(usb_nominal_rate(150.0), None);
+        assert_eq!(usb_nominal_rate(128.0), Some(125));
+        assert_eq!(usb_nominal_rate(1030.0), Some(1000));
+        assert_eq!(usb_nominal_rate(8150.0), Some(8000));
+        assert_eq!(usb_nominal_rate(7700.0), Some(8000));
     }
 
     #[test]

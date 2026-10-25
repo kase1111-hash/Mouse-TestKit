@@ -2769,6 +2769,22 @@ mod tests {
             assert_eq!(sim.at.metrics.polling_nominal_hz, None);
         }
 
+        // One report per 7.5 ms connection event: nothing batched, but 133
+        // Hz is no USB rate either
+        let mut sim = Sim::new(cfg());
+        sim.good_rest();
+        bluetooth_stream(&mut sim, 12.5, 7.5, 7.5, |_| false);
+        assert!(!sim.at.metrics.batched_delivery);
+        assert_eq!(sim.at.metrics.polling_hz, Some(133));
+        assert_eq!(sim.at.metrics.polling_nominal_hz, None);
+        assert!(
+            movement_findings(&sim)
+                .iter()
+                .all(|(s, _)| *s == Severity::Info),
+            "{:?}",
+            movement_findings(&sim)
+        );
+
         // A mouse sampling at 100 or 150 Hz over an 11.25 or 7.5 ms
         // interval: two reports in one connection event of eight, which per
         // report makes over a tenth of the intervals near zero
