@@ -1528,11 +1528,12 @@ impl ClickPanel {
         }
         let (dpi, dpi_assumed) = self.liftoff_dpi;
         let tally = &self.liftoff_view();
-        // Jumps and possible jumps; the verdict says whether any could have
-        // been the hand.
+        // Jumps, then possible jumps (counted apart, as on the page)
         let counts: Vec<f64> = tally.jump_sized().map(|j| j.peak_counts).collect();
         Some(LiftOffExport {
-            jump_count: tally.jump_sized_count(),
+            jump_count: tally.jumps.len(),
+            possible_jumps: tally.possible.len(),
+            hand_movements_ignored: tally.nudges,
             avg_distance_px: tally.avg_jump_counts(),
             max_distance_px: tally.max_jump_counts(),
             jump_distances_mm: counts.iter().map(|&c| counts_to_mm(c, dpi)).collect(),
@@ -2259,9 +2260,20 @@ mod tests {
             tally
         );
         assert_eq!(panel.liftoff_verdict(), LiftVerdict::PossibleJumps);
+        // The export splits them as the page does ("0 +2 possible")
         let export = panel.export_liftoff().unwrap();
-        assert_eq!(export.jump_count, 2);
+        assert_eq!(export.jump_count, 0);
+        assert_eq!(export.possible_jumps, 2);
+        assert_eq!(export.hand_movements_ignored, 2);
+        assert_eq!(export.jump_distances.len(), 2);
         assert_eq!(export.verdict, "Possible jumps - repeat the test");
+        let csv = crate::export::TestResultsExport {
+            liftoff: Some(export),
+            ..crate::export::TestResultsExport::empty_for_test()
+        }
+        .to_csv();
+        assert!(csv.contains("Lift-Off,Jump Count,0\n"), "{}", csv);
+        assert!(csv.contains("Lift-Off,Possible Jumps,2\n"), "{}", csv);
         liftoff_frame(&mut panel, &[], false, true);
     }
 

@@ -758,7 +758,12 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Lift: jumps",
-                                    or_not_tested(report.lift_jumps().map(|v| v.to_string())),
+                                    or_not_tested(report.lift_jump_split().map(
+                                        |(jumps, possible)| match possible {
+                                            0 => jumps.to_string(),
+                                            _ => format!("{} +{} possible", jumps, possible),
+                                        },
+                                    )),
                                 ),
                                 (
                                     "Lift: largest jump",

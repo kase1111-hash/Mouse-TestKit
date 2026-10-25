@@ -289,6 +289,16 @@ impl Report {
             .then_some(self.metrics.lift_jumps)
     }
 
+    /// [`Self::lift_jumps`] split into jumps no hand could make and
+    /// possible jumps (`(jumps, possible)`), so a possible jump is not read
+    /// as a confirmed one.
+    pub fn lift_jump_split(&self) -> Option<(usize, usize)> {
+        self.lift_jumps().map(|n| {
+            let possible = self.metrics.lift_possible_jumps.min(n);
+            (n - possible, possible)
+        })
+    }
+
     /// Unit of `Metrics::rest_distance_counts`: raw sensor counts, or
     /// pointer units without raw input.
     pub fn rest_unit(&self) -> &'static str {
@@ -3186,6 +3196,7 @@ mod tests {
         let r = sim.at.report().unwrap();
         assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
         assert_eq!(r.metrics.lift_possible_jumps, 0);
+        assert_eq!(r.lift_jump_split(), Some((3, 0)));
         assert!((r.metrics.lift_max_jump_counts - 100.0).abs() < 1e-9);
         assert!((r.metrics.lift_max_jump_mm - 3.175).abs() < 1e-9);
         assert!(!r.metrics.lift_dpi_assumed);
@@ -3216,6 +3227,8 @@ mod tests {
         let r = sim.at.report().unwrap();
         assert_eq!(r.metrics.lift_jumps, 3, "{:?}", titles(r));
         assert_eq!(r.metrics.lift_possible_jumps, 3);
+        // Not to be read as three confirmed jumps
+        assert_eq!(r.lift_jump_split(), Some((0, 3)));
         assert_eq!(r.count(Severity::Warning), 0, "{:?}", titles(r));
         let f = lift_finding(r);
         assert_eq!(

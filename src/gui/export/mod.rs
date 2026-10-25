@@ -145,15 +145,23 @@ pub struct StickyButtonExport {
 /// setting it down), judged by `analysis::liftoff`.
 #[derive(Serialize)]
 pub struct LiftOffExport {
+    /// Jumps no hand could make ("Jumps Detected" on the page).
     pub jump_count: usize,
-    /// Average jump in raw sensor counts (the name is kept for existing
-    /// readers of the export; these were never screen pixels).
+    /// Jump-sized movements that could also have been the hand, such as a
+    /// mouse landing while still sliding ("+N possible" on the page): set
+    /// the mouse straight down and repeat.
+    pub possible_jumps: usize,
+    /// Jump-sized movements the hand made (smooth nudges), not judged.
+    pub hand_movements_ignored: usize,
+    /// Average of the jumps and possible jumps in raw sensor counts (the
+    /// name is kept for existing readers of the export; these were never
+    /// screen pixels).
     pub avg_distance_px: f64,
-    /// Largest jump in raw sensor counts (see `avg_distance_px`).
+    /// Largest of them in raw sensor counts (see `avg_distance_px`).
     pub max_distance_px: f64,
-    /// Each jump in raw sensor counts.
+    /// Each jump, then each possible jump, in raw sensor counts.
     pub jump_distances: Vec<f64>,
-    /// Each jump in mm, converted with `dpi`.
+    /// The same in mm, converted with `dpi`.
     pub jump_distances_mm: Vec<f64>,
     pub max_distance_mm: f64,
     /// SPACE presses: lifts the user reported making.
@@ -165,8 +173,9 @@ pub struct LiftOffExport {
     /// ... and whether it was assumed (not set on the DPI Accuracy page).
     pub dpi_assumed: bool,
     pub jump_threshold_mm: f64,
-    /// "Cursor jumps on lift", "One jump - repeat the test",
-    /// "Inconclusive - too few lifts" or "No jumps".
+    /// "Cursor jumps on lift", "One jump - repeat the test", "Possible
+    /// jumps - repeat the test", "Inconclusive - too few lifts" or "No
+    /// jumps".
     pub verdict: String,
 }
 
@@ -303,6 +312,26 @@ fn csv_escape(value: &str) -> String {
 }
 
 impl TestResultsExport {
+    /// An export with no test results.
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            export_info: ExportInfo::new(),
+            polling_rate: None,
+            stutter: None,
+            click_response: None,
+            click_sticky: None,
+            liftoff: None,
+            jitter: None,
+            double_click: None,
+            dpi: None,
+            acceleration: None,
+            angle_snap: None,
+            scroll: None,
+            auto_diagnostics: None,
+        }
+    }
+
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -422,6 +451,11 @@ impl TestResultsExport {
             csv.push_str(&format!("Lift-Off,Verdict,{}\n", csv_escape(&l.verdict)));
             csv.push_str(&format!("Lift-Off,Lifts Recorded,{}\n", l.lifts_recorded));
             csv.push_str(&format!("Lift-Off,Jump Count,{}\n", l.jump_count));
+            csv.push_str(&format!("Lift-Off,Possible Jumps,{}\n", l.possible_jumps));
+            csv.push_str(&format!(
+                "Lift-Off,Hand Movements Ignored,{}\n",
+                l.hand_movements_ignored
+            ));
             csv.push_str(&format!(
                 "Lift-Off,Max Jump (mm),{:.1}\n",
                 l.max_distance_mm
@@ -593,9 +627,14 @@ impl TestResultsExport {
                 "Auto Diagnostics,Scroll Reversals,{}\n",
                 or_not_tested(r.scroll_reversals().map(|v| v.to_string()))
             ));
+            let split = r.lift_jump_split();
             csv.push_str(&format!(
                 "Auto Diagnostics,Lift Jumps,{}\n",
-                or_not_tested(r.lift_jumps().map(|v| v.to_string()))
+                or_not_tested(split.map(|(jumps, _)| jumps.to_string()))
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Lift Possible Jumps,{}\n",
+                or_not_tested(split.map(|(_, possible)| possible.to_string()))
             ));
             for f in &r.findings {
                 csv.push_str(&format!(
@@ -692,6 +731,7 @@ mod tests {
         assert!(csv.contains("Auto Diagnostics,Stutter Rate (%),not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Switch Bounces,not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Lift Jumps,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Lift Possible Jumps,not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Rest Movement (counts),0.0\n"));
         assert!(csv.contains(
             "Auto Diagnostics,WARNING: Possible switch bounce,\"1 press came within 25 ms, re-run\"\n"
@@ -702,23 +742,8 @@ mod tests {
             .contains("\"verdict\": \"Attention\""));
     }
 
-    /// An export with no test results.
     fn empty_export() -> TestResultsExport {
-        TestResultsExport {
-            export_info: ExportInfo::new(),
-            polling_rate: None,
-            stutter: None,
-            click_response: None,
-            click_sticky: None,
-            liftoff: None,
-            jitter: None,
-            double_click: None,
-            dpi: None,
-            acceleration: None,
-            angle_snap: None,
-            scroll: None,
-            auto_diagnostics: None,
-        }
+        TestResultsExport::empty_for_test()
     }
 
     #[test]

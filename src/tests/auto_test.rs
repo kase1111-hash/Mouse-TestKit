@@ -275,10 +275,14 @@ fn print_report(report: &Report, total_phases: usize) {
             .scroll_reversals()
             .map_or("not tested".to_string(), |n| n.to_string())
     );
-    match report.lift_jumps() {
-        Some(jumps) => println!(
+    match report.lift_jump_split() {
+        Some((jumps, 0)) => println!(
             "  Lift: {} jump(s), largest {:.0} counts",
             jumps, m.lift_max_jump_counts
+        ),
+        Some((jumps, possible)) => println!(
+            "  Lift: {} jump(s) + {} possible, largest {:.0} counts",
+            jumps, possible, m.lift_max_jump_counts
         ),
         None => println!("  Lift: not tested"),
     }
