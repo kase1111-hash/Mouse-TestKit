@@ -65,6 +65,13 @@ pub struct DpiPanel {
     samples: Vec<DpiSample>,
     last_saved_dpi: u32,
     last_saved_distance: f32,
+    /// The last measurement was cancelled because raw input stopped.
+    cancelled_for_input: bool,
+    /// Reports the system dropped took some of the measurement's counts
+    /// (see `RawInputEvent::lost_before`): it will not be recorded...
+    spoiled: bool,
+    /// ... and the last one was not, for that reason.
+    discarded_for_gap: bool,
 }
 
 struct DpiSample {
@@ -86,6 +93,9 @@ impl DpiPanel {
             samples: Vec::new(),
             last_saved_dpi: 800,
             last_saved_distance: 2.0,
+            cancelled_for_input: false,
+            spoiled: false,
+            discarded_for_gap: false,
         }
     }
 
@@ -126,6 +136,13 @@ impl DpiPanel {
         self.is_running
     }
 
+    /// The measured input changed: a measurement in progress is cancelled,
+    /// whichever page is shown. Another input's counts are never added to it.
+    pub fn input_changed(&mut self) {
+        self.cancelled_for_input |= self.is_running;
+        self.is_running = false;
+    }
+
     fn distance_label(&self) -> String {
         if self.use_cm {
             format!("{:.1} cm", self.target_distance_inches * CM_PER_INCH)
@@ -145,9 +162,30 @@ impl DpiPanel {
         ui.add_space(5.0);
         ui.label("Measures actual DPI against your mouse's configured DPI setting.");
         if !has_bridge {
+            // Counts seen so far are only part of the movement, and counts
+            // from whatever input comes next must not be added to them
+            self.cancelled_for_input |= self.is_running;
             ui.add_space(5.0);
             raw_input_required_notice(ui, "DPI (counts per inch)");
             self.is_running = false;
+        }
+        if self.cancelled_for_input {
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(
+                    "The last measurement was cancelled: raw input from the mouse stopped during it (it was unplugged, its receiver or link dropped out, or another input was chosen), so not all of its movement was counted. Press SPACE to measure again.",
+                )
+                .color(egui::Color32::LIGHT_RED),
+            );
+        }
+        if self.discarded_for_gap {
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(
+                    "The last measurement was not recorded: some of its movement was lost (the computer did not read the mouse in time and the system dropped reports). Press SPACE to measure again.",
+                )
+                .color(egui::Color32::LIGHT_RED),
+            );
         }
         ui.add_space(15.0);
 
@@ -261,6 +299,14 @@ impl DpiPanel {
                         egui::RichText::new("Press SPACE when the mouse is on the end mark")
                             .color(egui::Color32::YELLOW),
                     );
+                    if self.spoiled {
+                        ui.label(
+                            egui::RichText::new(
+                                "Some movement was lost (the computer fell behind reading the mouse), so this measurement will not be recorded. Finish it with SPACE, then measure again.",
+                            )
+                            .color(egui::Color32::LIGHT_RED),
+                        );
+                    }
                 });
         } else {
             egui::Frame::new()
@@ -352,6 +398,7 @@ impl DpiPanel {
     /// Track the net displacement in raw counts.
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
         for ev in raw_events {
+            self.spoiled |= ev.lost_before;
             if let RawInputKind::Move { dx, dy } = ev.kind {
                 self.current_pos.0 += dx as i64;
                 self.current_pos.1 += dy as i64;
@@ -361,11 +408,20 @@ impl DpiPanel {
 
     fn start_measurement(&mut self) {
         self.is_running = true;
+        self.cancelled_for_input = false;
+        self.spoiled = false;
+        self.discarded_for_gap = false;
         self.current_pos = (0, 0);
     }
 
+    /// End the measurement on the end mark. One that lost counts is not
+    /// recorded: it would read low (as in the CLI test).
     fn finish_measurement(&mut self) {
         self.is_running = false;
+        if std::mem::take(&mut self.spoiled) {
+            self.discarded_for_gap = true;
+            return;
+        }
         if self.current_pos == (0, 0) || self.target_distance_inches <= 0.0 {
             return;
         }
@@ -416,6 +472,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: Instant::now(),
+            lost_before: false,
         }
     }
 
@@ -510,6 +567,24 @@ mod tests {
     }
 
     #[test]
+    fn a_measurement_that_lost_counts_is_not_recorded() {
+        // 800 DPI over 2 in: 1600 counts, of which the system dropped about
+        // a fifth while the reader fell behind
+        let mut p = DpiPanel::new();
+        let mut events: Vec<_> = (0..320).map(|_| mv(4, 0)).collect();
+        events[160].lost_before = true;
+        events.truncate(320 - 80);
+        assert_eq!(measure(&mut p, &events), 0.0);
+        assert!(p.export().is_none());
+        assert!(p.discarded_for_gap);
+        // Measured again without a gap: recorded
+        let dpi = measure(&mut p, &[mv(1600, 0)]);
+        assert!((dpi - 800.0).abs() < 1.0, "{}", dpi);
+        assert!(!p.discarded_for_gap);
+        assert_eq!(p.export().unwrap().samples.len(), 1);
+    }
+
+    #[test]
     fn fallback_does_not_measure() {
         let ctx = egui::Context::default();
         let mut p = DpiPanel::new();
@@ -520,6 +595,34 @@ mod tests {
             p.ui(ui, &c, &events, false);
         });
         assert!(!p.is_running());
+        assert_eq!(p.current_pos, (0, 0));
+    }
+
+    #[test]
+    fn losing_raw_input_cancels_the_measurement_without_mixing() {
+        // Half the movement from the measured mouse, then it is unplugged
+        // and another one is read: nothing of either is recorded, and the
+        // panel says why
+        let ctx = egui::Context::default();
+        let frame = |p: &mut DpiPanel, events: &[RawInputEvent], raw: bool| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let c = ui.ctx().clone();
+                p.ui(ui, &c, events, raw);
+            });
+        };
+        let mut p = DpiPanel::new();
+        p.start_measurement();
+        let half: Vec<_> = (0..400).map(|_| mv(2, 0)).collect();
+        frame(&mut p, &half, true);
+        assert_eq!(p.current_pos, (800, 0));
+        frame(&mut p, &[], false);
+        assert!(!p.is_running() && p.cancelled_for_input);
+        frame(&mut p, &half, true);
+        assert_eq!(p.current_pos, (800, 0));
+        assert!(p.export().is_none());
+        // The next measurement starts clean
+        p.start_measurement();
+        assert!(!p.cancelled_for_input);
         assert_eq!(p.current_pos, (0, 0));
     }
 }

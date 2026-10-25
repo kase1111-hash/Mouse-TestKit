@@ -3,13 +3,24 @@
 //! Provides safe wrappers around terminal operations that give users
 //! meaningful feedback when something goes wrong.
 
-use mouse_testkit::types::{MouseEvent, TimedEvent};
+use mouse_testkit::types::{DeviceLost, InputBatch, MouseEvent};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-// Windows-specific imports
+#[cfg(target_os = "linux")]
+use crate::input::MouseDevice;
 #[cfg(target_os = "windows")]
 use crate::input_windows::MouseDevice;
+
+/// One read of the mouse that waits up to the given time for input, e.g.
+/// `|wait| input::read_events(&mut device, wait)`.
+pub type ReadResult = Result<InputBatch, DeviceLost>;
+
+/// How long a test loop waits for mouse input before it checks the keyboard
+/// again. The loop wakes as soon as the mouse reports, so it keeps up with
+/// an 8000 Hz mouse (whose reports overflow the system's input buffer after
+/// about 5 ms of not reading), and a key press is seen within this time.
+pub const READ_WAIT: Duration = Duration::from_millis(1);
 
 /// Enable raw mode with error reporting
 /// Returns true if successful, false otherwise
@@ -41,7 +52,7 @@ pub fn disable_raw_mode() -> bool {
 /// Grab a device exclusively with error reporting
 /// Returns true if successful, false otherwise
 #[cfg(target_os = "linux")]
-pub fn grab_device(device: &mut evdev::Device) -> bool {
+pub fn grab_device(device: &mut MouseDevice) -> bool {
     match device.grab() {
         Ok(_) => true,
         Err(e) => {
@@ -83,9 +94,36 @@ pub fn wait_for_enter() {
 /// Discard the input queued for a device so far. A device node buffers its
 /// events from the moment it is opened, so clicks and movement made while a
 /// prompt (such as the device list) waited would otherwise reach the test
-/// with stale timestamps.
-pub fn discard_queued(mut fetch: impl FnMut() -> Vec<TimedEvent>) {
-    while !fetch().is_empty() {}
+/// with stale timestamps. A mouse that is gone is left for the test's own
+/// read to report.
+pub fn discard_queued(mut read: impl FnMut(Duration) -> ReadResult) {
+    while let Ok(batch) = read(Duration::ZERO) {
+        if batch.events.is_empty() && !batch.lost_data {
+            break;
+        }
+    }
+}
+
+/// Print, below a test's results, that the mouse disappeared during it.
+pub fn print_device_lost() {
+    println!("\n⚠ The mouse stopped responding during the test: it was unplugged, or its");
+    println!("  cable, receiver or wireless link dropped out. The test stopped there, so the");
+    println!("  results above cover only the input before that and a clean result is not a");
+    println!("  verdict: run the test again. If you did not unplug the mouse, the connection");
+    println!("  is failing - try another port or cable, or move the receiver closer.");
+}
+
+/// Print, below a test's results, how often reports were lost because the
+/// program fell behind (nothing when `gaps` is 0).
+pub fn print_lost_data_note(gaps: usize) {
+    if gaps > 0 {
+        println!(
+            "\nNote: {} time(s) the computer did not read the mouse in time and the system",
+            gaps
+        );
+        println!("dropped some of its reports. Nothing was timed or counted across those gaps; if");
+        println!("it keeps happening, close other busy programs and re-run the test.");
+    }
 }
 
 /// Seconds from `start` to an event at `t`, or `None` for an event from
@@ -104,6 +142,8 @@ pub fn raw_lines(text: &str) -> String {
 
 /// How long [`confirm_device_moves`] waits for movement.
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long each read in [`confirm_device_moves`] waits for input.
+const CONFIRM_READ_WAIT: Duration = Duration::from_millis(5);
 
 /// Ask the user to nudge the mouse and wait for movement from the device:
 /// proof that the device read is the mouse being tested and that it is
@@ -113,21 +153,26 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tests in which a healthy mouse sends nothing (sensor at rest, clean
 /// lifts) need this before "nothing seen" can mean a clean result: a silent
 /// device node (the wrong one of several, one held by another program, or a
-/// mouse that was unplugged) sends nothing too.
-pub fn confirm_device_moves(prompt: &str, mut fetch: impl FnMut() -> Vec<TimedEvent>) -> bool {
-    discard_queued(&mut fetch);
+/// mouse that was unplugged) sends nothing too. A mouse that is reported
+/// gone ends the wait at once.
+pub fn confirm_device_moves(prompt: &str, mut read: impl FnMut(Duration) -> ReadResult) -> bool {
+    discard_queued(&mut read);
     print!("{} ", prompt);
     flush_stdout();
     let deadline = Instant::now() + CONFIRM_TIMEOUT;
     while Instant::now() < deadline {
-        let moved = fetch()
+        let Ok(batch) = read(CONFIRM_READ_WAIT) else {
+            println!("the mouse is not responding (disconnected).");
+            return false;
+        };
+        let moved = batch
+            .events
             .iter()
             .any(|e| matches!(e.event, MouseEvent::Move { dx, dy } if dx != 0 || dy != 0));
         if moved {
             println!("OK");
             return true;
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
     println!("no movement.");
     false
@@ -179,6 +224,7 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mouse_testkit::types::TimedEvent;
 
     #[test]
     fn raw_lines_return_to_the_start_of_each_line() {
@@ -197,21 +243,64 @@ mod tests {
         }
     }
 
+    fn batch(events: usize, lost_data: bool) -> ReadResult {
+        Ok(InputBatch {
+            events: (0..events)
+                .map(|_| TimedEvent {
+                    time: Instant::now(),
+                    event: MouseEvent::Move { dx: 1, dy: 0 },
+                })
+                .collect(),
+            lost_data,
+        })
+    }
+
     #[test]
     fn discard_queued_drains_every_batch() {
-        let mut batches = vec![
-            vec![],
-            vec![TimedEvent {
-                time: Instant::now(),
-                event: MouseEvent::Move { dx: 1, dy: 0 },
-            }],
-            vec![TimedEvent {
-                time: Instant::now(),
-                event: MouseEvent::Move { dx: 1, dy: 0 },
-            }],
+        // Read back to front: two batches, a gap with nothing after it, two
+        // more batches, then nothing
+        let mut reads = vec![
+            batch(0, false),
+            batch(1, false),
+            batch(2, false),
+            batch(0, true),
+            batch(1, false),
+            batch(1, false),
         ];
-        // Stops at the first empty fetch: nothing more is queued
-        discard_queued(|| batches.pop().unwrap_or_default());
-        assert!(batches.is_empty());
+        // Stops at the first empty read: nothing more is queued
+        discard_queued(|wait| {
+            assert_eq!(wait, Duration::ZERO, "draining must not wait");
+            reads.pop().unwrap_or_else(|| batch(0, false))
+        });
+        assert!(reads.is_empty());
+
+        // A mouse that is gone stops the draining too
+        let mut calls = 0;
+        discard_queued(|_| {
+            calls += 1;
+            Err(DeviceLost)
+        });
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn confirming_a_disconnected_mouse_does_not_wait() {
+        let start = Instant::now();
+        let mut reads = vec![Err(DeviceLost), batch(0, false)];
+        let confirmed = confirm_device_moves("Nudge the mouse...", |_| {
+            reads.pop().unwrap_or(Err(DeviceLost))
+        });
+        assert!(!confirmed);
+        assert!(start.elapsed() < CONFIRM_TIMEOUT);
+    }
+
+    #[test]
+    fn confirming_needs_movement_after_the_prompt() {
+        // Movement queued before the prompt is discarded; the next counts
+        let mut reads = vec![batch(1, false), batch(0, false), batch(3, false)];
+        assert!(confirm_device_moves("Nudge the mouse...", |_| {
+            reads.pop().unwrap_or_else(|| batch(0, false))
+        }));
+        assert!(reads.is_empty());
     }
 }

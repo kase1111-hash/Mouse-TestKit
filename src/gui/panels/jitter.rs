@@ -50,8 +50,12 @@ pub struct JitterPanel {
     touched: bool,
     /// The last sample was thrown away because the mouse was touched...
     last_discarded: bool,
-    /// ... or because its input source changed while it was taken.
+    /// ... or because its input source changed while it was taken...
     discarded_for_input: bool,
+    /// ... or because the system dropped some of its reports (see
+    /// `RawInputEvent::lost_before`): movement is missing, so a quiet
+    /// sample could be a noisy sensor.
+    lost_reports: bool,
     /// Whether the current sample reads raw counts (false: pointer points).
     current_raw: bool,
 }
@@ -76,12 +80,24 @@ impl JitterPanel {
             touched: false,
             last_discarded: false,
             discarded_for_input: false,
+            lost_reports: false,
             current_raw: true,
         }
     }
 
     pub fn is_running(&self) -> bool {
         self.is_sampling
+    }
+
+    /// The measured input changed: a sample in progress was not taken on
+    /// one input throughout and is set aside.
+    pub fn input_changed(&mut self) {
+        if self.is_sampling {
+            self.is_sampling = false;
+            self.sample_start = None;
+            self.last_discarded = true;
+            self.discarded_for_input = true;
+        }
     }
 
     /// Draw the page. Input is recorded by [`Self::process_input`].
@@ -137,6 +153,8 @@ impl JitterPanel {
             ui.label(
                 egui::RichText::new(if self.discarded_for_input {
                     "Last sample discarded: raw input from the mouse stopped or started while it was taken (unplugged, its link dropped out, or another input was chosen), so it was not measured throughout. Take another sample."
+                } else if self.lost_reports {
+                    "Last sample discarded: some of its movement was lost (the computer did not read the mouse in time and the system dropped reports). Take another sample."
                 } else {
                     "Last sample discarded: a mouse button was pressed or released while recording, so the hand was on the mouse. Take another sample."
                 })
@@ -344,6 +362,7 @@ impl JitterPanel {
             if event.timestamp < from || event.timestamp >= until {
                 continue;
             }
+            self.lost_reports |= event.lost_before;
             match event.kind {
                 RawInputKind::Move { dx, dy } if dx != 0 || dy != 0 => {
                     self.record_delta(dx as f64, dy as f64);
@@ -389,13 +408,14 @@ impl JitterPanel {
         self.touched = false;
         self.last_discarded = false;
         self.discarded_for_input = false;
+        self.lost_reports = false;
         self.current_raw = raw;
     }
 
     fn finish_sample(&mut self) {
         self.is_sampling = false;
         self.sample_start = None;
-        if self.touched {
+        if self.touched || self.lost_reports {
             self.last_discarded = true;
             return;
         }
@@ -471,6 +491,7 @@ mod tests {
         RawInputEvent {
             kind,
             timestamp: start + Duration::from_millis(ms),
+            lost_before: false,
         }
     }
 
@@ -523,6 +544,21 @@ mod tests {
         assert_eq!(e.avg_events, 20.0);
         assert!((e.avg_distance_px - 24.14).abs() < 0.01);
         assert_eq!(e.rating, "High Jitter");
+    }
+
+    #[test]
+    fn a_sample_that_lost_reports_is_set_aside() {
+        // Some of the recording's reports were dropped by the system: a
+        // quiet result could be a noisy sensor
+        let mut p = JitterPanel::new();
+        let start = Instant::now();
+        let mut events = click_and_let_go(start);
+        let mut after_gap = at(start, 3_000, mv(1, 0));
+        after_gap.lost_before = true;
+        events.push(after_gap);
+        run_sample(&mut p, &events, start);
+        assert!(p.export().is_none());
+        assert!(p.last_discarded && p.lost_reports);
     }
 
     #[test]

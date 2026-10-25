@@ -9,7 +9,7 @@
 //! that come out exactly on the axis with no wobble at all - which a hand
 //! cannot draw - are the signature of snapping.
 
-use super::standard::TestOutcome;
+use super::standard::{self, TestOutcome};
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use mouse_testkit::analysis::angle_snap::{
@@ -61,13 +61,16 @@ pub fn run() -> TestOutcome {
     let mut recorder = LineRecorder::new();
     let mut line_no = 0usize;
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("Draw lines... Press 'r' to start over, 'q' to finish.\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
@@ -83,8 +86,17 @@ pub fn run() -> TestOutcome {
             }
         }
 
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        gaps += usize::from(batch.lost_data);
+        if batch.lost_data && recorder.drop_line() {
+            // Dropped reports cut a piece out of the line
+            println!("\r\x1B[KSome movement was lost (the computer fell behind) - that line was dropped.");
+        }
         let mut finished = Vec::new();
-        for timed in input::fetch_timed_events(&mut device) {
+        for timed in batch.events {
             if let MouseEvent::Move { dx, dy } = timed.event {
                 finished.extend(recorder.feed(secs(timed.time), dx, dy));
             }
@@ -108,8 +120,11 @@ pub fn run() -> TestOutcome {
         }
     }
 
-    if let Some(line) = recorder.flush() {
-        println!("\r\x1B[KLine {}: {}", line_no + 1, describe(&line));
+    // A line cut off by the mouse disappearing is not judged
+    if !device_lost {
+        if let Some(line) = recorder.flush() {
+            println!("\r\x1B[KLine {}: {}", line_no + 1, describe(&line));
+        }
     }
 
     drop(_guard);
@@ -155,6 +170,9 @@ pub fn run() -> TestOutcome {
         println!("  This can affect precision in games and design work.");
         println!("  Turn off angle snapping / prediction in the mouse software.");
         TestOutcome::IssueFound
+    } else if device_lost {
+        println!("\n{}", standard::CUT_SHORT_VERDICT);
+        TestOutcome::Inconclusive
     } else {
         println!(
             "\n✓ No angle snapping detected ({:.0}% of near-axis lines were perfectly straight)",
@@ -172,7 +190,16 @@ pub fn run() -> TestOutcome {
         }
         TestOutcome::NoIssues
     };
+    let outcome = if device_lost {
+        standard::after_device_lost(outcome)
+    } else {
+        outcome
+    };
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     outcome
 }
@@ -283,6 +310,12 @@ impl LineRecorder {
         self.segmenter.reset();
         self.shapes.clear();
         self.too_short = 0;
+    }
+
+    /// Drop the line in progress without judging it; returns whether there
+    /// was one.
+    pub fn drop_line(&mut self) -> bool {
+        self.segmenter.flush().is_some()
     }
 
     /// Lines finished so far, judged or not.
@@ -403,6 +436,20 @@ mod tests {
         assert_eq!(rec.lines_seen(), 2);
         rec.reset();
         assert_eq!(rec.lines_seen(), 0);
+        assert!(rec.flush().is_none());
+    }
+
+    #[test]
+    fn test_a_line_cut_by_dropped_reports_is_not_judged() {
+        let mut rec = LineRecorder::new();
+        draw(&mut rec, &[freehand(7)]);
+        // Half a line, then reports are dropped
+        for i in 0..80 {
+            rec.feed(10.0 + i as f64 * 0.001, 2, 0);
+        }
+        assert!(rec.drop_line());
+        assert!(!rec.drop_line(), "nothing left in progress");
+        assert_eq!(rec.lines_seen(), 1, "finished lines are kept");
         assert!(rec.flush().is_none());
     }
 

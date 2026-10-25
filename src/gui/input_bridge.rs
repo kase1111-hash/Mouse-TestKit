@@ -10,9 +10,18 @@
 //!   for as long as a test runs. The user can also pin a device or choose
 //!   pointer (framework) input.
 //! - Linux: events carry the kernel's timestamp, so reports read in one batch
-//!   keep their real spacing. A device that errors (unplugged) is dropped and
-//!   `/dev/input` is rescanned every [`RESCAN_INTERVAL`], so a replugged mouse
-//!   comes back.
+//!   keep their real spacing (`mouse_testkit::evdev_input`, shared with the
+//!   CLI). A device that errors (unplugged) is dropped and `/dev/input` is
+//!   rescanned every [`RESCAN_INTERVAL`], so a replugged mouse comes back.
+//!   Mice the user is not allowed to open are counted
+//!   ([`InputBridge::unreadable_mice`]) so the GUI can say how to fix it.
+//! - Reports lost on the way (the kernel's small per-reader buffer
+//!   overflowed while a reader thread was not scheduled, or the GUI did not
+//!   drain the channel) are marked ([`InputBridge::gaps`], and
+//!   [`RawInputEvent::lost_before`] on the first event after each gap) so
+//!   timing analyses do not take the hole for a stutter. A button whose release
+//!   the kernel dropped is released again; one dropped because the channel
+//!   was full is not.
 //! - Windows: reports are told apart by `RAWINPUTHEADER::hDevice` and stamped
 //!   when `WM_INPUT` is received (Raw Input carries no hardware timestamp).
 //! - [`PointerCrossCheck`] notices when the window-system pointer keeps moving
@@ -24,6 +33,8 @@
 //! `None` and panels fall back to egui's pointer delta.
 
 use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -32,10 +43,12 @@ use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::sync::mpsc::SyncSender;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
 use std::sync::mpsc::TrySendError;
 
 pub use mouse_testkit::analysis::coalesce::EventCoalescer;
+#[cfg(target_os = "linux")]
+use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
 
 /// Maximum number of raw messages buffered between GUI frames.
 ///
@@ -75,6 +88,11 @@ pub struct RawInputEvent {
     /// the moment `WM_INPUT` arrived on Windows. Never the time the GUI read
     /// it.
     pub timestamp: Instant,
+    /// Reports of the device were lost just before this event (see
+    /// [`InputBridge::gaps`]): nothing may be timed across to earlier
+    /// events, and a release restored here carries the time of the drop,
+    /// not its own. Set by [`InputBridge::poll`].
+    pub lost_before: bool,
 }
 
 /// The type of raw input event.
@@ -113,6 +131,13 @@ pub struct InputDevice {
     /// Where it is attached, e.g. `event5` on Linux or the HID interface on
     /// Windows. Tells apart the several nodes one receiver often exposes.
     pub location: String,
+    /// Which unit it is: the same when this device comes back (plugged
+    /// into the same port again, or its wireless link reconnecting) and
+    /// different for another unit of the same model. Its name with the
+    /// port path and serial or Bluetooth address on Linux (`phys`, `uniq`;
+    /// the `eventN` node is numbered afresh), with `location` on Windows
+    /// (the instance ID depends on the port).
+    pub unit: String,
 }
 
 impl InputDevice {
@@ -152,6 +177,13 @@ pub enum BridgeMessage {
     Removed(DeviceId),
     /// An event from a device.
     Event(DeviceId, RawInputEvent),
+    /// Reports from the device were lost before its next event: the kernel
+    /// dropped them because the reader fell behind, or the channel to the
+    /// GUI was full.
+    DataLost(DeviceId),
+    /// How many mouse-capable devices could not be opened for lack of
+    /// permission (sent when the number changes).
+    Unreadable(usize),
 }
 
 /// Chooses which device's events reach the tests.
@@ -324,6 +356,13 @@ pub struct InputBridge {
     devices: Vec<InputDevice>,
     selector: DeviceSelector,
     cross_check: PointerCrossCheck,
+    /// Where reports of the measured device were lost in the last poll.
+    gaps: Vec<usize>,
+    /// The device whose reports were lost after its last event delivered:
+    /// its next event is marked [`RawInputEvent::lost_before`].
+    pending_gap: Option<DeviceId>,
+    /// Mouse-capable devices that could not be opened (permission denied).
+    unreadable: usize,
     stop: Arc<AtomicBool>,
     _thread: Option<thread::JoinHandle<()>>,
 }
@@ -346,6 +385,9 @@ impl InputBridge {
             devices: Vec::new(),
             selector: DeviceSelector::new(),
             cross_check: PointerCrossCheck::new(),
+            gaps: Vec::new(),
+            pending_gap: None,
+            unreadable: 0,
             stop,
             _thread: thread,
         }
@@ -364,6 +406,7 @@ impl InputBridge {
     pub fn poll(&mut self) -> Vec<RawInputEvent> {
         let measured_before = self.selector.active();
         let mut events = Vec::new();
+        self.gaps.clear();
         while let Ok(message) = self.receiver.try_recv() {
             match message {
                 BridgeMessage::Added(device) => {
@@ -375,13 +418,26 @@ impl InputBridge {
                     self.devices.retain(|d| d.id != id);
                     self.selector.device_removed(id);
                 }
-                BridgeMessage::Event(id, event) => {
+                BridgeMessage::Event(id, mut event) => {
                     // Events still queued from a device already removed are
                     // dropped so they cannot re-select it.
                     if self.devices.iter().any(|d| d.id == id) && self.selector.accept(id, &event) {
+                        if self.pending_gap == Some(id) {
+                            event.lost_before = true;
+                            self.pending_gap = None;
+                        }
                         events.push(event);
                     }
                 }
+                BridgeMessage::DataLost(id) => {
+                    if self.selector.active() == Some(id) {
+                        if self.gaps.last() != Some(&events.len()) {
+                            self.gaps.push(events.len());
+                        }
+                        self.pending_gap = Some(id);
+                    }
+                }
+                BridgeMessage::Unreadable(count) => self.unreadable = count,
             }
         }
         // Pointer evidence is about the device it was gathered against: a
@@ -391,7 +447,31 @@ impl InputBridge {
         if self.selector.active() != measured_before {
             self.cross_check = PointerCrossCheck::new();
         }
+        if self.pending_gap.is_some() && self.pending_gap != self.selector.active() {
+            self.pending_gap = None;
+        }
         events
+    }
+
+    /// Where reports of the measured device were lost (the system dropped
+    /// them because a reader fell behind): indices into the events the last
+    /// [`Self::poll`] returned, each the first event after a gap (equal to
+    /// their number when the gap came after them; the next event delivered
+    /// is then marked). The time across a gap is no interval of the mouse's
+    /// and whole clicks can be missing, so timing analyses must not judge
+    /// across it: the first event after each gap carries
+    /// [`RawInputEvent::lost_before`]. A button whose release the kernel
+    /// dropped (Linux) is released at the gap; a release dropped because
+    /// the GUI did not drain the channel stays lost.
+    pub fn gaps(&self) -> &[usize] {
+        &self.gaps
+    }
+
+    /// How many mouse-capable devices could not be opened because the user
+    /// lacks permission (Linux: not in the `input` group). The mouse being
+    /// tested may be one of them.
+    pub fn unreadable_mice(&self) -> usize {
+        self.unreadable
     }
 
     /// Freeze Auto device selection (pass `true` while any test is running).
@@ -476,17 +556,59 @@ fn device_sort_key(device: &InputDevice) -> (u32, String, DeviceId) {
     )
 }
 
-/// Queue an event for the GUI thread.
-///
-/// Returns `false` when the GUI side has gone away and the input thread
-/// should exit. When the channel is full (the GUI has not drained it in a
-/// long time, e.g. while minimised) the event is dropped rather than blocking
-/// the reader.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn send_event(sender: &SyncSender<BridgeMessage>, device: DeviceId, event: RawInputEvent) -> bool {
-    match sender.try_send(BridgeMessage::Event(device, event)) {
-        Ok(()) | Err(TrySendError::Full(_)) => true,
-        Err(TrySendError::Disconnected(_)) => false,
+/// Queues events for the GUI thread from a reader thread.
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+struct EventSender {
+    sender: SyncSender<BridgeMessage>,
+    /// Devices whose events were lost since their last event went through:
+    /// a [`BridgeMessage::DataLost`] is owed before the next one.
+    owed: HashSet<DeviceId>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+impl EventSender {
+    fn new(sender: SyncSender<BridgeMessage>) -> Self {
+        Self {
+            sender,
+            owed: HashSet::new(),
+        }
+    }
+
+    /// Note that reports from `device` were lost before its next event.
+    #[cfg(any(target_os = "linux", test))]
+    fn gap(&mut self, device: DeviceId) {
+        self.owed.insert(device);
+    }
+
+    /// Queue an event. Returns `false` when the GUI side has gone away and
+    /// the input thread should exit. When the channel is full (the GUI has
+    /// not drained it in a long time, e.g. while minimised) the event is
+    /// dropped rather than blocking the reader, and the next event that
+    /// goes through is preceded by a gap.
+    fn send(&mut self, device: DeviceId, event: RawInputEvent) -> bool {
+        if self.owed.contains(&device) {
+            match self.sender.try_send(BridgeMessage::DataLost(device)) {
+                Ok(()) => {
+                    self.owed.remove(&device);
+                }
+                Err(TrySendError::Full(_)) => return true,
+                Err(TrySendError::Disconnected(_)) => return false,
+            }
+        }
+        match self.sender.try_send(BridgeMessage::Event(device, event)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.owed.insert(device);
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Send a control message (device added or removed), waiting for room.
+    #[cfg(target_os = "windows")]
+    fn send_control(&self, message: BridgeMessage) -> bool {
+        self.sender.send(message).is_ok()
     }
 }
 
@@ -499,113 +621,45 @@ fn send_event(sender: &SyncSender<BridgeMessage>, device: DeviceId, event: RawIn
 #[cfg(target_os = "linux")]
 const MAX_REPORT_AGE: Duration = Duration::from_secs(1);
 
-/// Map an evdev timestamp (CLOCK_REALTIME) onto the monotonic clock using a
-/// `(SystemTime, Instant)` pair read at the same moment. Events mapped with
-/// the same pair keep their exact spacing.
 #[cfg(target_os = "linux")]
-fn kernel_time_to_instant(
-    timestamp: std::time::SystemTime,
-    ref_system: std::time::SystemTime,
-    ref_instant: Instant,
-) -> Instant {
-    match ref_system.duration_since(timestamp) {
-        Ok(age) if age <= MAX_REPORT_AGE => ref_instant.checked_sub(age).unwrap_or(ref_instant),
-        // Stamped after the reference (clock stepped back) or implausibly old
-        _ => ref_instant,
+fn raw_button(button: MouseButton) -> Option<RawButton> {
+    match button {
+        MouseButton::Left => Some(RawButton::Left),
+        MouseButton::Right => Some(RawButton::Right),
+        MouseButton::Middle => Some(RawButton::Middle),
+        MouseButton::Side => Some(RawButton::Side),
+        MouseButton::Extra => Some(RawButton::Extra),
+        MouseButton::Unknown => None,
     }
 }
 
+/// A report read by `mouse_testkit::evdev_input` as a bridge event.
 #[cfg(target_os = "linux")]
-fn raw_button(key: evdev::KeyCode) -> Option<RawButton> {
-    use evdev::KeyCode;
-    match key {
-        KeyCode::BTN_LEFT => Some(RawButton::Left),
-        KeyCode::BTN_RIGHT => Some(RawButton::Right),
-        KeyCode::BTN_MIDDLE => Some(RawButton::Middle),
-        KeyCode::BTN_SIDE => Some(RawButton::Side),
-        KeyCode::BTN_EXTRA => Some(RawButton::Extra),
-        _ => None,
-    }
-}
-
-/// Turn one batch of evdev events into bridge events.
-///
-/// The REL_X/REL_Y events of a SYN_REPORT-terminated report become one
-/// `Move` (one hardware report, one event), and every event is stamped via
-/// `to_instant(kernel timestamp)` rather than the time it was read.
-#[cfg(target_os = "linux")]
-fn translate_reports(
-    events: impl IntoIterator<Item = (std::time::SystemTime, evdev::EventSummary)>,
-    to_instant: impl Fn(std::time::SystemTime) -> Instant,
-) -> Vec<RawInputEvent> {
-    use evdev::{EventSummary, RelativeAxisCode, SynchronizationCode};
-
-    let mut out = Vec::new();
-    // Motion of the current report: (time of its first axis event, dx, dy)
-    let mut motion: Option<(Instant, i32, i32)> = None;
-    let flush = |out: &mut Vec<RawInputEvent>, motion: Option<(Instant, i32, i32)>| {
-        if let Some((timestamp, dx, dy)) = motion {
-            if dx != 0 || dy != 0 {
-                out.push(RawInputEvent {
-                    kind: RawInputKind::Move { dx, dy },
-                    timestamp,
-                });
-            }
-        }
+fn raw_event(timed: TimedEvent) -> Option<RawInputEvent> {
+    let kind = match timed.event {
+        MouseEvent::Move { dx, dy } => RawInputKind::Move { dx, dy },
+        MouseEvent::ButtonPress(b) => RawInputKind::ButtonPress(raw_button(b)?),
+        MouseEvent::ButtonRelease(b) => RawInputKind::ButtonRelease(raw_button(b)?),
+        MouseEvent::Scroll { delta } => RawInputKind::Scroll { delta },
     };
-
-    for (time, summary) in events {
-        match summary {
-            EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
-                flush(&mut out, motion.take());
-            }
-            EventSummary::RelativeAxis(_, RelativeAxisCode::REL_X, value) => {
-                motion.get_or_insert_with(|| (to_instant(time), 0, 0)).1 += value;
-            }
-            EventSummary::RelativeAxis(_, RelativeAxisCode::REL_Y, value) => {
-                motion.get_or_insert_with(|| (to_instant(time), 0, 0)).2 += value;
-            }
-            // One notch is reported both as REL_WHEEL (+-1) and, on newer
-            // kernels, as REL_WHEEL_HI_RES (+-120). Only the notch-granular
-            // event is used so a notch counts once.
-            EventSummary::RelativeAxis(_, RelativeAxisCode::REL_WHEEL, delta) => {
-                out.push(RawInputEvent {
-                    kind: RawInputKind::Scroll { delta },
-                    timestamp: to_instant(time),
-                });
-            }
-            EventSummary::Key(_, key, value) => {
-                let Some(button) = raw_button(key) else {
-                    continue;
-                };
-                let kind = match value {
-                    1 => RawInputKind::ButtonPress(button),
-                    0 => RawInputKind::ButtonRelease(button),
-                    _ => continue, // autorepeat (2)
-                };
-                out.push(RawInputEvent {
-                    kind,
-                    timestamp: to_instant(time),
-                });
-            }
-            _ => {}
-        }
-    }
-    flush(&mut out, motion);
-    out
+    Some(RawInputEvent {
+        kind,
+        timestamp: timed.time,
+        lost_before: false,
+    })
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use evdev::{Device, KeyCode, RelativeAxisCode};
-    use std::collections::HashSet;
+    use evdev::raw_stream::RawDevice;
+    use evdev::{KeyCode, RelativeAxisCode};
+    use mouse_testkit::evdev_input::{self, EvdevMouse};
     use std::fs;
     use std::io::ErrorKind;
     use std::os::unix::fs::MetadataExt;
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::time::SystemTime;
 
     /// A device node as it exists now. A node recreated after a replug has a
     /// new inode, so it is examined again even if it reuses the same name.
@@ -619,6 +673,8 @@ mod linux {
         pub mice: usize,
         /// Nodes that could not be opened for lack of permission.
         pub permission_denied: usize,
+        /// Of those, nodes that report X motion: mice the user cannot open.
+        pub denied_mice: usize,
     }
 
     /// Finds mice under `/dev/input` and starts one reader thread per mouse.
@@ -629,9 +685,15 @@ mod linux {
         open: Arc<Mutex<HashSet<NodeKey>>>,
         /// Nodes that were opened and are not mice.
         not_mice: HashSet<NodeKey>,
+        /// Mouse nodes that could not be opened in the last scan.
+        denied_last: HashSet<NodeKey>,
+        /// No scan has run yet.
+        first_scan: bool,
+        /// Mice that could not be opened, as last reported to the GUI.
+        reported_denied: Option<usize>,
     }
 
-    fn is_mouse(device: &Device) -> bool {
+    fn is_mouse(device: &RawDevice) -> bool {
         let has_rel_x = device
             .supported_relative_axes()
             .is_some_and(|axes| axes.contains(RelativeAxisCode::REL_X));
@@ -652,6 +714,9 @@ mod linux {
                 next_id: 1,
                 open: Arc::new(Mutex::new(HashSet::new())),
                 not_mice: HashSet::new(),
+                denied_last: HashSet::new(),
+                first_scan: true,
+                reported_denied: None,
             }
         }
 
@@ -663,6 +728,7 @@ mod linux {
                 readable: false,
                 mice: 0,
                 permission_denied: 0,
+                denied_mice: 0,
             };
             let entries = match fs::read_dir("/dev/input") {
                 Ok(entries) => entries,
@@ -681,6 +747,7 @@ mod linux {
             nodes.sort();
 
             let mut present = HashSet::new();
+            let mut denied = HashSet::new();
             for (_, path) in nodes {
                 let Ok(meta) = fs::metadata(&path) else {
                     continue;
@@ -694,7 +761,7 @@ mod linux {
                     result.mice += 1;
                     continue;
                 }
-                match Device::open(&path) {
+                match RawDevice::open(&path) {
                     Ok(device) if is_mouse(&device) => {
                         if self.spawn_reader(device, key) {
                             result.mice += 1;
@@ -707,15 +774,38 @@ mod linux {
                     // yet; it is retried on the next scan.
                     Err(e) if e.kind() == ErrorKind::PermissionDenied => {
                         result.permission_denied += 1;
+                        let node = path.file_name().unwrap_or_default().to_string_lossy();
+                        if evdev_input::node_reports_rel_x(&node) {
+                            // Counted once it is still denied on the next
+                            // scan, so a just-plugged mouse is not reported
+                            // while udev sets its permissions
+                            if self.first_scan || self.denied_last.contains(&key) {
+                                result.denied_mice += 1;
+                            }
+                            denied.insert(key);
+                        }
                     }
                     Err(_) => {}
                 }
             }
             self.not_mice.retain(|key| present.contains(key));
+            self.denied_last = denied;
+            self.first_scan = false;
+            // The real mouse can be unreadable while another node (a virtual
+            // device the desktop lets every user open) is readable, so the
+            // GUI is told about unreadable mice whenever there are any.
+            if self.reported_denied != Some(result.denied_mice)
+                && self
+                    .sender
+                    .send(BridgeMessage::Unreadable(result.denied_mice))
+                    .is_ok()
+            {
+                self.reported_denied = Some(result.denied_mice);
+            }
             result
         }
 
-        fn spawn_reader(&mut self, device: Device, key: NodeKey) -> bool {
+        fn spawn_reader(&mut self, device: RawDevice, key: NodeKey) -> bool {
             let id = self.next_id;
             self.next_id += 1;
             let node = key
@@ -723,10 +813,18 @@ mod linux {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let name = device.name().unwrap_or("Unknown device").to_string();
+            let unit = format!(
+                "{} | {} | {}",
+                name,
+                device.physical_path().unwrap_or(""),
+                device.unique_name().unwrap_or("")
+            );
             let info = InputDevice {
                 id,
-                name: device.name().unwrap_or("Unknown device").to_string(),
+                name,
                 location: node.clone(),
+                unit,
             };
             eprintln!(
                 "InputBridge: reading '{}' at {}",
@@ -734,6 +832,13 @@ mod linux {
                 key.0.display()
             );
             let name = info.name.clone();
+            let mouse = match EvdevMouse::new(device) {
+                Ok(mouse) => mouse,
+                Err(e) => {
+                    eprintln!("InputBridge: cannot read '{}': {}", name, e);
+                    return false;
+                }
+            };
             if self.sender.send(BridgeMessage::Added(info)).is_err() {
                 return false;
             }
@@ -745,7 +850,7 @@ mod linux {
             let spawned = thread::Builder::new()
                 .name(format!("input-bridge-{node}"))
                 .spawn(move || {
-                    read_device(id, device, &sender);
+                    read_device(id, mouse, EventSender::new(sender.clone()));
                     eprintln!("InputBridge: '{name}' stopped reporting (unplugged?)");
                     lock(&open).remove(&reader_key);
                     let _ = sender.send(BridgeMessage::Removed(id));
@@ -760,32 +865,24 @@ mod linux {
     }
 
     /// Read one device until it fails (unplugged) or the GUI goes away.
-    fn read_device(id: DeviceId, mut device: Device, sender: &SyncSender<BridgeMessage>) {
+    /// The thread sleeps until the device has data, then drains it.
+    fn read_device(id: DeviceId, mut mouse: EvdevMouse, mut sender: EventSender) {
         loop {
-            let batch: Vec<_> = match device.fetch_events() {
-                Ok(events) => events
-                    .map(|ev| (ev.timestamp(), ev.destructure()))
-                    .collect(),
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    // The device is opened in blocking mode, so this is not
-                    // expected; handle it anyway rather than spinning.
-                    thread::sleep(Duration::from_micros(500));
-                    continue;
-                }
-                // ENODEV after unplug, or another fatal error
-                Err(_) => return,
+            if !mouse.wait(None) {
+                continue; // interrupted by a signal
+            }
+            // ENODEV after unplug, or another fatal error
+            let Ok(batches) = mouse.read(Some(MAX_REPORT_AGE)) else {
+                return;
             };
-            // One reference pair per batch, taken after the read, so the
-            // reports of the batch keep their kernel spacing.
-            let ref_system = SystemTime::now();
-            let ref_instant = Instant::now();
-            let events = translate_reports(batch, |time| {
-                kernel_time_to_instant(time, ref_system, ref_instant)
-            });
-            for event in events {
-                if !send_event(sender, id, event) {
-                    return;
+            for batch in batches {
+                if batch.lost_data {
+                    sender.gap(id);
+                }
+                for event in batch.events.into_iter().filter_map(raw_event) {
+                    if !sender.send(id, event) {
+                        return;
+                    }
                 }
             }
         }
@@ -869,40 +966,115 @@ impl WheelAccumulator {
 
 /// Display name and location from a Raw Input device path such as
 /// `\\?\HID#VID_046D&PID_C08B&MI_00#7&2a1b&0&0000#{...}`.
+///
+/// The name carries the model (VID/PID); the location the interface (MI_xx,
+/// Colxx) and the instance ID that follows the hardware ID, which differs
+/// between two units of the same model (it depends on the port each is
+/// plugged into), so each gets its own entry in the device picker.
 #[cfg(any(target_os = "windows", test))]
 fn windows_device_label(path: &str, id: DeviceId) -> (String, String) {
     let trimmed = path.trim_start_matches(r"\\?\");
     let mut segments = trimmed.split('#');
     let bus = segments.next().unwrap_or("");
     let hardware = segments.next().unwrap_or("");
+    let instance = segments.next().unwrap_or("");
     let fallback_location = format!("handle {id:#x}");
     if hardware.is_empty() {
         return ("Mouse".to_string(), fallback_location);
     }
-    if bus.eq_ignore_ascii_case("HID") {
+    let mut location: Vec<String> = Vec::new();
+    let name = if bus.eq_ignore_ascii_case("HID") {
         let (ids, rest): (Vec<&str>, Vec<&str>) = hardware
             .split('&')
             .partition(|part| part.starts_with("VID_") || part.starts_with("PID_"));
-        let name = if ids.is_empty() {
+        if !rest.is_empty() {
+            location.push(rest.join(" "));
+        }
+        if ids.is_empty() {
             "HID mouse".to_string()
         } else {
             format!("HID mouse {}", ids.join(" "))
-        };
-        let location = if rest.is_empty() {
-            fallback_location
-        } else {
-            rest.join(" ")
-        };
-        (name, location)
+        }
     } else {
-        (format!("Mouse ({bus} {hardware})"), fallback_location)
+        format!("Mouse ({bus} {hardware})")
+    };
+    if !instance.is_empty() {
+        location.push(format!("instance {instance}"));
+    }
+    if location.is_empty() {
+        (name, fallback_location)
+    } else {
+        (name, location.join(", "))
+    }
+}
+
+/// Which Raw Input handles the GUI has been told about.
+///
+/// Windows can still deliver a `WM_INPUT` from a device after its
+/// `GIDC_REMOVAL`, when the input was queued before the removal; such input
+/// must not announce the gone device again (the GUI would list a device
+/// that no longer exists and may never hear of its removal).
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Default)]
+struct DeviceRegistry {
+    known: HashSet<DeviceId>,
+    /// Handles removed since they were known. A handle Windows reuses for a
+    /// new device arrives again (`GIDC_ARRIVAL`) and leaves this set.
+    removed: HashSet<DeviceId>,
+}
+
+/// What to do with input from a Raw Input handle.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputSource {
+    /// A device the GUI knows about.
+    Known,
+    /// A device not announced yet (e.g. one whose arrival notice was
+    /// missed): announce it first.
+    New,
+    /// Input queued from a device that has been removed: ignore it.
+    Stale,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl DeviceRegistry {
+    /// Record that `id` is announced to the GUI.
+    fn add(&mut self, id: DeviceId) {
+        self.removed.remove(&id);
+        self.known.insert(id);
+    }
+
+    /// A device arrived (`GIDC_ARRIVAL`): its handle is live again even if
+    /// it was removed before. Returns whether it still has to be announced.
+    fn arrival(&mut self, id: DeviceId) -> bool {
+        self.removed.remove(&id);
+        !self.known.contains(&id)
+    }
+
+    /// A device was removed (`GIDC_REMOVAL`). Returns whether the GUI knew
+    /// it (and must be told).
+    fn removal(&mut self, id: DeviceId) -> bool {
+        let known = self.known.remove(&id);
+        if known {
+            self.removed.insert(id);
+        }
+        known
+    }
+
+    fn input_from(&self, id: DeviceId) -> InputSource {
+        if self.known.contains(&id) {
+            InputSource::Known
+        } else if self.removed.contains(&id) {
+            InputSource::Stale
+        } else {
+            InputSource::New
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 mod windows {
     use super::*;
-    use std::collections::HashSet;
     use std::mem;
     use std::ptr;
     use winapi::shared::hidusage::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
@@ -935,7 +1107,7 @@ mod windows {
     /// Devices announced to the GUI and their wheel remainders.
     #[derive(Default)]
     struct State {
-        known: HashSet<DeviceId>,
+        devices: DeviceRegistry,
         wheels: HashMap<DeviceId, WheelAccumulator>,
     }
 
@@ -1000,32 +1172,32 @@ mod windows {
     }
 
     /// Announce a device to the GUI. Returns `false` if the GUI is gone.
-    unsafe fn add_device(
-        id: DeviceId,
-        sender: &SyncSender<BridgeMessage>,
-        state: &mut State,
-    ) -> bool {
+    unsafe fn add_device(id: DeviceId, sender: &EventSender, state: &mut State) -> bool {
         let path = device_path(id).unwrap_or_default();
         let (name, location) = windows_device_label(&path, id);
-        state.known.insert(id);
-        sender
-            .send(BridgeMessage::Added(InputDevice { id, name, location }))
-            .is_ok()
+        state.devices.add(id);
+        let unit = format!("{name} | {location}");
+        sender.send_control(BridgeMessage::Added(InputDevice {
+            id,
+            name,
+            location,
+            unit,
+        }))
     }
 
     /// Handle `WM_INPUT_DEVICE_CHANGE`. Returns `false` if the GUI is gone.
     unsafe fn device_change(
         change: u32,
         id: DeviceId,
-        sender: &SyncSender<BridgeMessage>,
+        sender: &EventSender,
         state: &mut State,
     ) -> bool {
-        if change == GIDC_ARRIVAL && id != 0 && !state.known.contains(&id) && is_mouse(id) {
+        if change == GIDC_ARRIVAL && id != 0 && state.devices.arrival(id) && is_mouse(id) {
             return add_device(id, sender, state);
         }
-        if change == GIDC_REMOVAL && state.known.remove(&id) {
+        if change == GIDC_REMOVAL && state.devices.removal(id) {
             state.wheels.remove(&id);
-            return sender.send(BridgeMessage::Removed(id)).is_ok();
+            return sender.send_control(BridgeMessage::Removed(id));
         }
         true
     }
@@ -1033,7 +1205,7 @@ mod windows {
     /// Handle one `WM_INPUT`. Returns `false` if the GUI is gone.
     unsafe fn process_wm_input(
         handle: HRAWINPUT,
-        sender: &SyncSender<BridgeMessage>,
+        sender: &mut EventSender,
         state: &mut State,
     ) -> bool {
         // Raw Input has no hardware timestamp: stamp on receipt, in this
@@ -1074,8 +1246,15 @@ mod windows {
         if mouse.usFlags & MOUSE_MOVE_ABSOLUTE != 0 {
             return true;
         }
-        if !state.known.contains(&id) && !add_device(id, sender, state) {
-            return false;
+        match state.devices.input_from(id) {
+            InputSource::Known => {}
+            InputSource::New => {
+                if !add_device(id, sender, state) {
+                    return false;
+                }
+            }
+            // Queued before its removal: the device is gone
+            InputSource::Stale => return true,
         }
 
         let mut kinds = Vec::new();
@@ -1103,9 +1282,16 @@ mod windows {
                 kinds.push(RawInputKind::Scroll { delta: notches });
             }
         }
-        kinds
-            .into_iter()
-            .all(|kind| send_event(sender, id, RawInputEvent { kind, timestamp }))
+        kinds.into_iter().all(|kind| {
+            sender.send(
+                id,
+                RawInputEvent {
+                    kind,
+                    timestamp,
+                    lost_before: false,
+                },
+            )
+        })
     }
 
     /// Create the hidden window, register for raw mouse input and pump
@@ -1162,6 +1348,7 @@ mod windows {
                 return;
             }
 
+            let mut sender = EventSender::new(sender);
             let mut state = State::default();
             for id in enumerate_mice() {
                 if !add_device(id, &sender, &mut state) {
@@ -1179,7 +1366,7 @@ mod windows {
                     break; // WM_QUIT or error
                 }
                 let gui_alive = match msg.message {
-                    WM_INPUT => process_wm_input(msg.lParam as HRAWINPUT, &sender, &mut state),
+                    WM_INPUT => process_wm_input(msg.lParam as HRAWINPUT, &mut sender, &mut state),
                     WM_INPUT_DEVICE_CHANGE => device_change(
                         msg.wParam as u32,
                         msg.lParam as usize as DeviceId,
@@ -1196,8 +1383,8 @@ mod windows {
             }
             // Nothing will be read any more: report every device gone so the
             // GUI falls back to framework input instead of a silent device.
-            for id in state.known.drain() {
-                let _ = sender.send(BridgeMessage::Removed(id));
+            for id in state.devices.known.drain() {
+                let _ = sender.send_control(BridgeMessage::Removed(id));
             }
         }
     }
@@ -1254,6 +1441,7 @@ mod tests {
         RawInputEvent {
             kind,
             timestamp: at,
+            lost_before: false,
         }
     }
 
@@ -1266,6 +1454,7 @@ mod tests {
             id,
             name: name.to_string(),
             location: location.to_string(),
+            unit: format!("{name} | {location}"),
         }
     }
 
@@ -1603,112 +1792,199 @@ mod tests {
     }
 
     #[test]
+    fn a_full_channel_leaves_a_gap_mark_before_the_next_event() {
+        // The GUI has not drained the channel (e.g. while minimised): events
+        // are dropped, and the next one through says so
+        let (tx, rx) = mpsc::sync_channel(2);
+        let mut sender = EventSender::new(tx);
+        let t = Instant::now();
+        for i in 0..3 {
+            assert!(sender.send(MOUSE, mv(1, 0, t + Duration::from_millis(i))));
+        }
+        let kinds = |rx: &mpsc::Receiver<BridgeMessage>| -> Vec<String> {
+            rx.try_iter()
+                .map(|m| match m {
+                    BridgeMessage::Event(id, _) => format!("event {id}"),
+                    BridgeMessage::DataLost(id) => format!("lost {id}"),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(kinds(&rx), ["event 1", "event 1"]);
+        assert!(sender.send(MOUSE, mv(1, 0, t)));
+        assert_eq!(kinds(&rx), ["lost 1", "event 1"]);
+        // A steady stream the GUI keeps up with is never marked
+        for _ in 0..10 {
+            assert!(sender.send(MOUSE, mv(1, 0, t)));
+            assert_eq!(kinds(&rx), ["event 1"]);
+        }
+        // A reader's own gap goes out with the next event
+        sender.gap(TRACKPOINT);
+        assert!(sender.send(TRACKPOINT, mv(1, 0, t)));
+        assert_eq!(kinds(&rx), ["lost 2", "event 2"]);
+    }
+
+    #[test]
+    fn bridge_reports_gaps_of_the_measured_device_only() {
+        let (mut bridge, sender) = InputBridge::for_test();
+        let t = Instant::now();
+        sender
+            .send(BridgeMessage::Added(device(MOUSE, "Mouse", "event3")))
+            .unwrap();
+        sender
+            .send(BridgeMessage::Added(device(
+                TRACKPOINT,
+                "TrackPoint",
+                "event5",
+            )))
+            .unwrap();
+        let press =
+            |id| BridgeMessage::Event(id, ev(RawInputKind::ButtonPress(RawButton::Left), t));
+        sender.send(press(MOUSE)).unwrap();
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        // The other device's lost reports do not concern the tests
+        sender.send(BridgeMessage::DataLost(TRACKPOINT)).unwrap();
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        sender.send(BridgeMessage::DataLost(MOUSE)).unwrap();
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        let events = bridge.poll();
+        assert_eq!(events.len(), 4);
+        assert_eq!(bridge.gaps(), [3]);
+        let marked: Vec<bool> = events.iter().map(|e| e.lost_before).collect();
+        assert_eq!(marked, [false, false, false, true]);
+        // Only the last poll's gaps are reported
+        assert!(bridge.poll().is_empty());
+        assert!(bridge.gaps().is_empty());
+        // A gap after the last event of a poll marks the next event delivered
+        sender.send(BridgeMessage::DataLost(MOUSE)).unwrap();
+        assert!(bridge.poll().is_empty());
+        assert_eq!(bridge.gaps(), [0]);
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        let marked: Vec<bool> = bridge.poll().iter().map(|e| e.lost_before).collect();
+        assert_eq!(marked, [true, false]);
+        assert!(bridge.gaps().is_empty());
+    }
+
+    #[test]
+    fn bridge_counts_unreadable_mice() {
+        let (mut bridge, sender) = InputBridge::for_test();
+        assert_eq!(bridge.unreadable_mice(), 0);
+        sender.send(BridgeMessage::Unreadable(2)).unwrap();
+        bridge.poll();
+        assert_eq!(bridge.unreadable_mice(), 2);
+        // Permissions fixed (or the mouse unplugged): the count drops
+        sender.send(BridgeMessage::Unreadable(0)).unwrap();
+        bridge.poll();
+        assert_eq!(bridge.unreadable_mice(), 0);
+    }
+
+    #[test]
+    fn input_queued_before_a_removal_does_not_bring_the_device_back() {
+        let mut devices = DeviceRegistry::default();
+        devices.add(MOUSE);
+        assert_eq!(devices.input_from(MOUSE), InputSource::Known);
+        assert!(devices.removal(MOUSE));
+        // A WM_INPUT handled after its GIDC_REMOVAL
+        assert_eq!(devices.input_from(MOUSE), InputSource::Stale);
+        assert!(!devices.removal(MOUSE), "the GUI is told once");
+        // A handle reused for a newly plugged device arrives first
+        assert!(devices.arrival(MOUSE));
+        devices.add(MOUSE);
+        assert_eq!(devices.input_from(MOUSE), InputSource::Known);
+        // A device whose arrival notice was missed is still picked up
+        assert_eq!(devices.input_from(TRACKPOINT), InputSource::New);
+        assert!(!devices.removal(TRACKPOINT));
+    }
+
+    #[test]
     fn windows_device_labels() {
         let (name, location) = windows_device_label(
             r"\\?\HID#VID_046D&PID_C08B&MI_00#7&2a1b3c&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}",
             1,
         );
         assert_eq!(name, "HID mouse VID_046D PID_C08B");
-        assert_eq!(location, "MI_00");
+        assert_eq!(location, "MI_00, instance 7&2a1b3c&0&0000");
         let (name, location) = windows_device_label(r"\\?\ACPI#PNP0F13#4&1&0#{...}", 0x10);
         assert_eq!(name, "Mouse (ACPI PNP0F13)");
-        assert_eq!(location, "handle 0x10");
+        assert_eq!(location, "instance 4&1&0");
+        let (name, location) = windows_device_label(r"\\?\HID#VID_1234&PID_0001", 0x20);
+        assert_eq!(name, "HID mouse VID_1234 PID_0001");
+        assert_eq!(location, "handle 0x20");
         let (name, _) = windows_device_label("", 3);
         assert_eq!(name, "Mouse");
+    }
+
+    #[test]
+    fn two_units_of_one_model_get_different_labels() {
+        // The same mouse model plugged into two ports
+        let device = |path: &str, id| {
+            let (name, location) = windows_device_label(path, id);
+            let unit = format!("{name} | {location}");
+            InputDevice {
+                id,
+                name,
+                location,
+                unit,
+            }
+        };
+        let a = device(
+            r"\\?\HID#VID_046D&PID_C08B&MI_00#7&2a1b3c&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}",
+            0x1001,
+        );
+        let b = device(
+            r"\\?\HID#VID_046D&PID_C08B&MI_00#7&91f0e2d&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}",
+            0x2002,
+        );
+        assert_eq!(a.name, b.name, "same model");
+        assert_ne!(a.label(), b.label());
+        // Neither is taken for the other when it comes back
+        assert_ne!(a.unit, b.unit);
     }
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::*;
-    use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode, SynchronizationCode};
-    use std::time::SystemTime;
 
-    fn rel(axis: RelativeAxisCode, value: i32) -> evdev::EventSummary {
-        InputEvent::new(EventType::RELATIVE.0, axis.0, value).destructure()
-    }
-
-    fn key(code: KeyCode, value: i32) -> evdev::EventSummary {
-        InputEvent::new(EventType::KEY.0, code.0, value).destructure()
-    }
-
-    fn syn() -> evdev::EventSummary {
-        InputEvent::new(
-            EventType::SYNCHRONIZATION.0,
-            SynchronizationCode::SYN_REPORT.0,
-            0,
-        )
-        .destructure()
-    }
-
-    #[test]
-    fn batched_reports_keep_their_kernel_spacing() {
-        // Eight 1000 Hz reports that sat in the kernel buffer and were read
-        // in one batch 0.5 ms after the last one
-        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let mut batch = Vec::new();
-        for i in 0..8u64 {
-            let at = base + Duration::from_millis(i);
-            batch.push((at, rel(RelativeAxisCode::REL_X, 3)));
-            batch.push((at, rel(RelativeAxisCode::REL_Y, -1)));
-            batch.push((at, syn()));
+    fn timed(event: MouseEvent) -> TimedEvent {
+        TimedEvent {
+            time: Instant::now(),
+            event,
         }
-        let ref_system = base + Duration::from_micros(7_500);
-        let ref_instant = Instant::now();
-        let out = translate_reports(batch, |ts| {
-            kernel_time_to_instant(ts, ref_system, ref_instant)
-        });
-        assert_eq!(out.len(), 8, "one Move per report");
-        for pair in out.windows(2) {
-            let gap = pair[1].timestamp - pair[0].timestamp;
-            assert_eq!(gap, Duration::from_millis(1));
-        }
-        assert_eq!(
-            ref_instant - out[7].timestamp,
-            Duration::from_micros(500),
-            "stamped when the device reported, not when read"
-        );
-        assert!(out
-            .iter()
-            .all(|e| matches!(e.kind, RawInputKind::Move { dx: 3, dy: -1 })));
     }
 
     #[test]
-    fn untrustworthy_kernel_times_fall_back_to_the_read_time() {
-        let now_system = SystemTime::now();
-        let now = Instant::now();
-        // Stamped after the reference: the wall clock was stepped back
-        let future = now_system + Duration::from_millis(5);
-        assert_eq!(kernel_time_to_instant(future, now_system, now), now);
-        // Hours old: the clock was stepped forward or the system slept
-        let stale = now_system - Duration::from_secs(3600);
-        assert_eq!(kernel_time_to_instant(stale, now_system, now), now);
-    }
-
-    #[test]
-    fn buttons_wheel_and_trailing_motion_are_translated() {
-        let t = SystemTime::now();
-        let now = Instant::now();
-        let batch = vec![
-            (t, key(KeyCode::BTN_LEFT, 1)),
-            (t, syn()),
-            (t, key(KeyCode::BTN_LEFT, 2)), // autorepeat: ignored
-            (t, key(KeyCode::BTN_EXTRA, 0)),
-            (t, rel(RelativeAxisCode::REL_WHEEL, -1)),
-            (t, rel(RelativeAxisCode::REL_WHEEL_HI_RES, -120)),
-            (t, syn()),
-            (t, key(KeyCode::KEY_A, 1)),
-            (t, rel(RelativeAxisCode::REL_X, 7)),
-        ];
-        let out = translate_reports(batch, |_| now);
-        let kinds: Vec<String> = out.iter().map(|e| format!("{:?}", e.kind)).collect();
+    fn shared_reader_events_become_bridge_events() {
+        let kinds: Vec<String> = [
+            MouseEvent::Move { dx: 3, dy: -1 },
+            MouseEvent::ButtonPress(MouseButton::Left),
+            MouseEvent::ButtonRelease(MouseButton::Extra),
+            MouseEvent::Scroll { delta: -1 },
+            // A button the bridge has no name for is left out
+            MouseEvent::ButtonPress(MouseButton::Unknown),
+        ]
+        .into_iter()
+        .filter_map(|e| raw_event(timed(e)))
+        .map(|e| format!("{:?}", e.kind))
+        .collect();
         assert_eq!(
             kinds,
             [
+                "Move { dx: 3, dy: -1 }",
                 "ButtonPress(Left)",
                 "ButtonRelease(Extra)",
                 "Scroll { delta: -1 }",
-                "Move { dx: 7, dy: 0 }",
             ]
         );
     }

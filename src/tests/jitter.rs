@@ -71,7 +71,7 @@ pub fn run() -> bool {
     // that this device is the mouse and is connected.
     if !terminal::confirm_device_moves(
         "\nMove the mouse a little to confirm it is the one being tested...",
-        || input::fetch_timed_events(&mut device),
+        |wait| input::read_events(&mut device, wait),
     ) {
         println!("No movement came from the selected device: it may be the wrong one of");
         println!("several entries, in use by another program, or disconnected.");
@@ -86,13 +86,16 @@ pub fn run() -> bool {
     let mut sampling = false;
     let mut sample_start: Option<Instant> = None;
     let mut last_print = Instant::now();
+    let mut device_lost = false;
+    let mut gaps = 0usize;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("Press SPACE to start sampling (don't touch mouse!), 'q' to finish.\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 match key.code {
                     _ if key.kind != KeyEventKind::Press => {}
@@ -111,7 +114,20 @@ pub fn run() -> bool {
 
         // One Move per hardware report (evdev's separate REL_X/REL_Y events
         // merged), so a diagonal twitch counts as one event, not two.
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            // The sample in progress did not see its whole time
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data && sampling {
+            // Some of the movement is gone: the sample cannot be rated
+            sampling = false;
+            sample_start = None;
+            current_movements.clear();
+            gaps += 1;
+            println!("\r\x1B[KSample set aside: some movement was lost (the computer fell behind reading the mouse). Press SPACE to take it again.");
+        }
+        for timed in batch.events {
             if let (MouseEvent::Move { dx, dy }, Some(start)) = (timed.event, sample_start) {
                 if sampling && timed.time >= start {
                     let t = timed.time.duration_since(start).as_secs_f64();
@@ -173,8 +189,6 @@ pub fn run() -> bool {
             io::stdout().flush().ok();
             last_print = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
 
     drop(_guard);
@@ -191,10 +205,11 @@ pub fn run() -> bool {
     // stopped sending input (unplugged, link lost). Only the mouse can say.
     let silent = !samples.is_empty() && samples.iter().all(|s| s.event_count == 0);
     if silent
-        && !terminal::confirm_device_moves(
-            "No movement at all was recorded. Move the mouse a little to confirm it is still connected...",
-            || input::fetch_timed_events(&mut device),
-        )
+        && (device_lost
+            || !terminal::confirm_device_moves(
+                "No movement at all was recorded. Move the mouse a little to confirm it is still connected...",
+                |wait| input::read_events(&mut device, wait),
+            ))
     {
         println!("The mouse stopped sending input, so the samples measured nothing.");
         println!("Check the connection and run the test again.");
@@ -250,6 +265,10 @@ pub fn run() -> bool {
         println!("No samples recorded.");
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     true
 }

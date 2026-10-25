@@ -26,6 +26,14 @@ pub struct AutoTestPanel {
     epoch: Instant,
     /// Whether the last run used precise raw-input timestamps.
     last_run_raw: bool,
+    /// The unit measured now (`InputDevice::unit`, see
+    /// [`Self::input_changed`])...
+    measured: Option<String>,
+    /// ... and the mouse the raw-input run started with. Plugged back in,
+    /// or reconnected over its wireless link, that mouse is a new device of
+    /// the same unit; another device, even of the same model, is not
+    /// measured in its place.
+    run_mouse: Option<String>,
     show_metrics: bool,
     /// Framework input: partial wheel movement not yet worth a notch.
     wheel: WheelAccumulator,
@@ -38,9 +46,10 @@ pub struct AutoTestPanel {
 enum InputPath {
     Raw,
     Framework,
-    /// Nothing: a raw-input run whose device is gone. Frame-stamped pointer
-    /// input would be judged with device-timing rules (16 ms frames read as
-    /// stutters, a press and release in one frame as bounce).
+    /// Nothing: a raw-input run whose mouse is gone (or another device is
+    /// measured instead). Frame-stamped pointer input would be judged with
+    /// device-timing rules (16 ms frames read as stutters, a press and
+    /// release in one frame as bounce).
     Neither,
 }
 
@@ -154,6 +163,8 @@ impl AutoTestPanel {
             engine: AutoTest::new(Config::default()),
             epoch: Instant::now(),
             last_run_raw: true,
+            measured: None,
+            run_mouse: None,
             show_metrics: false,
             wheel: WheelAccumulator::for_platform(),
             dpi: None,
@@ -178,6 +189,25 @@ impl AutoTestPanel {
         t.duration_since(self.epoch).as_secs_f64()
     }
 
+    /// The measured input changed: `device` (its unit, see
+    /// `InputDevice::unit`) is measured now, or nothing. Called by the app before the frame's input, whichever page
+    /// is shown. The step in progress of a raw-input run did not see all of
+    /// its mouse's input, so it is not judged.
+    pub fn input_changed(&mut self, device: Option<&str>) {
+        self.measured = device.map(str::to_owned);
+        if self.engine.is_running() && self.last_run_raw {
+            self.engine.input_lost();
+        }
+    }
+
+    /// Whether the device measured now is the mouse the run started with
+    /// (any, when the run did not record one).
+    fn on_run_mouse(&self) -> bool {
+        self.run_mouse
+            .as_ref()
+            .is_none_or(|name| self.measured.as_ref() == Some(name))
+    }
+
     /// Feed this frame's input into the engine. Called every frame from the
     /// app, whether or not this panel is visible.
     pub fn process_input(
@@ -189,7 +219,8 @@ impl AutoTestPanel {
         if !self.engine.is_running() {
             return;
         }
-        let path = input_path(self.last_run_raw, has_bridge);
+        // Another device is not measured in place of the run's mouse
+        let path = input_path(self.last_run_raw, has_bridge && self.on_run_mouse());
         if path == InputPath::Neither {
             // The step in progress did not see everything: the engine says
             // so instead of judging it on what it saw.
@@ -198,6 +229,10 @@ impl AutoTestPanel {
         if path == InputPath::Raw {
             for ev in raw_events {
                 let t = self.secs(ev.timestamp);
+                if ev.lost_before {
+                    // Reports were dropped: nothing is judged across the gap
+                    self.engine.input_gap(t);
+                }
                 self.engine.feed(t, &to_lib_event(&ev.kind));
             }
         } else if path == InputPath::Framework {
@@ -254,6 +289,7 @@ impl AutoTestPanel {
             ..Config::default()
         });
         self.last_run_raw = has_bridge;
+        self.run_mouse = self.measured.clone().filter(|_| has_bridge);
         self.wheel = WheelAccumulator::for_platform();
         self.engine.start(self.secs(Instant::now()));
     }
@@ -279,6 +315,22 @@ impl AutoTestPanel {
     #[cfg(test)]
     pub(crate) fn tick_for_test(&mut self, secs: f64) {
         self.engine.tick(secs);
+    }
+
+    /// Whether the run's input is measured now (see [`Self::on_run_mouse`]).
+    #[cfg(test)]
+    pub(crate) fn on_run_mouse_for_test(&self) -> bool {
+        self.on_run_mouse()
+    }
+
+    /// Titles of the findings so far.
+    #[cfg(test)]
+    pub(crate) fn finding_titles_for_test(&self) -> Vec<String> {
+        self.engine
+            .findings_so_far()
+            .iter()
+            .map(|f| f.title.clone())
+            .collect()
     }
 
     #[cfg(test)]
@@ -714,7 +766,12 @@ impl AutoTestPanel {
                                 ),
                                 (
                                     "Lift: jumps",
-                                    or_not_tested(report.lift_jumps().map(|v| v.to_string())),
+                                    or_not_tested(report.lift_jump_split().map(
+                                        |(jumps, possible)| match possible {
+                                            0 => jumps.to_string(),
+                                            _ => format!("{} +{} possible", jumps, possible),
+                                        },
+                                    )),
                                 ),
                                 (
                                     "Lift: largest jump",
@@ -763,6 +820,7 @@ impl AutoTestPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn a_run_keeps_the_input_it_started_with() {
@@ -873,6 +931,85 @@ mod tests {
             vec![egui::Event::PointerMoved(pos), button_at(pos, b, true)],
         );
         run_frame(ctx, panel, vec![button_at(pos, b, false)]);
+    }
+
+    #[test]
+    fn another_mouse_is_not_measured_in_place_of_the_runs() {
+        // A click during the rest step at 3 s and 4 s: phantom input of
+        // the measured mouse
+        let rest_clicks = |chosen_after_start: &str| {
+            let ctx = egui::Context::default();
+            let mut panel = AutoTestPanel::new();
+            panel.input_changed(Some("Office Mouse"));
+            panel.start_for_test(true);
+            panel.input_changed(Some(chosen_after_start));
+            let epoch = panel.epoch_for_test();
+            for secs in [3, 4] {
+                let press = RawInputEvent {
+                    kind: RawInputKind::ButtonPress(RawButton::Left),
+                    timestamp: epoch + Duration::from_secs(secs),
+                    lost_before: false,
+                };
+                panel.process_input(&ctx, &[press], true);
+            }
+            let noted = panel
+                .finding_titles_for_test()
+                .contains(&"Input lost during the step".to_string());
+            panel.engine.abort();
+            (panel.report().unwrap().metrics.rest_clicks, noted)
+        };
+        // Another mouse chosen: the step is noted and its clicks not counted
+        assert_eq!(rest_clicks("Gaming Mouse"), (0, true));
+        // The run's mouse back (plugged in again: a new device of the same
+        // name): measured again, though the interrupted step is not judged
+        assert_eq!(rest_clicks("Office Mouse"), (2, true));
+    }
+
+    /// Movement-step findings of a run fed 4 s of a 1 kHz mouse moving
+    /// briskly, from whose reports the kernel drops 42 ms every 0.5 s (the
+    /// reader fell behind); the first report after each hole is marked when
+    /// `marked`.
+    fn movement_with_dropped_reports(marked: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut panel = AutoTestPanel::new();
+        panel.start_for_test(true);
+        panel.tick_for_test(7.5);
+        assert_eq!(panel.engine.current_phase(), Some(Phase::Movement));
+        let epoch = panel.epoch_for_test();
+        let mut events = Vec::new();
+        let mut after_hole = false;
+        for k in 1..=4000u64 {
+            if k > 500 && k % 500 < 42 {
+                after_hole = true;
+                continue;
+            }
+            events.push(RawInputEvent {
+                kind: RawInputKind::Move { dx: 3, dy: 1 },
+                timestamp: epoch + Duration::from_millis(7500 + k),
+                lost_before: marked && after_hole,
+            });
+            after_hole = false;
+        }
+        for frame in events.chunks(16) {
+            panel.process_input(&ctx, frame, true);
+        }
+        panel.tick_for_test(30.0);
+        panel
+            .engine
+            .findings_so_far()
+            .iter()
+            .filter(|f| f.phase == Phase::Movement)
+            .map(|f| f.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reports_the_system_dropped_are_not_judged_as_stutters() {
+        let found = movement_with_dropped_reports(true);
+        assert!(found.iter().all(|t| !t.contains("stutter")), "{:?}", found);
+        // Unmarked, the holes read as the mouse stuttering
+        let found = movement_with_dropped_reports(false);
+        assert!(found.iter().any(|t| t.contains("stutter")), "{:?}", found);
     }
 
     #[test]

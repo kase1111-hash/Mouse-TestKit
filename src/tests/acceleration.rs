@@ -56,6 +56,10 @@ pub fn run() -> bool {
     let mut fast_samples: Vec<AccelSample> = Vec::new();
     let mut last_print = Instant::now();
     let mut recording_slow = true;
+    // Some of the current pass was lost: it will not be recorded
+    let mut spoiled = false;
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
@@ -63,23 +67,57 @@ pub fn run() -> bool {
     println!("Press SPACE to record, 'r' to reset, 'q' to finish.\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // One Move per report, stamped when the device sent it, so the pass
+        // duration is first to last movement (not until SPACE is pressed).
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        gaps += usize::from(batch.lost_data);
+        if batch.lost_data && !spoiled {
+            // Dropped reports took their counts with them: reports only flow
+            // while the mouse moves, so this pass lost some of its movement
+            // (even one with no counts yet lost its start). The rest of it
+            // must not be recorded as a pass of its own, so the SPACE that
+            // ends it discards it.
+            spoiled = true;
+            println!(
+                "\r\x1B[KSome movement was lost (the computer fell behind) - this pass will not be recorded. Finish it, press SPACE, then repeat it."
+            );
+        }
+        for timed in batch.events {
+            if let MouseEvent::Move { dx, dy } = timed.event {
+                pass.add(timed.time, dx, dy);
+            }
+        }
+
+        // Keys after the read: motion read just before SPACE belongs to the
+        // pass it ends, as does a gap found there (the wait is on the mouse)
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Some(code) = event::read().ok().and_then(|e| pressed_key(&e)) {
                 match code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('s') => {
                         recording_slow = true;
                         pass = Pass::default();
+                        spoiled = false;
                         println!("\r\x1B[KMode: SLOW - Move slowly and press SPACE");
                     }
                     KeyCode::Char('f') => {
                         recording_slow = false;
                         pass = Pass::default();
+                        spoiled = false;
                         println!("\r\x1B[KMode: FAST - Move quickly and press SPACE");
                     }
                     KeyCode::Char('r') => {
                         pass = Pass::default();
+                        spoiled = false;
                         println!("\r\x1B[KReset. Move and press SPACE to record.");
+                    }
+                    KeyCode::Char(' ') if spoiled => {
+                        spoiled = false;
+                        pass = Pass::default();
+                        println!("\r\x1B[KPass not recorded. Move and press SPACE to record.");
                     }
                     KeyCode::Char(' ') => {
                         if let Some(sample) = pass.sample() {
@@ -105,14 +143,6 @@ pub fn run() -> bool {
                     }
                     _ => {}
                 }
-            }
-        }
-
-        // One Move per report, stamped when the device sent it, so the pass
-        // duration is first to last movement (not until SPACE is pressed).
-        for timed in input::fetch_timed_events(&mut device) {
-            if let MouseEvent::Move { dx, dy } = timed.event {
-                pass.add(timed.time, dx, dy);
             }
         }
 
@@ -212,6 +242,10 @@ pub fn run() -> bool {
         );
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     true
 }

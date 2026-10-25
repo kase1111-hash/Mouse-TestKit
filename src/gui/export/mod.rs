@@ -28,6 +28,11 @@ pub struct TestResultsExport {
     pub scroll: Option<ScrollExport>,
     /// Report from the automated diagnostics run, if one was completed.
     pub auto_diagnostics: Option<AutoDiagnosticsReport>,
+    /// Tests (named as in the CSV) whose results come from a run during
+    /// which the system dropped some of the mouse's reports, because the
+    /// computer did not read them in time. Nothing was timed across them,
+    /// but clicks or movement in them are missing: re-run to confirm.
+    pub reports_lost: Vec<String>,
 }
 
 /// Metadata about the export including app version and timestamp.
@@ -61,6 +66,9 @@ pub struct PollingRateExport {
     pub max_hz: u32,
     pub avg_hz: f64,
     pub samples: u32,
+    /// Reports arrived several at a time (Bluetooth connection events): the
+    /// rates are deliveries per second.
+    pub batched_delivery: bool,
     pub history: Vec<f64>,
 }
 
@@ -70,8 +78,16 @@ pub struct StutterExport {
     /// The panel's rating, e.g. "Inconclusive" when too little fast
     /// movement was judged for the counts below to mean anything.
     pub rating: String,
-    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts).
+    /// Stutters of 0.1-1 s while the mouse kept moving (link dropouts)...
     pub freezes: usize,
+    /// ... of which this many lost the movement instead of catching up.
+    pub freezes_movement_lost: usize,
+    /// Reports arrived several at a time (Bluetooth connection events): the
+    /// intervals and rate are per delivery.
+    pub batched_delivery: bool,
+    /// Fast reports were pinned at this many counts, the limit of the
+    /// mouse's report format: movement lost at high speed.
+    pub clipped_at_counts: Option<i32>,
     pub total_stutter_count: usize,
     pub total_samples: usize,
     pub avg_delta_ms: f64,
@@ -134,15 +150,23 @@ pub struct StickyButtonExport {
 /// setting it down), judged by `analysis::liftoff`.
 #[derive(Serialize)]
 pub struct LiftOffExport {
+    /// Jumps no hand could make ("Jumps Detected" on the page).
     pub jump_count: usize,
-    /// Average jump in raw sensor counts (the name is kept for existing
-    /// readers of the export; these were never screen pixels).
+    /// Jump-sized movements that could also have been the hand, such as a
+    /// mouse landing while still sliding ("+N possible" on the page): set
+    /// the mouse straight down and repeat.
+    pub possible_jumps: usize,
+    /// Jump-sized movements the hand made (smooth nudges), not judged.
+    pub hand_movements_ignored: usize,
+    /// Average of the jumps and possible jumps in raw sensor counts (the
+    /// name is kept for existing readers of the export; these were never
+    /// screen pixels).
     pub avg_distance_px: f64,
-    /// Largest jump in raw sensor counts (see `avg_distance_px`).
+    /// Largest of them in raw sensor counts (see `avg_distance_px`).
     pub max_distance_px: f64,
-    /// Each jump in raw sensor counts.
+    /// Each jump, then each possible jump, in raw sensor counts.
     pub jump_distances: Vec<f64>,
-    /// Each jump in mm, converted with `dpi`.
+    /// The same in mm, converted with `dpi`.
     pub jump_distances_mm: Vec<f64>,
     pub max_distance_mm: f64,
     /// SPACE presses: lifts the user reported making.
@@ -154,8 +178,9 @@ pub struct LiftOffExport {
     /// ... and whether it was assumed (not set on the DPI Accuracy page).
     pub dpi_assumed: bool,
     pub jump_threshold_mm: f64,
-    /// "Cursor jumps on lift", "One jump - repeat the test",
-    /// "Inconclusive - too few lifts" or "No jumps".
+    /// "Cursor jumps on lift", "Possible jumps - DPI not set" (jumps at an
+    /// assumed DPI), "One jump - repeat the test", "Possible jumps - repeat
+    /// the test", "Inconclusive - too few lifts" or "No jumps".
     pub verdict: String,
 }
 
@@ -274,6 +299,9 @@ pub struct ScrollExport {
     /// Wheel reports counted as skips: reversed within `skip_window_ms` of
     /// the previous report, faster than a finger turns the wheel back.
     pub skips: usize,
+    /// False without raw input: frame-timed notches cannot show a skip, so
+    /// `skips` and `consistency_percent` were not measured.
+    pub skips_measured: bool,
     pub skip_window_ms: f64,
     /// What the panel concluded about the wheel.
     pub verdict: String,
@@ -289,6 +317,27 @@ fn csv_escape(value: &str) -> String {
 }
 
 impl TestResultsExport {
+    /// An export with no test results.
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            export_info: ExportInfo::new(),
+            polling_rate: None,
+            stutter: None,
+            click_response: None,
+            click_sticky: None,
+            liftoff: None,
+            jitter: None,
+            double_click: None,
+            dpi: None,
+            acceleration: None,
+            angle_snap: None,
+            scroll: None,
+            auto_diagnostics: None,
+            reports_lost: Vec::new(),
+        }
+    }
+
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -324,12 +373,25 @@ impl TestResultsExport {
             csv.push_str(&format!("Polling Rate,Max Hz,{}\n", p.max_hz));
             csv.push_str(&format!("Polling Rate,Avg Hz,{:.1}\n", p.avg_hz));
             csv.push_str(&format!("Polling Rate,Samples,{}\n", p.samples));
+            if p.batched_delivery {
+                csv.push_str("Polling Rate,Delivery,batched (rates are deliveries per second)\n");
+            }
         }
 
         // Stutter
         if let Some(ref s) = self.stutter {
             csv.push_str(&format!("Stutter,Rating,{}\n", csv_escape(&s.rating)));
             csv.push_str(&format!("Stutter,Freezes (0.1-1 s),{}\n", s.freezes));
+            csv.push_str(&format!(
+                "Stutter,Freezes That Lost the Movement,{}\n",
+                s.freezes_movement_lost
+            ));
+            if s.batched_delivery {
+                csv.push_str("Stutter,Delivery,batched (intervals are per delivery)\n");
+            }
+            if let Some(limit) = s.clipped_at_counts {
+                csv.push_str(&format!("Stutter,Clipped At (counts),{}\n", limit));
+            }
             csv.push_str(&format!(
                 "Stutter,Total Stutters,{}\n",
                 s.total_stutter_count
@@ -395,6 +457,11 @@ impl TestResultsExport {
             csv.push_str(&format!("Lift-Off,Verdict,{}\n", csv_escape(&l.verdict)));
             csv.push_str(&format!("Lift-Off,Lifts Recorded,{}\n", l.lifts_recorded));
             csv.push_str(&format!("Lift-Off,Jump Count,{}\n", l.jump_count));
+            csv.push_str(&format!("Lift-Off,Possible Jumps,{}\n", l.possible_jumps));
+            csv.push_str(&format!(
+                "Lift-Off,Hand Movements Ignored,{}\n",
+                l.hand_movements_ignored
+            ));
             csv.push_str(&format!(
                 "Lift-Off,Max Jump (mm),{:.1}\n",
                 l.max_distance_mm
@@ -517,14 +584,18 @@ impl TestResultsExport {
                 s.direction_changes
             ));
             csv.push_str(&format!("Scroll,Avg Speed (sps),{:.1}\n", s.avg_speed_sps));
-            csv.push_str(&format!(
-                "Scroll,Skips (reversed within {:.0} ms),{}\n",
-                s.skip_window_ms, s.skips
-            ));
-            csv.push_str(&format!(
-                "Scroll,Reports Not Skipped (%),{}\n",
-                s.consistency_percent
-            ));
+            if s.skips_measured {
+                csv.push_str(&format!(
+                    "Scroll,Skips (reversed within {:.0} ms),{}\n",
+                    s.skip_window_ms, s.skips
+                ));
+                csv.push_str(&format!(
+                    "Scroll,Reports Not Skipped (%),{}\n",
+                    s.consistency_percent
+                ));
+            } else {
+                csv.push_str("Scroll,Skips,not measured (no raw input)\n");
+            }
             csv.push_str(&format!("Scroll,Verdict,{}\n", csv_escape(&s.verdict)));
         }
 
@@ -562,9 +633,14 @@ impl TestResultsExport {
                 "Auto Diagnostics,Scroll Reversals,{}\n",
                 or_not_tested(r.scroll_reversals().map(|v| v.to_string()))
             ));
+            let split = r.lift_jump_split();
             csv.push_str(&format!(
                 "Auto Diagnostics,Lift Jumps,{}\n",
-                or_not_tested(r.lift_jumps().map(|v| v.to_string()))
+                or_not_tested(split.map(|(jumps, _)| jumps.to_string()))
+            ));
+            csv.push_str(&format!(
+                "Auto Diagnostics,Lift Possible Jumps,{}\n",
+                or_not_tested(split.map(|(_, possible)| possible.to_string()))
             ));
             for f in &r.findings {
                 csv.push_str(&format!(
@@ -573,6 +649,14 @@ impl TestResultsExport {
                     csv_escape(&f.detail)
                 ));
             }
+        }
+
+        // Runs that lost some of the mouse's reports
+        for test in &self.reports_lost {
+            csv.push_str(&format!(
+                "{},Reports Lost,\"yes: nothing was timed across them, but clicks or movement in them are missing - re-run to confirm\"\n",
+                csv_escape(test)
+            ));
         }
 
         csv
@@ -654,6 +738,7 @@ mod tests {
                 timing_reliable: true,
                 duration_secs: 42.0,
             }),
+            reports_lost: Vec::new(),
         };
         let csv = export.to_csv();
         assert!(csv.contains("Auto Diagnostics,Verdict,Needs attention\n"));
@@ -661,6 +746,7 @@ mod tests {
         assert!(csv.contains("Auto Diagnostics,Stutter Rate (%),not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Switch Bounces,not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Lift Jumps,not tested\n"));
+        assert!(csv.contains("Auto Diagnostics,Lift Possible Jumps,not tested\n"));
         assert!(csv.contains("Auto Diagnostics,Rest Movement (counts),0.0\n"));
         assert!(csv.contains(
             "Auto Diagnostics,WARNING: Possible switch bounce,\"1 press came within 25 ms, re-run\"\n"
@@ -671,23 +757,8 @@ mod tests {
             .contains("\"verdict\": \"Attention\""));
     }
 
-    /// An export with no test results.
     fn empty_export() -> TestResultsExport {
-        TestResultsExport {
-            export_info: ExportInfo::new(),
-            polling_rate: None,
-            stutter: None,
-            click_response: None,
-            click_sticky: None,
-            liftoff: None,
-            jitter: None,
-            double_click: None,
-            dpi: None,
-            acceleration: None,
-            angle_snap: None,
-            scroll: None,
-            auto_diagnostics: None,
-        }
+        TestResultsExport::empty_for_test()
     }
 
     #[test]
@@ -706,6 +777,9 @@ mod tests {
         export.stutter = Some(StutterExport {
             rating: "Inconclusive".to_string(),
             freezes: 0,
+            freezes_movement_lost: 0,
+            batched_delivery: false,
+            clipped_at_counts: None,
             total_stutter_count: 3,
             total_samples: 1500,
             avg_delta_ms: 1.0,
@@ -794,6 +868,7 @@ mod tests {
             avg_speed_sps: 30.0,
             consistency_percent: 85,
             skips: 8,
+            skips_measured: true,
             skip_window_ms: 60.0,
             verdict: "Wheel is skipping".to_string(),
         });
@@ -805,6 +880,19 @@ mod tests {
         let json = export.to_json().unwrap();
         assert!(json.contains("\"skips\": 8"));
         assert!(json.contains("\"consistency_percent\": 85"));
+        // Without raw input no skip count is given
+        if let Some(s) = export.scroll.as_mut() {
+            s.skips = 0;
+            s.consistency_percent = 100;
+            s.skips_measured = false;
+        }
+        let csv = export.to_csv();
+        assert!(
+            csv.contains("Scroll,Skips,not measured (no raw input)\n"),
+            "{}",
+            csv
+        );
+        assert!(!csv.contains("Reports Not Skipped"), "{}", csv);
     }
 
     #[test]

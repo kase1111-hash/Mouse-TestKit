@@ -7,7 +7,7 @@
 //! click is held for roughly 80-150 ms, so only holds well beyond that count,
 //! and a single long hold is treated as the hand, not the switch.
 
-use super::standard::TestOutcome;
+use super::standard::{self, TestOutcome};
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::diagnostics::Config;
@@ -47,17 +47,20 @@ pub fn run() -> TestOutcome {
 
     // Clicks made while the device list waited are queued with their own
     // times: they are not part of the test.
-    terminal::discard_queued(|| input::fetch_timed_events(&mut device));
+    terminal::discard_queued(|wait| input::read_events(&mut device, wait));
     let start = Instant::now();
     let mut tracker = HoldTracker::new(&cfg);
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("\nMonitoring... (press 'q' to quit)\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 ..
@@ -67,7 +70,17 @@ pub fn run() -> TestOutcome {
             }
         }
 
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            // A button held when the mouse went away is no stuck switch
+            device_lost = true;
+            tracker.input_gap();
+            break;
+        };
+        if batch.lost_data {
+            gaps += 1;
+            tracker.input_gap();
+        }
+        for timed in batch.events {
             let Some(t) = terminal::secs_after(start, timed.time) else {
                 continue;
             };
@@ -107,8 +120,6 @@ pub fn run() -> TestOutcome {
             std::io::stdout().flush().ok();
             last_print = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
 
     drop(_guard);
@@ -116,7 +127,11 @@ pub fn run() -> TestOutcome {
     let now = Instant::now()
         .saturating_duration_since(start)
         .as_secs_f64();
-    let report = tracker.report(now);
+    let mut report = tracker.report(now);
+    if device_lost {
+        (report.outcome, report.lines) =
+            standard::verdict_after_device_lost(report.outcome, report.lines);
+    }
 
     println!("\n\n=== Click Stickiness Test Complete ===\n");
 
@@ -154,6 +169,10 @@ pub fn run() -> TestOutcome {
         println!("{}", line);
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     report.outcome
 }
@@ -225,6 +244,13 @@ impl HoldTracker {
             }
             _ => None,
         }
+    }
+
+    /// Input was lost (reports dropped, or the mouse disconnected): a
+    /// press still waiting for its release cannot be timed, so it is
+    /// forgotten. A release that follows is then ignored.
+    pub fn input_gap(&mut self) {
+        self.pressed.clear();
     }
 
     pub fn holds(&self) -> &[ClickHold] {
@@ -470,6 +496,33 @@ mod tests {
         let mut tracker = HoldTracker::new(&Config::default());
         let end = clicks(&mut tracker, &[100.0, 120.0]);
         assert_eq!(tracker.report(end).outcome, TestOutcome::Inconclusive);
+    }
+
+    #[test]
+    fn test_input_lost_mid_click_is_not_judged() {
+        // Left pressed, then reports are dropped (its release among them):
+        // the late resynchronised release is not a slow release, and a
+        // button held when the mouse disconnects is not a stuck switch
+        let mut tracker = HoldTracker::new(&Config::default());
+        let t = clicks(&mut tracker, &[100.0, 110.0, 120.0, 105.0, 95.0]);
+        tracker.feed(t, &MouseEvent::ButtonPress(MouseButton::Left));
+        tracker.input_gap();
+        assert!(tracker
+            .feed(t + 0.6, &MouseEvent::ButtonRelease(MouseButton::Left))
+            .is_none());
+        tracker.feed(t + 1.0, &MouseEvent::ButtonPress(MouseButton::Right));
+        tracker.input_gap();
+        let r = tracker.report(t + 5.0);
+        assert_eq!(r.sticky, 0);
+        assert!(r.held_at_exit.is_empty());
+        assert_eq!(r.outcome, TestOutcome::NoIssues);
+
+        // Without the gap, the same input is a slow release and a stuck
+        // button: the checks still work
+        let mut tracker = HoldTracker::new(&Config::default());
+        let t = clicks(&mut tracker, &[100.0, 110.0, 120.0, 105.0, 95.0]);
+        tracker.feed(t, &MouseEvent::ButtonPress(MouseButton::Right));
+        assert_eq!(tracker.report(t + 5.0).outcome, TestOutcome::IssueFound);
     }
 
     #[test]

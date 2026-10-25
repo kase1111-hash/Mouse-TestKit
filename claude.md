@@ -48,6 +48,7 @@ src/
 ├── main.rs                   # CLI entry point (Linux/Windows)
 ├── lib.rs                    # Library re-exports (types, analysis)
 ├── types.rs                  # Shared MouseEvent and MouseButton types
+├── evdev_input.rs            # Linux evdev reader shared by CLI and GUI (drops, resync)
 ├── input.rs                  # Linux input via evdev
 ├── input_windows.rs          # Windows input via Raw Input API
 ├── terminal.rs               # Terminal utilities
@@ -123,6 +124,9 @@ Each test panel follows this pattern:
 - Struct with internal state (is_running, results, settings)
 - `ui(&mut self, ui: &mut egui::Ui)` method for rendering
 - State management within the panel
+- `input_changed()`, which the app calls (whichever page is shown) when the
+  measured device changes: a run in progress ends, so two inputs are never
+  mixed in one result
 
 ### Test Modules
 
@@ -147,9 +151,16 @@ Anything that measures time between reports must use the time each report
 was produced, never the time the code got round to reading it: events read in
 one batch would share one timestamp, and the interval would measure the read
 loop instead of the mouse. CLI tests read input with
-`input::fetch_timed_events(&mut device)`, which returns `types::TimedEvent`
-(`time` + `event`): the kernel evdev timestamp on Linux, the `WM_INPUT`
-receive time on Windows (Raw Input carries no hardware timestamp). GUI panels
+`input::read_events(&mut device, terminal::READ_WAIT)`, which waits for the
+mouse and returns a `types::InputBatch` of `types::TimedEvent` (`time` +
+`event`): the kernel evdev timestamp on Linux, the `WM_INPUT` receive time on
+Windows (Raw Input carries no hardware timestamp). It returns `DeviceLost`
+once the mouse is unplugged: the test must stop and not judge the silence.
+A batch with `lost_data` follows reports the system dropped because the
+reader fell behind: nothing may be timed across it (e.g.
+`StutterDetector::break_continuity`, `AutoTest::input_gap`). The GUI bridge
+marks the same gaps (`InputBridge::gaps`, and `RawInputEvent::lost_before` on
+the first event after each), and GUI panels apply the same rules. GUI panels
 use `RawInputEvent::timestamp` from the input bridge. Without raw input
 (framework input, always on macOS) events only carry the frame time (steps
 of about 16 ms), so a check that needs finer timing than that (polling rate,

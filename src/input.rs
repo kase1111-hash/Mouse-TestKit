@@ -4,7 +4,10 @@
 //! This module handles:
 //! - Enumerating available mouse devices in /dev/input
 //! - Interactive device selection
-//! - Parsing raw input events into structured MouseEvent types
+//! - Reading the selected mouse ([`read_events`]): one event per hardware
+//!   report with the kernel's timestamp, gaps where the kernel dropped
+//!   reports, and a mouse that was unplugged (via
+//!   `mouse_testkit::evdev_input`, shared with the GUI)
 //!
 //! # Permissions
 //!
@@ -12,30 +15,56 @@
 //! added to the 'input' group: `sudo usermod -aG input $USER`
 
 #[cfg(target_os = "linux")]
-use evdev::{Device, EventSummary, KeyCode, RelativeAxisCode, SynchronizationCode};
+use evdev::raw_stream::RawDevice;
+#[cfg(target_os = "linux")]
+use evdev::{KeyCode, RelativeAxisCode};
+#[cfg(target_os = "linux")]
+use mouse_testkit::evdev_input::{self, EvdevMouse};
+#[cfg(target_os = "linux")]
+use std::collections::VecDeque;
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::time::{Instant, SystemTime};
+use std::time::Duration;
 
-/// Represents a detected mouse device on Linux.
+/// A mouse-capable device found in /dev/input.
 #[cfg(target_os = "linux")]
-pub struct MouseDevice {
-    /// The evdev Device handle
-    pub device: Device,
+pub struct MouseDeviceInfo {
+    /// The opened device node
+    pub device: RawDevice,
     /// Human-readable device name
     pub name: String,
     /// Path to the device file (e.g., /dev/input/event5)
     pub path: PathBuf,
 }
 
+/// A mouse opened for a test. Read it with [`read_events`].
+#[cfg(target_os = "linux")]
+pub struct MouseDevice {
+    mouse: EvdevMouse,
+    /// Batches read but not yet returned: the events after a gap are
+    /// returned on their own, so `lost_data` marks exactly where it is.
+    queued: VecDeque<InputBatch>,
+}
+
+#[cfg(target_os = "linux")]
+impl MouseDevice {
+    /// Take the device for this program alone (other programs, including
+    /// the desktop, stop receiving its input until it is dropped).
+    pub fn grab(&mut self) -> std::io::Result<()> {
+        self.mouse.device_mut().grab()
+    }
+}
+
 /// Find all mouse devices in the system
 #[cfg(target_os = "linux")]
-pub fn find_mouse_devices() -> Vec<MouseDevice> {
+pub fn find_mouse_devices() -> Vec<MouseDeviceInfo> {
     let mut mice = Vec::new();
     let mut permission_denied_count = 0;
+    // Of those, nodes that report X motion (a mouse the user cannot open)
+    let mut denied_mice = 0;
 
     match fs::read_dir("/dev/input") {
         Ok(entries) => {
@@ -47,18 +76,8 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
                     continue;
                 }
 
-                match Device::open(&path) {
+                match RawDevice::open(&path) {
                     Ok(device) => {
-                        // Tests poll the keyboard and the mouse in one loop; a
-                        // blocking read would stall the loop (and the 'q' key,
-                        // timed samples, etc.) until the mouse produces an event.
-                        if let Err(e) = device.set_nonblocking(true) {
-                            eprintln!(
-                                "Warning: could not set {} non-blocking: {}",
-                                path.display(),
-                                e
-                            );
-                        }
                         // Check if device has mouse-like capabilities
                         let has_rel_x = device
                             .supported_relative_axes()
@@ -72,12 +91,16 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
 
                         if has_rel_x && has_left_btn {
                             let name = device.name().unwrap_or("Unknown Mouse").to_string();
-                            mice.push(MouseDevice { device, name, path });
+                            mice.push(MouseDeviceInfo { device, name, path });
                         }
                     }
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::PermissionDenied {
                             permission_denied_count += 1;
+                            let node = entry.file_name();
+                            if evdev_input::node_reports_rel_x(&node.to_string_lossy()) {
+                                denied_mice += 1;
+                            }
                         }
                         // Other errors (device busy, etc.) are silently skipped
                     }
@@ -90,13 +113,25 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
         }
     }
 
-    // Warn user if we encountered permission issues
-    if permission_denied_count > 0 && mice.is_empty() {
+    // Warn user if we encountered permission issues. A mouse that cannot be
+    // opened is worth a warning even when another device can be: the one
+    // listed may not be the mouse being tested.
+    if permission_denied_count > 0 && (mice.is_empty() || denied_mice > 0) {
         eprintln!();
-        eprintln!(
-            "Warning: {} device(s) could not be accessed due to permissions.",
-            permission_denied_count
-        );
+        if denied_mice > 0 {
+            eprintln!(
+                "Warning: {} mouse device(s) could not be opened (permission denied).",
+                denied_mice
+            );
+            if !mice.is_empty() {
+                eprintln!("If the mouse you want to test is not listed below, it is one of them.");
+            }
+        } else {
+            eprintln!(
+                "Warning: {} device(s) could not be accessed due to permissions.",
+                permission_denied_count
+            );
+        }
         eprintln!("To fix this, either:");
         eprintln!("  1. Run with elevated privileges (not recommended for regular use)");
         eprintln!("  2. Add your user to the 'input' group: sudo usermod -aG input $USER");
@@ -109,7 +144,7 @@ pub fn find_mouse_devices() -> Vec<MouseDevice> {
 
 /// Select a mouse device interactively
 #[cfg(target_os = "linux")]
-pub fn select_mouse() -> Option<Device> {
+pub fn select_mouse() -> Option<MouseDevice> {
     let mice = find_mouse_devices();
 
     if mice.is_empty() {
@@ -133,7 +168,7 @@ pub fn select_mouse() -> Option<Device> {
 
     if mice.len() == 1 {
         println!("Found mouse: {}", mice[0].name);
-        return Some(mice.into_iter().next()?.device);
+        return open(mice.into_iter().next()?);
     }
 
     println!("Found {} mouse devices:\n", mice.len());
@@ -174,169 +209,68 @@ pub fn select_mouse() -> Option<Device> {
         return None;
     }
 
-    Some(mice.into_iter().nth(choice - 1)?.device)
+    open(mice.into_iter().nth(choice - 1)?)
+}
+
+/// Prepare a found mouse for reading.
+#[cfg(target_os = "linux")]
+fn open(info: MouseDeviceInfo) -> Option<MouseDevice> {
+    match EvdevMouse::new(info.device) {
+        Ok(mut mouse) => {
+            // The node has queued input since it was opened to be listed.
+            // None of it is part of a test, and moving the mouse for a few
+            // dozen milliseconds while the list waited overflows the queue,
+            // which the test would then report as reports it lost. (Windows
+            // starts reading only once a mouse is chosen.) A mouse already
+            // gone is reported by the test's first read.
+            let _ = mouse.read(None);
+            Some(MouseDevice {
+                mouse,
+                queued: VecDeque::new(),
+            })
+        }
+        Err(e) => {
+            eprintln!(
+                "Error: could not prepare {} for reading: {}",
+                info.path.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 // Re-export canonical types from the shared library crate.
-pub use mouse_testkit::types::{MouseButton, MouseEvent, TimedEvent};
+pub use mouse_testkit::types::{DeviceLost, InputBatch, MouseButton, MouseEvent, TimedEvent};
 
-/// Fetch pending events with one `Move` per hardware report.
+/// Read the mouse: wait up to `wait` for input (not at all when some is
+/// already pending), then return everything pending, one `Move` per
+/// hardware report, each stamped with its kernel timestamp.
 ///
-/// evdev splits a report into separate REL_X and REL_Y events followed by
-/// SYN_REPORT; they are merged here so a diagonal report is one move, not two.
-/// Every event carries its kernel timestamp (converted to `Instant`) instead
-/// of the time it was read, so batches drained together keep their real
-/// spacing. Returns an empty list when nothing is pending.
+/// A batch with `lost_data` starts after reports the kernel dropped because
+/// the reader fell behind (see [`InputBatch`]); events after such a gap
+/// always come in a batch of their own. Returns [`DeviceLost`] once the
+/// mouse is unplugged or can no longer be read, after the input read
+/// before that was returned.
 #[cfg(target_os = "linux")]
-pub fn fetch_timed_events(device: &mut Device) -> Vec<TimedEvent> {
-    let events: Vec<evdev::InputEvent> = match device.fetch_events() {
-        Ok(events) => events.collect(),
-        Err(_) => return Vec::new(),
-    };
-
-    // Map kernel (CLOCK_REALTIME) timestamps onto the monotonic clock using
-    // one reference pair for the whole batch, so intervals within it are exact.
-    let ref_system = SystemTime::now();
-    let ref_instant = Instant::now();
-    group_reports(&events, |ts| {
-        ref_system
-            .duration_since(ts)
-            .ok()
-            .and_then(|age| ref_instant.checked_sub(age))
-            .unwrap_or(ref_instant)
-    })
+pub fn read_events(device: &mut MouseDevice, wait: Duration) -> Result<InputBatch, DeviceLost> {
+    if device.queued.is_empty() {
+        if !wait.is_zero() {
+            device.mouse.wait(Some(wait));
+        }
+        // Kernel timestamps are kept however old: input queued while a
+        // prompt waited must be recognised as older than the test.
+        device.queued.extend(device.mouse.read(None)?);
+    }
+    Ok(device.queued.pop_front().unwrap_or_default())
 }
 
-/// Merge the axis events of each SYN_REPORT-terminated report into one move
-/// and stamp every event via `to_instant(kernel timestamp)`.
+/// Pending events, without waiting. Prefer [`read_events`]: here lost
+/// reports and a disconnected mouse only show as missing events.
 #[cfg(target_os = "linux")]
-fn group_reports(
-    events: &[evdev::InputEvent],
-    to_instant: impl Fn(SystemTime) -> Instant,
-) -> Vec<TimedEvent> {
-    let mut out = Vec::new();
-    let (mut dx, mut dy) = (0, 0);
-    let mut move_time = None;
-    let flush = |out: &mut Vec<TimedEvent>, dx: &mut i32, dy: &mut i32, time: Option<Instant>| {
-        if let Some(time) = time {
-            if *dx != 0 || *dy != 0 {
-                out.push(TimedEvent {
-                    time,
-                    event: MouseEvent::Move { dx: *dx, dy: *dy },
-                });
-            }
-        }
-        (*dx, *dy) = (0, 0);
-    };
-    for ev in events {
-        if let EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) =
-            ev.destructure()
-        {
-            flush(&mut out, &mut dx, &mut dy, move_time.take());
-            continue;
-        }
-        match parse_event(ev) {
-            Some(MouseEvent::Move { dx: x, dy: y }) => {
-                dx += x;
-                dy += y;
-                move_time.get_or_insert_with(|| to_instant(ev.timestamp()));
-            }
-            Some(event) => out.push(TimedEvent {
-                time: to_instant(ev.timestamp()),
-                event,
-            }),
-            None => {}
-        }
-    }
-    flush(&mut out, &mut dx, &mut dy, move_time);
-    out
-}
-
-/// Parse an evdev event into a MouseEvent
-#[cfg(target_os = "linux")]
-pub fn parse_event(event: &evdev::InputEvent) -> Option<MouseEvent> {
-    match event.destructure() {
-        EventSummary::RelativeAxis(_, axis, value) => match axis {
-            RelativeAxisCode::REL_X => Some(MouseEvent::Move { dx: value, dy: 0 }),
-            RelativeAxisCode::REL_Y => Some(MouseEvent::Move { dx: 0, dy: value }),
-            RelativeAxisCode::REL_WHEEL => Some(MouseEvent::Scroll { delta: value }),
-            _ => None,
-        },
-        EventSummary::Key(_, key, value) => {
-            let button = MouseButton::from(key);
-            if button == MouseButton::Unknown {
-                return None;
-            }
-
-            if value == 1 {
-                Some(MouseEvent::ButtonPress(button))
-            } else if value == 0 {
-                Some(MouseEvent::ButtonRelease(button))
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-    use evdev::{EventType, InputEvent};
-
-    fn rel(axis: RelativeAxisCode, value: i32) -> InputEvent {
-        InputEvent::new(EventType::RELATIVE.0, axis.0, value)
-    }
-
-    fn syn() -> InputEvent {
-        InputEvent::new(
-            EventType::SYNCHRONIZATION.0,
-            SynchronizationCode::SYN_REPORT.0,
-            0,
-        )
-    }
-
-    fn moves(events: &[TimedEvent]) -> Vec<(i32, i32)> {
-        events
-            .iter()
-            .filter_map(|e| match e.event {
-                MouseEvent::Move { dx, dy } => Some((dx, dy)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn x_and_y_of_one_report_become_one_move() {
-        let now = Instant::now();
-        let events = [
-            rel(RelativeAxisCode::REL_X, 3),
-            rel(RelativeAxisCode::REL_Y, -2),
-            syn(),
-            rel(RelativeAxisCode::REL_Y, 5),
-            syn(),
-        ];
-        let out = group_reports(&events, |_| now);
-        assert_eq!(moves(&out), vec![(3, -2), (0, 5)]);
-    }
-
-    #[test]
-    fn buttons_and_wheel_pass_through_and_trailing_motion_is_kept() {
-        let now = Instant::now();
-        let events = [
-            InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.0, 1),
-            syn(),
-            rel(RelativeAxisCode::REL_WHEEL, -1),
-            syn(),
-            rel(RelativeAxisCode::REL_X, 7),
-        ];
-        let out = group_reports(&events, |_| now);
-        assert!(matches!(
-            out[0].event,
-            MouseEvent::ButtonPress(MouseButton::Left)
-        ));
-        assert!(matches!(out[1].event, MouseEvent::Scroll { delta: -1 }));
-        assert_eq!(moves(&out), vec![(7, 0)]);
-    }
+#[allow(dead_code)]
+pub fn fetch_timed_events(device: &mut MouseDevice) -> Vec<TimedEvent> {
+    read_events(device, Duration::ZERO)
+        .map(|batch| batch.events)
+        .unwrap_or_default()
 }

@@ -15,7 +15,10 @@ use std::time::Instant;
 
 use crate::export::PollingRateExport;
 use crate::input_bridge::{RawInputEvent, RawInputKind};
-use mouse_testkit::analysis::polling::{usb_nominal_rate, window_hz, USB_MIN_POLLING_HZ};
+use mouse_testkit::analysis::polling::{
+    batched_delivery, rate_hz, saturated_intervals_ms, usb_nominal_rate, Batching,
+    MIN_FAST_INTERVALS, USB_MIN_POLLING_HZ,
+};
 
 /// Tell the user plainly that a measurement needs raw input.
 ///
@@ -47,6 +50,24 @@ pub(super) fn raw_input_required_notice(ui: &mut egui::Ui, what: &str) {
         });
 }
 
+/// Tell the user that a run ended because the raw input it measured
+/// stopped: the mouse was unplugged, its link dropped out, or another input
+/// was chosen. The run is not continued on whatever input comes next, which
+/// may be another device or the window-system pointer: its readings would
+/// be mixed with the measured mouse's.
+pub(super) fn input_lost_notice(ui: &mut egui::Ui) {
+    ui.label(
+        egui::RichText::new(
+            "The run stopped: raw input from the mouse stopped (it was unplugged, its receiver or link dropped out, or another input was chosen). The results shown are from before that. Press Start to measure again.",
+        )
+        .color(egui::Color32::LIGHT_RED),
+    );
+}
+
+/// Shown for a reading of 110 Hz or more that is well above every standard
+/// USB rate (see `analysis::polling::usb_nominal_rate`).
+const NO_USB_RATE_FITS: &str = "No standard USB rate fits this reading: the computer polls a USB mouse on a fixed clock, so it measures at or just under its rate (125, 250, 500, 1000 Hz and up), never well above it. About 133 Hz is normal for a Bluetooth mouse on its shortest connection interval (7.5 ms).";
+
 /// Panel for measuring mouse polling rate.
 ///
 /// Calculates the polling rate from the median interval between consecutive
@@ -54,8 +75,10 @@ pub(super) fn raw_input_required_notice(ui: &mut egui::Ui, what: &str) {
 /// moving fast enough to report at every poll (see
 /// `analysis::polling::saturated_intervals_ms`). Slow movement and reversals
 /// legitimately skip polls; windows without enough fast movement publish
-/// nothing, so they cannot drag Min/Avg/Nominal down. Displays real-time
-/// statistics and a scrolling graph of polling rate history.
+/// nothing, so they cannot drag Min/Avg/Nominal down. Reports delivered in
+/// batches (a Bluetooth mouse, see `analysis::polling::batched_delivery`)
+/// are measured per delivery. Displays real-time statistics and a scrolling
+/// graph of polling rate history. A run ends if raw input stops.
 pub struct PollingPanel {
     is_running: bool,
     current_hz: u32,
@@ -70,6 +93,13 @@ pub struct PollingPanel {
     reports: VecDeque<(Instant, i32, i32)>,
     /// Last time we calculated and recorded a Hz sample
     last_hz_calc: Option<Instant>,
+    /// Reports arrived in batches in the latest measured window...
+    batching: Option<Batching>,
+    /// ... and in any window of this run, so the readings are deliveries
+    /// per second.
+    ever_batched: bool,
+    /// The run was ended because raw input stopped.
+    stopped_for_input: bool,
 }
 
 impl PollingPanel {
@@ -85,11 +115,28 @@ impl PollingPanel {
             history: VecDeque::with_capacity(200),
             reports: VecDeque::with_capacity(2000),
             last_hz_calc: None,
+            batching: None,
+            ever_batched: false,
+            stopped_for_input: false,
         }
+    }
+
+    /// The standard USB rate the average corresponds to, if any. Deliveries
+    /// of batched reports are connection events, not a USB rate.
+    fn nominal_hz(&self) -> Option<u32> {
+        usb_nominal_rate(self.avg_hz).filter(|_| self.samples > 0 && !self.ever_batched)
     }
 
     pub fn is_running(&self) -> bool {
         self.is_running
+    }
+
+    /// The measured input changed (another device, or raw input stopped or
+    /// started): a run in progress ends, whichever page is shown, so two
+    /// mice are never blended (see [`input_lost_notice`]).
+    pub fn input_changed(&mut self) {
+        self.stopped_for_input |= self.is_running;
+        self.is_running = false;
     }
 
     pub fn ui(
@@ -103,9 +150,14 @@ impl PollingPanel {
         ui.add_space(5.0);
         ui.label("Measures your mouse's polling rate in real-time.");
         if !has_bridge {
+            self.stopped_for_input |= self.is_running;
             ui.add_space(5.0);
             raw_input_required_notice(ui, "The mouse's polling rate");
             self.is_running = false;
+        }
+        if self.stopped_for_input {
+            ui.add_space(5.0);
+            input_lost_notice(ui);
         }
         ui.add_space(15.0);
 
@@ -172,9 +224,9 @@ impl PollingPanel {
                     self.stat_box(
                         ui,
                         "Nominal",
-                        &match usb_nominal_rate(self.avg_hz) {
-                            Some(n) if self.samples > 0 => format!("{} Hz", n),
-                            _ => "-".to_string(),
+                        &match self.nominal_hz() {
+                            Some(n) => format!("{} Hz", n),
+                            None => "-".to_string(),
                         },
                         egui::Color32::LIGHT_GRAY,
                     );
@@ -188,12 +240,23 @@ impl PollingPanel {
                 });
             });
 
-        if self.samples > 0 && usb_nominal_rate(self.avg_hz).is_none() {
+        if let Some(b) = self.batching {
+            ui.add_space(8.0);
+            ui.label(format!(
+                "Reports arrive in batches, {:.1} per delivery on average, one delivery every {:.1} ms, as a Bluetooth mouse sends the reports it has ready once per connection event. The cursor moves once per delivery, so the rate shown is deliveries per second.",
+                b.reports_per_event, b.event_period_ms
+            ));
+        }
+
+        if self.samples > 0 && self.avg_hz < USB_MIN_POLLING_HZ as f64 {
             ui.add_space(8.0);
             ui.label(format!(
                 "Under {} Hz no USB rate fits. That is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: check its polling rate setting.",
                 USB_MIN_POLLING_HZ
             ));
+        } else if self.samples > 0 && !self.ever_batched && self.nominal_hz().is_none() {
+            ui.add_space(8.0);
+            ui.label(NO_USB_RATE_FITS);
         }
 
         if self.is_running && !self.live {
@@ -264,9 +327,14 @@ impl PollingPanel {
         }
     }
 
-    /// Keep the motion reports of the last second.
+    /// Keep the motion reports of the last second. Reports were lost before
+    /// an event marked `lost_before`: the interval across the hole is no
+    /// poll, so the window starts again after it (as in the CLI monitor).
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent], now: Instant) {
         for event in raw_events {
+            if event.lost_before {
+                self.reports.clear();
+            }
             if let RawInputKind::Move { dx, dy } = event.kind {
                 self.reports.push_back((event.timestamp, dx, dy));
             }
@@ -309,8 +377,11 @@ impl PollingPanel {
                 )
             })
             .collect();
-        match window_hz(&reports) {
+        let intervals = saturated_intervals_ms(&reports);
+        match rate_hz(&intervals, MIN_FAST_INTERVALS) {
             Some(hz) => {
+                self.batching = batched_delivery(&intervals);
+                self.ever_batched |= self.batching.is_some();
                 self.live = true;
                 self.current_hz = hz;
                 self.min_hz = self.min_hz.min(hz);
@@ -358,6 +429,9 @@ impl PollingPanel {
         self.history.clear();
         self.reports.clear();
         self.last_hz_calc = None;
+        self.batching = None;
+        self.ever_batched = false;
+        self.stopped_for_input = false;
     }
 
     pub fn export(&self) -> Option<PollingRateExport> {
@@ -374,6 +448,7 @@ impl PollingPanel {
             max_hz: self.max_hz,
             avg_hz: self.avg_hz,
             samples: self.samples,
+            batched_delivery: self.ever_batched,
             history: self.history.iter().cloned().collect(),
         })
     }
@@ -389,6 +464,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: t,
+            lost_before: false,
         }
     }
 
@@ -501,6 +577,101 @@ mod tests {
         let avg = p.export().unwrap().avg_hz;
         assert!((avg - 89.0).abs() < 1.0, "{}", avg);
         assert_eq!(usb_nominal_rate(avg), None);
+        // ... or one report per 7.5 ms interval: 133 Hz, not a 125 Hz mouse
+        let mut p = PollingPanel::new();
+        p.start();
+        let events: Vec<_> = (0..300u64)
+            .map(|i| mv(t0 + Duration::from_micros(7_500 * i), 8, 2))
+            .collect();
+        drive(&mut p, &events);
+        assert!(!p.ever_batched);
+        assert!((p.avg_hz - 133.3).abs() < 1.0, "{}", p.avg_hz);
+        assert_eq!(p.nominal_hz(), None);
+    }
+
+    #[test]
+    fn losing_raw_input_ends_the_run_without_mixing() {
+        // A 1 kHz mouse is measured, then unplugged; another mouse (4 kHz)
+        // is read afterwards. Its reports must not join the run.
+        let ctx = egui::Context::default();
+        let frame = |p: &mut PollingPanel, events: &[RawInputEvent], raw: bool| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let c = ui.ctx().clone();
+                p.ui(ui, &c, events, raw);
+            });
+        };
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let first: Vec<_> = (0..1000)
+            .map(|i| mv(t0 + Duration::from_millis(i), 3, 0))
+            .collect();
+        drive(&mut p, &first);
+        let measured = p.export().unwrap();
+        frame(&mut p, &[], false);
+        assert!(!p.is_running() && p.stopped_for_input);
+        let t1 = Instant::now();
+        let second: Vec<_> = (0..4000u64)
+            .map(|i| mv(t1 + Duration::from_micros(250 * i), 3, 0))
+            .collect();
+        frame(&mut p, &second, true);
+        assert!(!p.is_running());
+        assert!(p.stopped_for_input, "the note stays until a new run");
+        let after = p.export().unwrap();
+        assert_eq!(after.samples, measured.samples);
+        assert_eq!(nominal_rate(after.avg_hz), 1000);
+        p.start();
+        assert!(!p.stopped_for_input);
+    }
+
+    #[test]
+    fn bluetooth_batches_read_as_deliveries() {
+        // A Bluetooth mouse sampling at 250 Hz, served every 11.25 ms (about
+        // 2.8 reports per connection event, 0.4 ms apart) or every 7.5 ms;
+        // and one sampling at 100 Hz, served every 11.25 ms (two reports in
+        // one event of eight)
+        for (event_us, sample_us) in [(11_250u64, 4_000u64), (7_500, 4_000), (11_250, 10_000)] {
+            let mut p = PollingPanel::new();
+            p.start();
+            let t0 = Instant::now();
+            let mut events = Vec::new();
+            let mut sent = 0u64;
+            // 3 s of movement
+            for k in 1..=3_000_000 / event_us {
+                let made = k * event_us / sample_us;
+                for (i, _) in (sent..made).enumerate() {
+                    let at = t0 + Duration::from_micros(k * event_us + 400 * i as u64);
+                    events.push(mv(at, 6, 2));
+                }
+                sent = made;
+            }
+            drive(&mut p, &events);
+            let e = p.export().unwrap();
+            let hz = 1e6 / event_us as f64;
+            assert!((e.avg_hz - hz).abs() < 2.0, "{} {}", event_us, e.avg_hz);
+            assert!(e.batched_delivery, "{}", event_us);
+            assert!(p.batching.is_some(), "{}", event_us);
+            // 133 deliveries a second are not a 125 Hz USB mouse
+            assert_eq!(p.nominal_hz(), None, "{}", event_us);
+        }
+    }
+
+    #[test]
+    fn the_window_starts_again_after_dropped_reports() {
+        // A 1 kHz mouse: the kernel drops 40 ms of reports. The window is
+        // emptied there, so its intervals and the time across the hole are
+        // not mixed.
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let mut events: Vec<_> = (0..500)
+            .map(|i| mv(t0 + Duration::from_millis(i), 3, 0))
+            .collect();
+        let mut resumed = mv(t0 + Duration::from_millis(540), 3, 0);
+        resumed.lost_before = true;
+        events.push(resumed);
+        p.process_raw_events(&events, t0 + Duration::from_millis(540));
+        assert_eq!(p.reports.len(), 1);
     }
 
     #[test]

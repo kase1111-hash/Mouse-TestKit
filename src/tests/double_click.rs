@@ -8,7 +8,7 @@
 //! Diagnostics thresholds (`analysis::diagnostics::Config`) and the device's
 //! own timestamps.
 
-use super::standard::TestOutcome;
+use super::standard::{self, TestOutcome};
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::diagnostics::{bounce_verdict, BounceVerdict, Config};
@@ -52,17 +52,20 @@ pub fn run() -> TestOutcome {
 
     // Clicks made while the device list waited are queued with their own
     // times: a stale double-click would read as a 0 ms bounce.
-    terminal::discard_queued(|| input::fetch_timed_events(&mut device));
+    terminal::discard_queued(|wait| input::read_events(&mut device, wait));
     let start = Instant::now();
     let mut detector = BounceDetector::new(&cfg);
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
     println!("Click at normal pace... Press 'q' to finish.\n");
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code: KeyCode::Char('q'),
                 ..
@@ -72,7 +75,15 @@ pub fn run() -> TestOutcome {
             }
         }
 
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data {
+            gaps += 1;
+            detector.input_gap();
+        }
+        for timed in batch.events {
             let Some(t) = terminal::secs_after(start, timed.time) else {
                 continue;
             };
@@ -92,8 +103,6 @@ pub fn run() -> TestOutcome {
             io::stdout().flush().ok();
             last_print = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
 
     drop(_guard);
@@ -130,7 +139,10 @@ pub fn run() -> TestOutcome {
         println!();
     }
 
-    let (outcome, mut lines) = verdict(double_clicks.len(), detector.presses, min_clicks());
+    let (mut outcome, mut lines) = verdict(double_clicks.len(), detector.presses, min_clicks());
+    if device_lost {
+        (outcome, lines) = standard::verdict_after_device_lost(outcome, lines);
+    }
     if outcome == TestOutcome::NoIssues {
         lines.extend(super::click_sticky::per_button(&detector.presses_by_button()).1);
     }
@@ -158,6 +170,10 @@ pub fn run() -> TestOutcome {
         println!("  >200ms:    {} (normal)", count(200.0, f64::INFINITY));
     }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     outcome
 }
@@ -238,6 +254,9 @@ impl DoubleClickEvent {
 struct ButtonState {
     last_press: Option<f64>,
     last_release: Option<f64>,
+    /// Reports were dropped since the last press seen: the next release
+    /// may be one restored with the time of the drop, not its own.
+    after_gap: bool,
     presses: usize,
 }
 
@@ -285,6 +304,18 @@ impl BounceDetector {
             .collect()
     }
 
+    /// Reports were dropped (the program fell behind): presses and releases
+    /// can be missing, and a release restored afterwards carries the time
+    /// of the drop rather than its own, so nothing is compared across the
+    /// gap, and a release whose press came before it is ignored.
+    pub fn input_gap(&mut self) {
+        for (_, state) in &mut self.buttons {
+            state.last_press = None;
+            state.last_release = None;
+            state.after_gap = true;
+        }
+    }
+
     /// Feed one event at `t` seconds. Returns the double-click it reveals.
     pub fn feed(&mut self, t: f64, event: &MouseEvent) -> Option<&DoubleClickEvent> {
         match event {
@@ -295,6 +326,7 @@ impl BounceDetector {
                 let interval = state.last_press.map(|p| (t - p) * 1000.0);
                 let gap = state.last_release.map(|r| (t - r) * 1000.0);
                 state.last_press = Some(t);
+                state.after_gap = false;
                 state.presses += 1;
                 self.presses += 1;
                 if let Some(i) = interval {
@@ -314,7 +346,10 @@ impl BounceDetector {
                 None
             }
             MouseEvent::ButtonRelease(button) => {
-                self.state(*button).last_release = Some(t);
+                let state = self.state(*button);
+                if !state.after_gap {
+                    state.last_release = Some(t);
+                }
                 None
             }
             _ => None,
@@ -368,6 +403,23 @@ mod tests {
         release(&mut d, 250.0, MouseButton::Left);
         assert!(!press(&mut d, 285.0, MouseButton::Left));
         assert!(d.events.is_empty());
+    }
+
+    #[test]
+    fn test_nothing_is_compared_across_dropped_reports() {
+        // A press, then reports are dropped with its release among them.
+        // The release is restored with the time of the drop, and the next
+        // real press comes 10 ms after that: the real release was earlier,
+        // so this is no bounce
+        let mut d = BounceDetector::new(&Config::default());
+        press(&mut d, 0.0, MouseButton::Left);
+        d.input_gap();
+        release(&mut d, 140.0, MouseButton::Left);
+        assert!(!press(&mut d, 150.0, MouseButton::Left));
+        // ...but a bounce after the gap is still caught
+        release(&mut d, 230.0, MouseButton::Left);
+        assert!(press(&mut d, 238.0, MouseButton::Left));
+        assert_eq!(d.events.len(), 1);
     }
 
     #[test]

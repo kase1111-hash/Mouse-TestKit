@@ -6,16 +6,18 @@
 //! `mouse_testkit::analysis::liftoff` (the same rules the GUI panel and Auto
 //! Diagnostics use): motion in the first 100 ms after stillness that carries
 //! the cursor more than 2 mm is a jump, converted with the mouse's DPI;
-//! longer sliding movements are not judged.
+//! longer sliding movements are not judged. A jump-sized movement that sped
+//! up and slowed down smoothly is the hand and is not judged either; one
+//! that could be either is only a possible jump.
 //!
 //! A clean lift produces no motion at all, so without enough recorded lifts
 //! "no jumps" is not a verdict.
 
-use super::standard::TestOutcome;
+use super::standard::{self, TestOutcome};
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use mouse_testkit::analysis::liftoff::{
-    self, counts_to_mm, mm_to_counts, Burst, BurstKind, LiftDetector, LiftTally, LiftVerdict,
+    counts_to_mm, mm_to_counts, Burst, BurstKind, LiftDetector, LiftTally, LiftVerdict,
     DEFAULT_DPI, JUMP_THRESHOLD_MM, MIN_LIFTS,
 };
 use std::io::{self, Write};
@@ -78,7 +80,7 @@ pub fn run() -> TestOutcome {
     // prompts waited.
     if !terminal::confirm_device_moves(
         "\nMove the mouse a little to confirm it is the one being tested...",
-        || input::fetch_timed_events(&mut device),
+        |wait| input::read_events(&mut device, wait),
     ) {
         println!("No movement came from the selected device: it may be the wrong one of");
         println!("several entries, in use by another program, or disconnected.");
@@ -95,6 +97,8 @@ pub fn run() -> TestOutcome {
     let mut tally = LiftTally::default();
     let mut lifts = 0usize;
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
+    let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
 
@@ -102,11 +106,23 @@ pub fn run() -> TestOutcome {
 
     let handle = |burst: Burst, tally: &mut LiftTally| match tally.record(&burst, dpi) {
         BurstKind::Jump => println!(
-            "\r\x1B[K⚠ JUMP: cursor moved {:.1} mm (dx {:+}, dy {:+} counts) within {:.0} ms",
+            "\r\x1B[K⚠ JUMP: {:.1} mm (dx {:+}, dy {:+} counts) in {:.0} ms, too abrupt for a hand",
             counts_to_mm(burst.peak_counts, dpi),
             burst.peak_dx,
             burst.peak_dy,
             burst.peak_ms
+        ),
+        BurstKind::PossibleJump => println!(
+            "\r\x1B[K? Possible jump: {:.1} mm (dx {:+}, dy {:+} counts) in {:.0} ms, or the hand",
+            counts_to_mm(burst.peak_counts, dpi),
+            burst.peak_dx,
+            burst.peak_dy,
+            burst.peak_ms
+        ),
+        BurstKind::Nudge => println!(
+            "\r\x1B[K  Hand movement ({:.1} mm in {:.0} ms) ignored - keep it still on the pad",
+            counts_to_mm(burst.peak_counts, dpi),
+            burst.shape.span_ms
         ),
         BurstKind::Slide => println!(
             "\r\x1B[K  Sliding movement ({:.0} ms) ignored - lift straight up for this test",
@@ -116,7 +132,8 @@ pub fn run() -> TestOutcome {
     };
 
     loop {
-        if event::poll(Duration::from_millis(1)).unwrap_or(false) {
+        // The wait happens on the mouse below
+        if event::poll(Duration::ZERO).unwrap_or(false) {
             if let Ok(Event::Key(KeyEvent {
                 code,
                 kind: KeyEventKind::Press,
@@ -134,7 +151,18 @@ pub fn run() -> TestOutcome {
             }
         }
 
-        for timed in input::fetch_timed_events(&mut device) {
+        let Ok(batch) = input::read_events(&mut device, terminal::READ_WAIT) else {
+            device_lost = true;
+            break;
+        };
+        if batch.lost_data {
+            // Part of a burst may be gone: start over once the mouse is
+            // seen still again
+            gaps += 1;
+            let resumed = batch.events.first().map_or_else(Instant::now, |e| e.time);
+            detector = LiftDetector::new(dpi).watching_from(secs(resumed));
+        }
+        for timed in batch.events {
             let Some(t) = terminal::secs_after(start, timed.time) else {
                 continue;
             };
@@ -157,23 +185,17 @@ pub fn run() -> TestOutcome {
                 counts_to_mm(tally.largest_counts, dpi)
             );
             print!("Slides ignored: {} | ", tally.slides);
-            print!(
-                "Status: {}",
-                if detector.in_burst() {
-                    "moving"
-                } else {
-                    "still"
-                }
-            );
+            print!("Status: {}", detector.state().label());
             io::stdout().flush().ok();
             last_print = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
 
-    if let Some(burst) = detector.flush() {
-        handle(burst, &mut tally);
+    // Motion cut off by the mouse disappearing is not judged
+    if !device_lost {
+        if let Some(burst) = detector.flush() {
+            handle(burst, &mut tally);
+        }
     }
 
     drop(_guard);
@@ -187,41 +209,52 @@ pub fn run() -> TestOutcome {
         mm_to_counts(JUMP_THRESHOLD_MM, dpi)
     );
     println!("Lifts recorded: {}", lifts);
-    let jumps = &tally.jumps;
-    println!("Total jumps detected: {}", jumps.len());
+    println!(
+        "Jumps detected: {} (too abrupt for a hand) + {} possible (could also be the hand)",
+        tally.jumps.len(),
+        tally.possible.len()
+    );
 
-    if !jumps.is_empty() {
-        let dists: Vec<f64> = jumps
-            .iter()
-            .map(|j| counts_to_mm(j.peak_counts, dpi))
-            .collect();
-        let avg = dists.iter().sum::<f64>() / dists.len() as f64;
-        let max = dists.iter().copied().fold(0.0, f64::max);
-
-        println!("\nJump statistics:");
-        println!("  Average distance: {:.1} mm", avg);
-        println!("  Maximum distance: {:.1} mm", max);
+    if tally.jump_sized_count() > 0 {
+        println!("\nJump statistics (jumps and possible jumps):");
+        println!(
+            "  Average distance: {:.1} mm",
+            counts_to_mm(tally.avg_jump_counts(), dpi)
+        );
+        println!(
+            "  Maximum distance: {:.1} mm",
+            counts_to_mm(tally.max_jump_counts(), dpi)
+        );
 
         println!("\nJump events:");
-        for (i, (jump, mm)) in jumps.iter().zip(&dists).enumerate() {
+        let events = tally
+            .jumps
+            .iter()
+            .map(|j| (j, "jump"))
+            .chain(tally.possible.iter().map(|j| (j, "possible jump")));
+        for (i, (jump, kind)) in events.enumerate() {
             println!(
-                "  #{}: {:.1} mm (dx: {}, dy: {} counts)",
+                "  #{}: {:.1} mm (dx: {}, dy: {} counts) - {}",
                 i + 1,
-                mm,
+                counts_to_mm(jump.peak_counts, dpi),
                 jump.peak_dx,
-                jump.peak_dy
+                jump.peak_dy,
+                kind
             );
         }
     }
 
-    let (mut outcome, mut lines) = verdict(jumps.len(), lifts, dpi_assumed);
+    let (mut outcome, mut lines) = verdict(&tally, lifts, dpi_assumed);
+    if device_lost {
+        (outcome, lines) = standard::verdict_after_device_lost(outcome, lines);
+    }
     // Not a single movement since the start: either every lift was perfectly
     // clean, or the mouse stopped sending input (unplugged, link lost).
     if outcome == TestOutcome::NoIssues && tally.bursts() == 0 {
         println!("\nNo movement at all was seen during the test.");
         if !terminal::confirm_device_moves(
             "Move the mouse a little to confirm it is still connected...",
-            || input::fetch_timed_events(&mut device),
+            |wait| input::read_events(&mut device, wait),
         ) {
             outcome = TestOutcome::Inconclusive;
             lines = vec![
@@ -244,16 +277,28 @@ pub fn run() -> TestOutcome {
         println!("was in the air at those moments, the sensor is tracking while lifted");
         println!("(lift-off distance too high).");
     }
+    if tally.nudges > 0 {
+        println!(
+            "\n{} movement(s) sped up and slowed down smoothly, as the hand moves the mouse,",
+            tally.nudges
+        );
+        println!("and were not judged.");
+    }
 
+    terminal::print_lost_data_note(gaps);
+    if device_lost {
+        terminal::print_device_lost();
+    }
     terminal::wait_for_enter();
     outcome
 }
 
-/// Overall verdict for `jumps` found over `lifts` recorded lifts, measured
-/// at a DPI the user gave or (`dpi_assumed`) at the default.
-pub fn verdict(jumps: usize, lifts: usize, dpi_assumed: bool) -> (TestOutcome, Vec<String>) {
+/// Overall verdict for the bursts in `tally` over `lifts` recorded lifts,
+/// measured at a DPI the user gave or (`dpi_assumed`) at the default.
+pub fn verdict(tally: &LiftTally, lifts: usize, dpi_assumed: bool) -> (TestOutcome, Vec<String>) {
     let lines = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
-    match liftoff::verdict(jumps, lifts, MIN_LIFTS) {
+    let jumps = tally.jump_sized_count();
+    match tally.verdict(lifts, MIN_LIFTS) {
         // Without the DPI the counts are no distance: the 63 counts that are
         // 2 mm at the assumed 800 DPI are 0.5 mm at 3200 DPI, which an
         // ordinary set-down can shift the mouse (as in Auto Diagnostics).
@@ -275,13 +320,41 @@ pub fn verdict(jumps: usize, lifts: usize, dpi_assumed: bool) -> (TestOutcome, V
         LiftVerdict::Jumps => (
             TestOutcome::IssueFound,
             lines(&[
-                "⚠ The cursor jumps when the mouse is lifted or set down.",
+                "⚠ The cursor jumps when the mouse is lifted or set down, too abruptly for",
+                "  the hand to have moved it.",
                 "  Likely causes:",
                 "  - High lift-off distance (LOD) setting - lower it in the mouse software",
                 "  - Sensor tracking issues",
                 "  - Surface compatibility problems",
             ]),
         ),
+        // Movements a hand could also have made - typically the mouse
+        // landing while it still slid sideways - prove neither a fault nor
+        // its absence.
+        LiftVerdict::PossibleJumps => {
+            let mut l = vec![
+                format!(
+                    "? Possible jumps: {} movements carried the cursor more than {:.1} mm, but {} of them",
+                    jumps,
+                    JUMP_THRESHOLD_MM,
+                    tally.possible.len()
+                ),
+                "  started or stopped gently enough to be the hand - for example the mouse landing"
+                    .to_string(),
+                "  while it still slid sideways, or a mouse reporting too rarely to show how it"
+                    .to_string(),
+                "  moved. Set the mouse straight down without sliding it and repeat the test:"
+                    .to_string(),
+                "  if they come back, the lift-off distance (LOD) is likely too high.".to_string(),
+            ];
+            if dpi_assumed {
+                l.push(format!(
+                    "  The distances assume {:.0} DPI; at a higher DPI they are shorter.",
+                    DEFAULT_DPI
+                ));
+            }
+            (TestOutcome::PossibleIssue, l)
+        }
         LiftVerdict::OneJump => (
             TestOutcome::PossibleIssue,
             lines(&[
@@ -317,29 +390,81 @@ pub fn verdict(jumps: usize, lifts: usize, dpi_assumed: bool) -> (TestOutcome, V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mouse_testkit::analysis::liftoff::Shape;
+
+    /// A tally with `jumps` jumps no hand could make and `possible` jumps
+    /// that could also be the hand.
+    fn tally(jumps: usize, possible: usize) -> LiftTally {
+        let burst = Burst {
+            peak_dx: 100,
+            peak_dy: 0,
+            peak_counts: 100.0,
+            peak_ms: 10.0,
+            after_window_counts: 0.0,
+            duration_ms: 10.0,
+            end_s: 1.0,
+            shape: Shape::default(),
+        };
+        LiftTally {
+            jumps: vec![burst.clone(); jumps],
+            possible: vec![burst; possible],
+            ..LiftTally::default()
+        }
+    }
 
     #[test]
     fn test_verdict_needs_lifts_before_calling_it_clean() {
         // Quitting at once, or never pressing SPACE, is not a clean result.
-        assert_eq!(verdict(0, 0, false).0, TestOutcome::Inconclusive);
+        assert_eq!(verdict(&tally(0, 0), 0, false).0, TestOutcome::Inconclusive);
         assert_eq!(
-            verdict(0, MIN_LIFTS - 1, false).0,
+            verdict(&tally(0, 0), MIN_LIFTS - 1, false).0,
             TestOutcome::Inconclusive
         );
-        assert_eq!(verdict(0, MIN_LIFTS, false).0, TestOutcome::NoIssues);
+        assert_eq!(
+            verdict(&tally(0, 0), MIN_LIFTS, false).0,
+            TestOutcome::NoIssues
+        );
         // Jumps are evidence whether or not lifts were counted.
-        assert_eq!(verdict(1, 0, false).0, TestOutcome::PossibleIssue);
-        assert_eq!(verdict(2, 0, false).0, TestOutcome::IssueFound);
-        assert_eq!(verdict(3, 8, false).0, TestOutcome::IssueFound);
+        assert_eq!(
+            verdict(&tally(1, 0), 0, false).0,
+            TestOutcome::PossibleIssue
+        );
+        assert_eq!(verdict(&tally(2, 0), 0, false).0, TestOutcome::IssueFound);
+        assert_eq!(verdict(&tally(3, 0), 8, false).0, TestOutcome::IssueFound);
+    }
+
+    #[test]
+    fn test_jumps_the_hand_could_have_made_are_only_possible() {
+        // Five careless set-downs that slid the mouse 3 mm: their shape
+        // cannot rule out the hand, so they are no proof of a fault.
+        let (outcome, lines) = verdict(&tally(0, 5), 5, false);
+        assert_eq!(outcome, TestOutcome::PossibleIssue);
+        assert!(lines[0].contains("5 movements"), "{:?}", lines);
+        assert!(lines[0].contains("but 5 of them"), "{:?}", lines);
+        assert!(lines.join(" ").contains("without sliding"), "{:?}", lines);
+        // One jump that no hand could make does not confirm it either, and
+        // the text does not say it could have been the hand.
+        let (outcome, lines) = verdict(&tally(1, 1), 5, false);
+        assert_eq!(outcome, TestOutcome::PossibleIssue);
+        assert!(lines[0].contains("but 1 of them"), "{:?}", lines);
+        assert_eq!(
+            verdict(&tally(0, 1), 5, false).0,
+            TestOutcome::PossibleIssue
+        );
+        // Two that no hand could make do.
+        assert_eq!(verdict(&tally(2, 3), 5, false).0, TestOutcome::IssueFound);
     }
 
     #[test]
     fn test_jumps_at_an_assumed_dpi_are_not_a_problem_found() {
         // Enter at the DPI prompt, a 3200 DPI mouse: two 0.6 mm set-down
         // shifts read as 2.4 mm jumps at 800 DPI
-        let (outcome, lines) = verdict(2, 6, true);
+        let (outcome, lines) = verdict(&tally(2, 0), 6, true);
         assert_eq!(outcome, TestOutcome::Inconclusive);
         assert!(lines.join(" ").contains("assumed 800 DPI"), "{:?}", lines);
-        assert_eq!(verdict(0, 6, true).0, TestOutcome::NoIssues);
+        assert_eq!(verdict(&tally(0, 0), 6, true).0, TestOutcome::NoIssues);
+        let (outcome, lines) = verdict(&tally(0, 2), 6, true);
+        assert_eq!(outcome, TestOutcome::PossibleIssue);
+        assert!(lines.join(" ").contains("assume 800 DPI"), "{:?}", lines);
     }
 }
