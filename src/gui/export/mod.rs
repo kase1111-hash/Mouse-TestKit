@@ -28,6 +28,11 @@ pub struct TestResultsExport {
     pub scroll: Option<ScrollExport>,
     /// Report from the automated diagnostics run, if one was completed.
     pub auto_diagnostics: Option<AutoDiagnosticsReport>,
+    /// Tests (named as in the CSV) whose results come from a run during
+    /// which the system dropped some of the mouse's reports, because the
+    /// computer did not read them in time. Nothing was timed across them,
+    /// but clicks or movement in them are missing: re-run to confirm.
+    pub reports_lost: Vec<String>,
 }
 
 /// Metadata about the export including app version and timestamp.
@@ -329,6 +334,7 @@ impl TestResultsExport {
             angle_snap: None,
             scroll: None,
             auto_diagnostics: None,
+            reports_lost: Vec::new(),
         }
     }
 
@@ -645,6 +651,14 @@ impl TestResultsExport {
             }
         }
 
+        // Runs that lost some of the mouse's reports
+        for test in &self.reports_lost {
+            csv.push_str(&format!(
+                "{},Reports Lost,\"yes: nothing was timed across them, but clicks or movement in them are missing - re-run to confirm\"\n",
+                csv_escape(test)
+            ));
+        }
+
         csv
     }
 }
@@ -724,6 +738,7 @@ mod tests {
                 timing_reliable: true,
                 duration_secs: 42.0,
             }),
+            reports_lost: Vec::new(),
         };
         let csv = export.to_csv();
         assert!(csv.contains("Auto Diagnostics,Verdict,Needs attention\n"));

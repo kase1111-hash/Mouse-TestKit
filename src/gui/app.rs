@@ -236,6 +236,28 @@ impl MouseTestKitApp {
         }
     }
 
+    /// The tests (named as in the export) whose results lost reports.
+    fn reports_lost(&self) -> Vec<String> {
+        [
+            (ActiveTest::AutoTest, "Auto Diagnostics"),
+            (ActiveTest::PollingRate, "Polling Rate"),
+            (ActiveTest::Stutter, "Stutter"),
+            (ActiveTest::ClickResponse, "Click Response"),
+            (ActiveTest::ClickSticky, "Click Sticky"),
+            (ActiveTest::LiftOff, "Lift-Off"),
+            (ActiveTest::ScrollWheel, "Scroll"),
+            (ActiveTest::Dpi, "DPI"),
+            (ActiveTest::AngleSnap, "Angle Snap"),
+            (ActiveTest::Acceleration, "Acceleration"),
+            (ActiveTest::DoubleClick, "Double-Click"),
+            (ActiveTest::Jitter, "Jitter"),
+        ]
+        .into_iter()
+        .filter(|&(page, _)| self.lost_reports.applies_to(page))
+        .map(|(_, name)| name.to_string())
+        .collect()
+    }
+
     fn collect_results(&self) -> TestResultsExport {
         TestResultsExport {
             export_info: ExportInfo::new(),
@@ -251,6 +273,7 @@ impl MouseTestKitApp {
             angle_snap: self.accel_panel.export_angle(),
             scroll: self.scroll_panel.export(),
             auto_diagnostics: self.auto_test_panel.report().cloned(),
+            reports_lost: self.reports_lost(),
         }
     }
 
@@ -1541,6 +1564,20 @@ mod tests {
         let running = app.running_pages();
         assert!(running.contains(&AngleSnap));
         assert!(!running.contains(&ActiveTest::Acceleration));
+    }
+
+    #[test]
+    fn exports_say_which_results_lost_reports() {
+        use ActiveTest::{AutoTest, Stutter};
+        let mut app = MouseTestKitApp::with_parts(Config::default(), None);
+        assert!(app.collect_results().reports_lost.is_empty());
+        // Reports lost during a Stutter run with Auto Diagnostics going too
+        app.lost_reports.update(&[AutoTest, Stutter], Stutter, true);
+        let results = app.collect_results();
+        assert_eq!(results.reports_lost, ["Auto Diagnostics", "Stutter"]);
+        let csv = results.to_csv();
+        assert!(csv.contains("\nStutter,Reports Lost,"), "{}", csv);
+        assert!(results.to_json().unwrap().contains("\"reports_lost\""));
     }
 
     #[test]
