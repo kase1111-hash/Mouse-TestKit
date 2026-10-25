@@ -136,6 +136,13 @@ impl DpiPanel {
         self.is_running
     }
 
+    /// The measured input changed: a measurement in progress is cancelled,
+    /// whichever page is shown. Another input's counts are never added to it.
+    pub fn input_changed(&mut self) {
+        self.cancelled_for_input |= self.is_running;
+        self.is_running = false;
+    }
+
     fn distance_label(&self) -> String {
         if self.use_cm {
             format!("{:.1} cm", self.target_distance_inches * CM_PER_INCH)

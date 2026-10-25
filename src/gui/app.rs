@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::export::{ExportInfo, TestResultsExport};
-use crate::input_bridge::{DeviceChoice, InputBridge};
+use crate::input_bridge::{DeviceChoice, DeviceId, InputBridge, RawInputEvent};
 use crate::panels::{
     AccelPanel, AutoTestPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel,
     ScrollPanel, StutterPanel,
@@ -74,6 +74,9 @@ pub struct MouseTestKitApp {
     config_dirty_since: Option<Instant>,
     /// Background raw input thread (None on unsupported platforms)
     input_bridge: Option<InputBridge>,
+    /// The device measured in the last frame (None: framework input), to
+    /// notice when the input under test changes
+    measured: Option<DeviceId>,
     /// Pages whose test run lost some of the mouse's reports
     lost_reports: LostReportsNotice,
 }
@@ -123,8 +126,48 @@ impl MouseTestKitApp {
             config,
             config_dirty_since: None,
             input_bridge,
+            measured: None,
             lost_reports: LostReportsNotice::default(),
         }
+    }
+
+    /// Drain this frame's raw input (none without the bridge). Before any
+    /// test sees it, runs end if the measured device changed: the input may
+    /// be another device's, chosen on the Dashboard or claimed after the
+    /// measured mouse was unplugged (see [`Self::input_changed`]).
+    fn poll_input(&mut self, pointer_moved: bool) -> Vec<RawInputEvent> {
+        let tests_running = self.any_test_running();
+        let Some(bridge) = self.input_bridge.as_mut() else {
+            return Vec::new();
+        };
+        // Auto device selection must not switch devices mid-test
+        bridge.set_selection_frozen(tests_running);
+        let events = bridge.poll();
+        bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
+        let measured = bridge.active_device().map(|d| (d.id, d.name.clone()));
+        if measured.as_ref().map(|m| m.0) != self.measured {
+            self.measured = measured.as_ref().map(|m| m.0);
+            self.input_changed(measured.as_ref().map(|m| m.1.as_str()));
+        }
+        events
+    }
+
+    /// The measured input changed: another device was chosen or claimed,
+    /// the measured one went away, or raw input started. A run measures one
+    /// input, so every test running ends (Auto Diagnostics does not judge
+    /// the step in progress), whichever page is shown: a test whose page is
+    /// not shown would otherwise carry on with the next input when shown
+    /// again. `device` is the name of the device measured now.
+    fn input_changed(&mut self, device: Option<&str>) {
+        self.polling_panel.input_changed();
+        self.stutter_panel.input_changed();
+        self.click_panel.input_changed();
+        self.jitter_panel.input_changed();
+        self.dpi_panel.input_changed();
+        self.accel_panel.input_changed();
+        self.double_click_panel.input_changed();
+        self.scroll_panel.input_changed();
+        self.auto_test_panel.input_changed(device);
     }
 
     fn any_test_running(&self) -> bool {
@@ -1085,18 +1128,8 @@ impl eframe::App for MouseTestKitApp {
         let ctx = &ctx;
         // Poll raw input events from the background thread (once per frame).
         // Use a local variable so the borrow checker doesn't conflict with &mut self in the closure.
-        let tests_running = self.any_test_running();
         let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-        let frame_events = match &mut self.input_bridge {
-            Some(bridge) => {
-                // Auto device selection must not switch devices mid-test
-                bridge.set_selection_frozen(tests_running);
-                let events = bridge.poll();
-                bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
-                events
-            }
-            None => Vec::new(),
-        };
+        let frame_events = self.poll_input(pointer_moved);
         let reports_lost = self
             .input_bridge
             .as_ref()
@@ -1399,6 +1432,79 @@ mod tests {
         assert!(notice.applies_to(Jitter));
         assert!(!notice.applies_to(PollingRate));
         assert!(!notice.applies_to(Stutter));
+    }
+
+    fn move_from(id: u64) -> BridgeMessage {
+        BridgeMessage::Event(
+            id,
+            RawInputEvent {
+                kind: RawInputKind::Move { dx: 40, dy: 0 },
+                timestamp: Instant::now(),
+                lost_before: false,
+            },
+        )
+    }
+
+    /// An app measuring "Office Mouse" (1), with "Gaming Mouse" (2) also
+    /// connected, and runs started on mouse 1 on several pages; the
+    /// Dashboard is shown.
+    fn runs_on_mouse_one() -> (MouseTestKitApp, std::sync::mpsc::SyncSender<BridgeMessage>) {
+        let (bridge, sender) = InputBridge::for_test();
+        sender.send(device(1, "Office Mouse", "event3")).unwrap();
+        sender.send(device(2, "Gaming Mouse", "event4")).unwrap();
+        sender.send(press(1)).unwrap();
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(1));
+        app.polling_panel.start_for_test();
+        app.stutter_panel.start_for_test();
+        app.double_click_panel.start_for_test();
+        app.accel_panel.start_accel_for_test();
+        app.auto_test_panel.start_for_test(true);
+        app.active_test = ActiveTest::Dashboard;
+        (app, sender)
+    }
+
+    #[test]
+    fn choosing_another_mouse_ends_the_runs_on_every_page() {
+        // The user pins mouse 2 in the Measure picker while the runs go on
+        let (mut app, sender) = runs_on_mouse_one();
+        app.input_bridge
+            .as_mut()
+            .unwrap()
+            .set_choice(DeviceChoice::Device(2));
+        sender.send(move_from(2)).unwrap();
+        assert_eq!(app.poll_input(false).len(), 1);
+        assert!(!app.polling_panel.is_running());
+        assert!(!app.stutter_panel.is_running());
+        assert!(!app.double_click_panel.is_running());
+        assert!(!app.accel_panel.is_running());
+        // Auto Diagnostics runs on by its clock, judging nothing of mouse 2
+        assert!(app.auto_test_panel.is_running());
+        let found = app.auto_test_panel.finding_titles_for_test();
+        assert!(
+            found.iter().any(|t| t == "Input lost during the step"),
+            "{:?}",
+            found
+        );
+        // Nothing changes while the same mouse is measured
+        app.polling_panel.start_for_test();
+        sender.send(move_from(2)).unwrap();
+        app.poll_input(false);
+        assert!(app.polling_panel.is_running());
+    }
+
+    #[test]
+    fn another_mouse_taking_over_after_an_unplug_ends_hidden_runs() {
+        // Mouse 1 is unplugged and mouse 2 clicked before the next frame:
+        // no frame without raw input is ever seen
+        let (mut app, sender) = runs_on_mouse_one();
+        sender.send(BridgeMessage::Removed(1)).unwrap();
+        sender.send(press(2)).unwrap();
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(2));
+        assert!(!app.polling_panel.is_running());
+        assert!(!app.stutter_panel.is_running());
     }
 
     #[test]

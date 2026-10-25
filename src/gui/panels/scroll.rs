@@ -96,6 +96,16 @@ impl ScrollPanel {
         self.is_running
     }
 
+    /// The measured input changed, whichever page is shown: a run that has
+    /// counted something ends, so the notches of two inputs are not judged
+    /// together (before that, it just reads the new input).
+    pub fn input_changed(&mut self) {
+        if self.is_running && (self.step_count > 0 || self.saw_smooth_scroll) {
+            self.is_running = false;
+            self.stopped_for_input = true;
+        }
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -696,6 +706,20 @@ mod tests {
             t += 500;
         }
         out
+    }
+
+    #[test]
+    fn another_input_ends_a_run_once_it_has_counted() {
+        // Chosen before the first notch: the run reads the new input
+        let mut panel = ScrollPanel::new();
+        panel.start_for_test();
+        panel.input_changed();
+        assert!(panel.is_running());
+        // After notches were counted: ended, and the page says why
+        panel.record(Instant::now(), -1, true);
+        panel.input_changed();
+        assert!(!panel.is_running());
+        assert!(panel.stopped_for_input);
     }
 
     #[test]

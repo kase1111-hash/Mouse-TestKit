@@ -89,6 +89,17 @@ impl JitterPanel {
         self.is_sampling
     }
 
+    /// The measured input changed: a sample in progress was not taken on
+    /// one input throughout and is set aside.
+    pub fn input_changed(&mut self) {
+        if self.is_sampling {
+            self.is_sampling = false;
+            self.sample_start = None;
+            self.last_discarded = true;
+            self.discarded_for_input = true;
+        }
+    }
+
     /// Draw the page. Input is recorded by [`Self::process_input`].
     pub fn ui(&mut self, ui: &mut egui::Ui, has_bridge: bool) {
         ui.heading("Jitter Test");

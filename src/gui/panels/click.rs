@@ -2,7 +2,7 @@ use eframe::egui;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use super::polling::raw_input_required_notice;
+use super::polling::{input_lost_notice, raw_input_required_notice};
 use crate::export::{
     ClickButtonExport, ClickResponseExport, ClickStickyExport, LiftOffExport, StickyButtonExport,
 };
@@ -22,11 +22,13 @@ const LIFTOFF_STOP_TRIP_S: f64 = 0.6;
 /// How a lift-off run was stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LiftoffStop {
-    /// From the keyboard, or because the mouse went away: the mouse did not
-    /// move to stop it.
+    /// From the keyboard: the mouse did not move to stop it.
     Key,
     /// With the Stop button, which the measured mouse moved to.
     Button,
+    /// The measured input changed (the mouse went away, or another input
+    /// was chosen): motion still under way was cut off.
+    InputChanged,
 }
 
 /// Smallest value in the iterator, or 0.0 when it is empty (so an export
@@ -243,6 +245,8 @@ pub struct ClickPanel {
 
     // Click Sticky
     sticky_running: bool,
+    /// Whether the current or last stickiness run read raw input.
+    sticky_raw: bool,
     sticky_button: TestButton,
     sticky_holds: Vec<f64>,
     sticky_right_holds: Vec<f64>,
@@ -274,6 +278,8 @@ pub struct ClickPanel {
     /// `liftoff_tally` until then: if Stop is clicked first, they were the
     /// trip to the button.
     liftoff_pending: Vec<Burst>,
+    /// The run was ended because the measured input changed.
+    liftoff_stopped_for_input: bool,
 }
 
 impl ClickPanel {
@@ -306,6 +312,7 @@ impl ClickPanel {
             response_right_cps: 0.0,
 
             sticky_running: false,
+            sticky_raw: true,
             sticky_button: TestButton::Left,
             sticky_holds: Vec::new(),
             sticky_right_holds: Vec::new(),
@@ -324,11 +331,38 @@ impl ClickPanel {
             liftoff_lifts: 0,
             liftoff_epoch: Instant::now(),
             liftoff_pending: Vec::new(),
+            liftoff_stopped_for_input: false,
         }
     }
 
     pub fn is_running(&self) -> bool {
         self.response_running || self.sticky_running || self.liftoff_running
+    }
+
+    /// The measured input changed (another device, or raw input stopped or
+    /// started): every run in progress ends, whichever page is shown,
+    /// keeping what was measured so far. A press still open or a lift-off
+    /// motion still under way is not judged.
+    pub fn input_changed(&mut self) {
+        if self.response_running {
+            self.stop_response();
+        }
+        if self.sticky_running {
+            self.stop_sticky();
+        }
+        if self.liftoff_running {
+            self.stop_liftoff_at(Instant::now(), LiftoffStop::InputChanged);
+        }
+    }
+
+    /// End the stickiness run. A press still open never gets its release
+    /// here, so it is dropped.
+    fn stop_sticky(&mut self) {
+        self.sticky_running = false;
+        self.sticky_press_start = None;
+        self.sticky_right_press_start = None;
+        self.sticky_is_pressed = false;
+        self.sticky_right_is_pressed = false;
     }
 
     pub fn ui_response(
@@ -654,6 +688,12 @@ impl ClickPanel {
 
         ui.add_space(10.0);
 
+        // Device-timed and frame-timed holds are not judged together: a
+        // change of input source ends the run, keeping the clicks so far.
+        if self.sticky_running && has_bridge != self.sticky_raw {
+            self.stop_sticky();
+        }
+
         // Controls
         ui.horizontal(|ui| {
             if self.sticky_running {
@@ -662,6 +702,7 @@ impl ClickPanel {
                 }
             } else if ui.button("Start").clicked() {
                 self.sticky_running = true;
+                self.sticky_raw = has_bridge;
                 self.sticky_holds.clear();
                 self.sticky_right_holds.clear();
                 self.sticky_count = 0;
@@ -930,6 +971,7 @@ impl ClickPanel {
         self.liftoff_pending.clear();
         self.liftoff_lifts = 0;
         self.liftoff_epoch = Instant::now();
+        self.liftoff_stopped_for_input = false;
         self.liftoff_running = true;
     }
 
@@ -939,15 +981,17 @@ impl ClickPanel {
             .as_secs_f64()
     }
 
-    /// End the run from the keyboard (or because the mouse went away);
-    /// motion still under way is judged as it stands, as in the CLI test.
+    /// End the run from the keyboard; motion still under way is judged as
+    /// it stands, as in the CLI test.
     fn stop_liftoff(&mut self) {
         self.stop_liftoff_at(Instant::now(), LiftoffStop::Key);
     }
 
     /// End the run at `now`. Clicking Stop moved the measured mouse: the
     /// motion under way, and any that ended within [`LIFTOFF_STOP_TRIP_S`],
-    /// was that trip and is not judged.
+    /// was that trip and is not judged. Motion cut off by the input
+    /// changing is not judged either (as in the CLI test), and the page
+    /// says the run was cut short.
     fn stop_liftoff_at(&mut self, now: Instant, by: LiftoffStop) {
         let open = self.liftoff_detector.flush();
         let pending = std::mem::take(&mut self.liftoff_pending);
@@ -957,6 +1001,12 @@ impl ClickPanel {
                 for burst in pending.iter().chain(&open) {
                     self.liftoff_tally.record(burst, dpi);
                 }
+            }
+            LiftoffStop::InputChanged => {
+                for burst in &pending {
+                    self.liftoff_tally.record(burst, dpi);
+                }
+                self.liftoff_stopped_for_input = true;
             }
             LiftoffStop::Button => {
                 let trip_from = self.liftoff_secs(now) - LIFTOFF_STOP_TRIP_S;
@@ -970,6 +1020,7 @@ impl ClickPanel {
 
     fn reset_liftoff(&mut self) {
         self.liftoff_running = false;
+        self.liftoff_stopped_for_input = false;
         self.liftoff_detector = LiftDetector::new(self.liftoff_dpi.0);
         self.liftoff_tally = LiftTally::default();
         self.liftoff_pending.clear();
@@ -1063,7 +1114,7 @@ impl ClickPanel {
                 }
             } else {
                 // The measured mouse went away: keep what was measured.
-                self.stop_liftoff();
+                self.stop_liftoff_at(Instant::now(), LiftoffStop::InputChanged);
             }
         }
 
@@ -1082,6 +1133,10 @@ impl ClickPanel {
                 ui,
                 "A lift-off jump (sensor counts summed over the first 100 ms of motion)",
             );
+        }
+        if self.liftoff_stopped_for_input {
+            ui.add_space(5.0);
+            input_lost_notice(ui);
         }
         ui.add_space(10.0);
         ui.label(
@@ -1652,6 +1707,7 @@ mod tests {
         // The same in the stickiness panel
         let mut panel = ClickPanel::new();
         panel.sticky_running = true;
+        panel.sticky_raw = false;
         let ctx = egui::Context::default();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -1877,6 +1933,58 @@ mod tests {
             let jumps = panel.liftoff_view().jump_sized_count();
             assert_eq!(jumps, usize::from(!marked), "marked: {}", marked);
         }
+    }
+
+    #[test]
+    fn liftoff_does_not_judge_motion_cut_off_by_an_input_change() {
+        // A burst still under way (7 ms of a sideways slide) when the
+        // receiver drops out: the CLI does not judge it either
+        for input_lost in [true, false] {
+            let mut panel = ClickPanel::new();
+            panel.start_liftoff();
+            let t0 = panel.liftoff_epoch;
+            panel.feed_liftoff(
+                &reports(t0, 500, 7, 1, 30, 0),
+                t0 + Duration::from_millis(507),
+            );
+            if input_lost {
+                panel.input_changed();
+            } else {
+                panel.stop_liftoff();
+            }
+            assert!(!panel.liftoff_running);
+            let judged = panel.liftoff_view().jump_sized_count();
+            assert_eq!(judged, usize::from(!input_lost), "lost: {}", input_lost);
+            // ... and the page says the run was cut short until the next Start
+            assert_eq!(panel.liftoff_stopped_for_input, input_lost);
+        }
+        let mut panel = ClickPanel::new();
+        panel.start_liftoff();
+        liftoff_frame(&mut panel, &[], false, false);
+        assert!(!panel.liftoff_running && panel.liftoff_stopped_for_input);
+        panel.start_liftoff();
+        assert!(!panel.liftoff_stopped_for_input);
+    }
+
+    #[test]
+    fn stickiness_ends_when_the_input_source_changes() {
+        // Raw clicks, then the mouse goes away: frame-timed holds are not
+        // judged with device-timed ones
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        panel.sticky_raw = true;
+        sticky_frame(&mut panel, IN_TEST_AREA, &left_clicks(&[100, 100]));
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let ctx = ui.ctx().clone();
+            panel.ui_sticky(ui, &ctx, &[], false);
+        });
+        assert!(!panel.sticky_running);
+        assert_eq!(panel.sticky_holds.len(), 2);
+        // Another mouse chosen while the page is not shown
+        panel.sticky_running = true;
+        panel.input_changed();
+        assert!(!panel.sticky_running);
     }
 
     #[test]

@@ -99,6 +99,12 @@ impl DoubleClickPanel {
         self.is_running
     }
 
+    /// The measured input changed: a run in progress ends, whichever page
+    /// is shown, keeping the clicks measured so far.
+    pub fn input_changed(&mut self) {
+        self.is_running = false;
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,

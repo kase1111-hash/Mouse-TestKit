@@ -131,6 +131,14 @@ impl PollingPanel {
         self.is_running
     }
 
+    /// The measured input changed (another device, or raw input stopped or
+    /// started): a run in progress ends, whichever page is shown, so two
+    /// mice are never blended (see [`input_lost_notice`]).
+    pub fn input_changed(&mut self) {
+        self.stopped_for_input |= self.is_running;
+        self.is_running = false;
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,

@@ -45,6 +45,8 @@ enum StopBy {
     Key,
     /// With the Stop button, which the measured mouse moved to.
     Button,
+    /// The measured input changed: the pass in progress was cut off.
+    InputChanged,
 }
 
 pub struct AccelPanel {
@@ -126,6 +128,19 @@ impl AccelPanel {
         self.is_running || self.angle_running
     }
 
+    /// The measured input changed (another device, or raw input stopped or
+    /// started): runs in progress end, whichever page is shown, keeping the
+    /// passes and lines measured so far but not the one cut off.
+    pub fn input_changed(&mut self) {
+        if self.is_running {
+            self.stop_accel(self.secs(Instant::now()), StopBy::InputChanged);
+        }
+        if self.angle_running {
+            self.angle_segmenter.reset();
+            self.stop_angle();
+        }
+    }
+
     fn secs(&self, t: Instant) -> f64 {
         t.duration_since(self.epoch).as_secs_f64()
     }
@@ -174,7 +189,7 @@ impl AccelPanel {
         // Raw counts and OS-accelerated pointer movement cannot be compared
         // within one run: stop it, keeping the passes measured so far.
         if self.is_running && has_bridge != self.accel_raw {
-            self.stop_accel(self.secs(Instant::now()), StopBy::Key);
+            self.stop_accel(self.secs(Instant::now()), StopBy::InputChanged);
         }
         // Stopping from the keyboard does not move the mouse, so the pass in
         // progress is a real one. The key is consumed so it cannot also
@@ -545,6 +560,7 @@ impl AccelPanel {
                     self.accel_strokes.pop();
                 }
             }
+            StopBy::InputChanged => self.accel_segmenter.reset(),
         }
         self.accel_result = analyze_strokes(&self.accel_strokes);
     }
@@ -570,6 +586,7 @@ impl AccelPanel {
         // Raw counts and OS-processed pointer movement cannot be mixed in one
         // run: stop it, keeping the lines measured so far.
         if self.angle_running && has_bridge != self.angle_raw {
+            self.angle_segmenter.reset();
             self.stop_angle();
         }
         ui.heading("Angle Snapping Detection");
@@ -901,6 +918,20 @@ mod tests {
             let expected = if marked { 10 } else { 11 };
             assert_eq!(p.accel_strokes.len(), expected, "marked: {}", marked);
         }
+    }
+
+    #[test]
+    fn a_pass_cut_off_by_an_input_change_is_not_recorded() {
+        // Another input is chosen halfway through a fast pass
+        let mut p = AccelPanel::new();
+        p.start_accel(true);
+        let t = passes(&mut p, 0.0, 5, 8000, 4);
+        let t = passes(&mut p, t, 4, 8000, 40);
+        let half: Vec<(f64, i32, i32)> = (0..100).map(|k| (t + 0.001 * k as f64, 40, 0)).collect();
+        p.feed_accel(&half, t + 0.1);
+        p.input_changed();
+        assert!(!p.is_running());
+        assert_eq!(p.accel_strokes.len(), 9);
     }
 
     #[test]
