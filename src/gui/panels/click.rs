@@ -1106,6 +1106,22 @@ impl ClickPanel {
         self.liftoff_view().verdict(self.liftoff_lifts, MIN_LIFTS)
     }
 
+    /// Jumps measured at an assumed DPI: the counts are no distance (2 mm
+    /// at 800 DPI is 0.5 mm at 3200, an ordinary set-down shift), so they
+    /// are only possible jumps, as in the CLI test and Auto Diagnostics.
+    fn liftoff_jumps_dpi_unknown(&self) -> bool {
+        self.liftoff_dpi.1 && self.liftoff_verdict() == LiftVerdict::Jumps
+    }
+
+    /// The verdict as shown and exported.
+    fn liftoff_verdict_label(&self) -> &'static str {
+        if self.liftoff_jumps_dpi_unknown() {
+            "Possible jumps - DPI not set"
+        } else {
+            self.liftoff_verdict().label()
+        }
+    }
+
     /// What the status cell shows.
     fn liftoff_status(&self) -> &'static str {
         if !self.liftoff_running {
@@ -1221,6 +1237,7 @@ impl ClickPanel {
                         let color = match (jumps, jumps + possible) {
                             (_, 0) => egui::Color32::WHITE,
                             (0 | 1, _) => egui::Color32::YELLOW,
+                            _ if self.liftoff_jumps_dpi_unknown() => egui::Color32::YELLOW,
                             _ => egui::Color32::RED,
                         };
                         ui.label(
@@ -1273,7 +1290,18 @@ impl ClickPanel {
 
         // Verdict: the same rule as the CLI test
         if self.liftoff_running || self.has_liftoff_data() {
+            let dpi_unknown = self.liftoff_jumps_dpi_unknown();
             let (title, color, message) = match self.liftoff_verdict() {
+                LiftVerdict::Jumps if dpi_unknown => (
+                    "Possible jumps - DPI not set",
+                    egui::Color32::YELLOW,
+                    format!(
+                        "{} jumps, measured at an assumed {:.0} DPI. If the mouse is set to {:.0} DPI or lower, the cursor jumps when it is lifted or set down: lower the lift-off distance (LOD). At a higher DPI the same counts are a shorter distance and may be ordinary set-down shifts: set the mouse's DPI on the DPI Accuracy page and repeat the test.",
+                        jumps + possible,
+                        dpi,
+                        dpi
+                    ),
+                ),
                 LiftVerdict::Jumps => (
                     "Cursor jumps on lift",
                     egui::Color32::RED,
@@ -1318,7 +1346,7 @@ impl ClickPanel {
                     ui.label(egui::RichText::new(title).size(18.0).strong().color(color));
                     ui.add_space(5.0);
                     ui.label(message);
-                    if dpi_assumed && jumps + possible > 0 {
+                    if dpi_assumed && jumps + possible > 0 && !dpi_unknown {
                         // At a higher DPI the same counts are a shorter
                         // distance: 2 mm at 800 DPI is 0.5 mm at 3200.
                         ui.add_space(5.0);
@@ -1544,7 +1572,7 @@ impl ClickPanel {
             dpi,
             dpi_assumed,
             jump_threshold_mm: JUMP_THRESHOLD_MM,
-            verdict: self.liftoff_verdict().label().to_string(),
+            verdict: self.liftoff_verdict_label().to_string(),
         })
     }
 }
@@ -1941,7 +1969,24 @@ mod tests {
         let export = panel.export_liftoff().unwrap();
         assert_eq!(export.jump_count, 2);
         assert!((export.max_distance_mm - 6.35).abs() < 0.01);
+        // At an assumed DPI the counts are no distance: on a 3200 DPI mouse
+        // these are 1.6 mm, an ordinary set-down shift (as in the CLI test
+        // and Auto Diagnostics)
         assert!(export.dpi_assumed);
+        assert_eq!(export.verdict, "Possible jumps - DPI not set");
+
+        // With the DPI set on the DPI Accuracy page: jumps
+        let mut panel = ClickPanel::new();
+        panel.set_liftoff_dpi(Some(800.0));
+        panel.start_liftoff();
+        let t0 = panel.liftoff_epoch;
+        let mut events = reports(t0, 500, 20, 1, 10, 0);
+        events.extend(reports(t0, 1500, 20, 1, 0, -10));
+        liftoff_frame(&mut panel, &events, true, true);
+        panel.feed_liftoff(&[], t0 + Duration::from_millis(3000));
+        panel.stop_liftoff();
+        let export = panel.export_liftoff().unwrap();
+        assert!(!export.dpi_assumed);
         assert_eq!(export.verdict, "Cursor jumps on lift");
     }
 

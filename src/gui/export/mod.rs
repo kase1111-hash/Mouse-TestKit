@@ -173,9 +173,9 @@ pub struct LiftOffExport {
     /// ... and whether it was assumed (not set on the DPI Accuracy page).
     pub dpi_assumed: bool,
     pub jump_threshold_mm: f64,
-    /// "Cursor jumps on lift", "One jump - repeat the test", "Possible
-    /// jumps - repeat the test", "Inconclusive - too few lifts" or "No
-    /// jumps".
+    /// "Cursor jumps on lift", "Possible jumps - DPI not set" (jumps at an
+    /// assumed DPI), "One jump - repeat the test", "Possible jumps - repeat
+    /// the test", "Inconclusive - too few lifts" or "No jumps".
     pub verdict: String,
 }
 
