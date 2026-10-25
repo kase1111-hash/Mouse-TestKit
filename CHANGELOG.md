@@ -33,6 +33,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its device timestamp (kernel time on Linux, raw-input thread time on Windows)
 
 ### Fixed
+- **A lost mouse went unnoticed in the CLI**: unplugging the mouse or its
+  receiver (or a Windows device removal) left tests judging the silence. Every
+  CLI test now stops, keeps what it measured before, and reports a clean result
+  as Inconclusive; CLI Auto Diagnostics is never Healthy over an input loss
+- **Reports lost to a full input buffer** (an 8 kHz mouse on a busy machine,
+  `SYN_DROPPED`) looked like stutters, freezes, bounces or a stuck button. The
+  CLI and GUI now detect the loss, time and count nothing across it, restore a
+  button release lost in it, say so in the results and record it in exports;
+  CLI loops wake as soon as the mouse sends data instead of sleeping
+- **GUI runs mixed two mice** when another mouse was pinned on the Dashboard or
+  took over after an unplug; a run now ends with a note when the measured
+  device changes, on any page
+- **Dropouts that throw away movement** were not detected: a 0.1-1 s gap with
+  full-speed reports on both sides (at 1 kHz and up, which no hand produces)
+  is now a freeze, as is a freeze whose catch-up turned away while circling.
+  Reports pinned at a report-format limit (127, 2047 or 32767 counts) are
+  reported as movement lost at high speed
+- **Bluetooth mice** that deliver several reports per connection event were
+  rated unstable or stuttering; rate, stutters and stability are now judged
+  per delivery, and no USB rate is named for Bluetooth rates (including a
+  steady 133 Hz)
+- **Lift-off** could not tell a quick hand nudge from a sensor jump. Movements
+  are now classified by shape: a jump starts and stops more abruptly than a
+  hand can (about 30 m/s^2), a smooth hand movement is not judged, and anything
+  in between is a possible jump; stray counts no longer hide a spike, and
+  timestamp jitter at 4-8 kHz is tolerated. Jumps at an assumed DPI are only
+  possible jumps everywhere. The GUI test can be stopped from the keyboard, the
+  move onto its Stop button is not counted, and it shows when it is waiting for
+  the mouse to be still
+- The scroll panel without raw input no longer judges skips on frame times
+- Linux GUI: the "add yourself to the input group" hint is shown when the mouse
+  is unreadable, even if another input device can be read
+- Windows: two units of the same mouse model get different labels, and input
+  from a device that was just removed cannot re-add it
+- CLI click reaction test: quitting at the start prompt is "not run", not
+  inconclusive
 - **Timing used read time, not report time**: CLI tests and the GUI bridge
   stamped events when the queue was drained, so a batch of reports looked
   simultaneous and 2-8 kHz mice read as millions of Hz (CLI polling) or as
@@ -160,6 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented Rust requirement corrected to 1.92 (required by eframe 0.35)
 
 ### Changed
+- The GUI stutter threshold defaults to 2.5x the median interval, like the CLI
+  and Auto Diagnostics (a saved old default of 2.0x is updated)
 - A measured polling rate of 60-110 Hz is noted as normal for Bluetooth
   instead of flagged, and no USB nominal rate is shown for it (Auto
   Diagnostics, Polling panel and CLI); only rates under 60 Hz are a warning
