@@ -669,6 +669,7 @@ mod tests {
             .map(|&(ms, delta)| RawInputEvent {
                 kind: RawInputKind::Scroll { delta },
                 timestamp: start + Duration::from_millis(ms),
+                lost_before: false,
             })
             .collect();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {

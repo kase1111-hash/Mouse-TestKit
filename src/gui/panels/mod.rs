@@ -94,6 +94,7 @@ mod smoke_tests {
             .map(|i| RawInputEvent {
                 kind: RawInputKind::Move { dx, dy },
                 timestamp: start + interval * i as u32,
+                lost_before: false,
             })
             .collect()
     }
@@ -103,10 +104,12 @@ mod smoke_tests {
             RawInputEvent {
                 kind: RawInputKind::ButtonPress(RawButton::Left),
                 timestamp: start,
+                lost_before: false,
             },
             RawInputEvent {
                 kind: RawInputKind::ButtonRelease(RawButton::Left),
                 timestamp: start + hold,
+                lost_before: false,
             },
         ]
     }
@@ -191,6 +194,7 @@ mod smoke_tests {
             events.push(RawInputEvent {
                 kind: RawInputKind::Move { dx: 2, dy: 1 },
                 timestamp: at(t),
+                lost_before: false,
             });
         }
         frame(&ctx, |ui, ctx| {
@@ -215,11 +219,13 @@ mod smoke_tests {
             events.push(RawInputEvent {
                 kind: RawInputKind::ButtonPress(RawButton::Right),
                 timestamp: at(t),
+                lost_before: false,
             });
             t += 0.07;
             events.push(RawInputEvent {
                 kind: RawInputKind::ButtonRelease(RawButton::Right),
                 timestamp: at(t),
+                lost_before: false,
             });
         }
         frame(&ctx, |ui, ctx| {
@@ -234,6 +240,7 @@ mod smoke_tests {
             events.push(RawInputEvent {
                 kind: RawInputKind::Scroll { delta },
                 timestamp: at(t),
+                lost_before: false,
             });
         }
         frame(&ctx, |ui, ctx| {
@@ -291,6 +298,7 @@ mod smoke_tests {
                         dy: 0,
                     },
                     timestamp: t,
+                    lost_before: false,
                 });
             }
             t += Duration::from_millis(400); // pause between passes
@@ -324,6 +332,7 @@ mod smoke_tests {
                         dy: 1,
                     },
                     timestamp: t,
+                    lost_before: false,
                 });
             }
             t += Duration::from_millis(400);
@@ -349,6 +358,7 @@ mod smoke_tests {
                 events.push(RawInputEvent {
                     kind: RawInputKind::Move { dx: 2, dy: 0 },
                     timestamp: t,
+                    lost_before: false,
                 });
             }
             t += Duration::from_millis(400);
@@ -382,6 +392,7 @@ mod smoke_tests {
                 events.push(RawInputEvent {
                     kind: RawInputKind::Move { dx: 2, dy },
                     timestamp: t,
+                    lost_before: false,
                 });
             }
             t += Duration::from_millis(400);
@@ -433,6 +444,7 @@ mod smoke_tests {
                     delta: if i < 15 { -1 } else { 1 },
                 },
                 timestamp: start + Duration::from_millis(10 * i),
+                lost_before: false,
             });
         }
         frame(&ctx, |ui, ctx| {

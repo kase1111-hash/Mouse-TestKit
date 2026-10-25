@@ -319,9 +319,14 @@ impl PollingPanel {
         }
     }
 
-    /// Keep the motion reports of the last second.
+    /// Keep the motion reports of the last second. Reports were lost before
+    /// an event marked `lost_before`: the interval across the hole is no
+    /// poll, so the window starts again after it (as in the CLI monitor).
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent], now: Instant) {
         for event in raw_events {
+            if event.lost_before {
+                self.reports.clear();
+            }
             if let RawInputKind::Move { dx, dy } = event.kind {
                 self.reports.push_back((event.timestamp, dx, dy));
             }
@@ -451,6 +456,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: t,
+            lost_before: false,
         }
     }
 
@@ -640,6 +646,24 @@ mod tests {
             // 133 deliveries a second are not a 125 Hz USB mouse
             assert_eq!(p.nominal_hz(), None, "{}", event_us);
         }
+    }
+
+    #[test]
+    fn the_window_starts_again_after_dropped_reports() {
+        // A 1 kHz mouse: the kernel drops 40 ms of reports. The window is
+        // emptied there, so its intervals and the time across the hole are
+        // not mixed.
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let mut events: Vec<_> = (0..500)
+            .map(|i| mv(t0 + Duration::from_millis(i), 3, 0))
+            .collect();
+        let mut resumed = mv(t0 + Duration::from_millis(540), 3, 0);
+        resumed.lost_before = true;
+        events.push(resumed);
+        p.process_raw_events(&events, t0 + Duration::from_millis(540));
+        assert_eq!(p.reports.len(), 1);
     }
 
     #[test]

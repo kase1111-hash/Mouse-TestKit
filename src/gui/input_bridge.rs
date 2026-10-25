@@ -17,8 +17,9 @@
 //!   ([`InputBridge::unreadable_mice`]) so the GUI can say how to fix it.
 //! - Reports lost on the way (the kernel's small per-reader buffer
 //!   overflowed while a reader thread was not scheduled, or the GUI did not
-//!   drain the channel) are marked ([`InputBridge::gaps`]) so timing
-//!   analyses need not take the hole for a stutter. A button whose release
+//!   drain the channel) are marked ([`InputBridge::gaps`], and
+//!   [`RawInputEvent::lost_before`] on the first event after each gap) so
+//!   timing analyses do not take the hole for a stutter. A button whose release
 //!   the kernel dropped is released again; one dropped because the channel
 //!   was full is not.
 //! - Windows: reports are told apart by `RAWINPUTHEADER::hDevice` and stamped
@@ -87,6 +88,11 @@ pub struct RawInputEvent {
     /// the moment `WM_INPUT` arrived on Windows. Never the time the GUI read
     /// it.
     pub timestamp: Instant,
+    /// Reports of the device were lost just before this event (see
+    /// [`InputBridge::gaps`]): nothing may be timed across to earlier
+    /// events, and a release restored here carries the time of the drop,
+    /// not its own. Set by [`InputBridge::poll`].
+    pub lost_before: bool,
 }
 
 /// The type of raw input event.
@@ -345,6 +351,9 @@ pub struct InputBridge {
     cross_check: PointerCrossCheck,
     /// Where reports of the measured device were lost in the last poll.
     gaps: Vec<usize>,
+    /// The device whose reports were lost after its last event delivered:
+    /// its next event is marked [`RawInputEvent::lost_before`].
+    pending_gap: Option<DeviceId>,
     /// Mouse-capable devices that could not be opened (permission denied).
     unreadable: usize,
     stop: Arc<AtomicBool>,
@@ -370,6 +379,7 @@ impl InputBridge {
             selector: DeviceSelector::new(),
             cross_check: PointerCrossCheck::new(),
             gaps: Vec::new(),
+            pending_gap: None,
             unreadable: 0,
             stop,
             _thread: thread,
@@ -401,17 +411,23 @@ impl InputBridge {
                     self.devices.retain(|d| d.id != id);
                     self.selector.device_removed(id);
                 }
-                BridgeMessage::Event(id, event) => {
+                BridgeMessage::Event(id, mut event) => {
                     // Events still queued from a device already removed are
                     // dropped so they cannot re-select it.
                     if self.devices.iter().any(|d| d.id == id) && self.selector.accept(id, &event) {
+                        if self.pending_gap == Some(id) {
+                            event.lost_before = true;
+                            self.pending_gap = None;
+                        }
                         events.push(event);
                     }
                 }
                 BridgeMessage::DataLost(id) => {
-                    if self.selector.active() == Some(id) && self.gaps.last() != Some(&events.len())
-                    {
-                        self.gaps.push(events.len());
+                    if self.selector.active() == Some(id) {
+                        if self.gaps.last() != Some(&events.len()) {
+                            self.gaps.push(events.len());
+                        }
+                        self.pending_gap = Some(id);
                     }
                 }
                 BridgeMessage::Unreadable(count) => self.unreadable = count,
@@ -424,17 +440,22 @@ impl InputBridge {
         if self.selector.active() != measured_before {
             self.cross_check = PointerCrossCheck::new();
         }
+        if self.pending_gap.is_some() && self.pending_gap != self.selector.active() {
+            self.pending_gap = None;
+        }
         events
     }
 
     /// Where reports of the measured device were lost (the system dropped
     /// them because a reader fell behind): indices into the events the last
     /// [`Self::poll`] returned, each the first event after a gap (equal to
-    /// their number when the gap came after them). The time across a gap
-    /// is no interval of the mouse's and whole clicks can be missing, so
-    /// timing analyses should not judge across it. A button whose release
-    /// the kernel dropped (Linux) is released at the gap; a release dropped
-    /// because the GUI did not drain the channel stays lost.
+    /// their number when the gap came after them; the next event delivered
+    /// is then marked). The time across a gap is no interval of the mouse's
+    /// and whole clicks can be missing, so timing analyses must not judge
+    /// across it: the first event after each gap carries
+    /// [`RawInputEvent::lost_before`]. A button whose release the kernel
+    /// dropped (Linux) is released at the gap; a release dropped because
+    /// the GUI did not drain the channel stays lost.
     pub fn gaps(&self) -> &[usize] {
         &self.gaps
     }
@@ -617,6 +638,7 @@ fn raw_event(timed: TimedEvent) -> Option<RawInputEvent> {
     Some(RawInputEvent {
         kind,
         timestamp: timed.time,
+        lost_before: false,
     })
 }
 
@@ -1239,9 +1261,16 @@ mod windows {
                 kinds.push(RawInputKind::Scroll { delta: notches });
             }
         }
-        kinds
-            .into_iter()
-            .all(|kind| sender.send(id, RawInputEvent { kind, timestamp }))
+        kinds.into_iter().all(|kind| {
+            sender.send(
+                id,
+                RawInputEvent {
+                    kind,
+                    timestamp,
+                    lost_before: false,
+                },
+            )
+        })
     }
 
     /// Create the hidden window, register for raw mouse input and pump
@@ -1391,6 +1420,7 @@ mod tests {
         RawInputEvent {
             kind,
             timestamp: at,
+            lost_before: false,
         }
     }
 
@@ -1804,8 +1834,23 @@ mod tests {
         let events = bridge.poll();
         assert_eq!(events.len(), 4);
         assert_eq!(bridge.gaps(), [3]);
+        let marked: Vec<bool> = events.iter().map(|e| e.lost_before).collect();
+        assert_eq!(marked, [false, false, false, true]);
         // Only the last poll's gaps are reported
         assert!(bridge.poll().is_empty());
+        assert!(bridge.gaps().is_empty());
+        // A gap after the last event of a poll marks the next event delivered
+        sender.send(BridgeMessage::DataLost(MOUSE)).unwrap();
+        assert!(bridge.poll().is_empty());
+        assert_eq!(bridge.gaps(), [0]);
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        sender
+            .send(BridgeMessage::Event(MOUSE, mv(2, 0, t)))
+            .unwrap();
+        let marked: Vec<bool> = bridge.poll().iter().map(|e| e.lost_before).collect();
+        assert_eq!(marked, [true, false]);
         assert!(bridge.gaps().is_empty());
     }
 

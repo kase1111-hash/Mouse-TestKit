@@ -120,41 +120,53 @@ struct ButtonEdge {
     in_area: bool,
 }
 
+/// A button press or release, or a gap in the input.
+#[derive(Debug, Clone, Copy)]
+enum ButtonInput {
+    Edge(ButtonEdge),
+    /// Reports were lost here (see `RawInputEvent::lost_before`): a release
+    /// can be among them, or restored after the gap with the time of the
+    /// drop, so no press is timed across it.
+    Gap,
+}
+
 /// This frame's left and right button presses and releases. Raw input
-/// carries each report's own time. Without it, egui's button events are
-/// used, all of them even when a quick click's press and release fall in
-/// one frame, stamped with the frame time `now`. Raw input sees clicks
-/// anywhere (the sidebar, the panel's own buttons), so presses are marked
-/// with whether the pointer was over `area`.
+/// carries each report's own time, and marks where reports were lost.
+/// Without it, egui's button events are used, all of them even when a quick
+/// click's press and release fall in one frame, stamped with the frame time
+/// `now`. Raw input sees clicks anywhere (the sidebar, the panel's own
+/// buttons), so presses are marked with whether the pointer was over `area`.
 fn button_edges(
     ctx: &egui::Context,
     raw_events: &[RawInputEvent],
     has_bridge: bool,
     area: egui::Rect,
     now: Instant,
-) -> Vec<ButtonEdge> {
+) -> Vec<ButtonInput> {
     if has_bridge {
         let in_area = ctx
             .input(|i| i.pointer.hover_pos())
             .is_some_and(|pos| area.contains(pos));
-        raw_events
-            .iter()
-            .filter_map(|e| {
-                let (button, pressed) = match e.kind {
-                    RawInputKind::ButtonPress(RawButton::Left) => (TestButton::Left, true),
-                    RawInputKind::ButtonRelease(RawButton::Left) => (TestButton::Left, false),
-                    RawInputKind::ButtonPress(RawButton::Right) => (TestButton::Right, true),
-                    RawInputKind::ButtonRelease(RawButton::Right) => (TestButton::Right, false),
-                    _ => return None,
-                };
-                Some(ButtonEdge {
-                    button,
-                    pressed,
-                    time: e.timestamp,
-                    in_area,
-                })
-            })
-            .collect()
+        let mut out = Vec::new();
+        for e in raw_events {
+            if e.lost_before {
+                out.push(ButtonInput::Gap);
+            }
+            let (button, pressed) = match e.kind {
+                RawInputKind::ButtonPress(RawButton::Left) => (TestButton::Left, true),
+                RawInputKind::ButtonRelease(RawButton::Left) => (TestButton::Left, false),
+                RawInputKind::ButtonPress(RawButton::Right) => (TestButton::Right, true),
+                RawInputKind::ButtonRelease(RawButton::Right) => (TestButton::Right, false),
+                _ => continue,
+            };
+            out.push(ButtonInput::Edge(ButtonEdge {
+                button,
+                pressed,
+                time: e.timestamp,
+                in_area,
+            }));
+        }
+        out
     } else {
         ctx.input(|i| {
             i.events
@@ -171,12 +183,12 @@ fn button_edges(
                             egui::PointerButton::Secondary => TestButton::Right,
                             _ => return None,
                         };
-                        Some(ButtonEdge {
+                        Some(ButtonInput::Edge(ButtonEdge {
                             button,
                             pressed: *pressed,
                             time: now,
                             in_area: area.contains(*pos),
-                        })
+                        }))
                     }
                     _ => None,
                 })
@@ -553,7 +565,12 @@ impl ClickPanel {
         if self.response_running {
             let now = Instant::now();
 
-            for edge in button_edges(ctx, raw_events, has_bridge, rect, now) {
+            for input in button_edges(ctx, raw_events, has_bridge, rect, now) {
+                let ButtonInput::Edge(edge) = input else {
+                    self.response_press_start = None;
+                    self.response_right_press_start = None;
+                    continue;
+                };
                 let (pressed_at, count, times, holds) = match edge.button {
                     TestButton::Left => (
                         &mut self.response_press_start,
@@ -867,7 +884,12 @@ impl ClickPanel {
             // press would stay open and later read as a long hold. Without
             // raw input every button event counts, even a press and release
             // within one frame.
-            for edge in button_edges(ctx, raw_events, has_bridge, rect, Instant::now()) {
+            for input in button_edges(ctx, raw_events, has_bridge, rect, Instant::now()) {
+                let ButtonInput::Edge(edge) = input else {
+                    self.sticky_press_start = None;
+                    self.sticky_right_press_start = None;
+                    continue;
+                };
                 let (pressed_at, holds, slow) = match edge.button {
                     TestButton::Left => (
                         &mut self.sticky_press_start,
@@ -959,15 +981,22 @@ impl ClickPanel {
         self.liftoff_pending.extend(burst);
     }
 
-    /// Feed raw motion reports (from the bridge) and advance to `now`.
+    /// Feed raw motion reports (from the bridge) and advance to `now`. After
+    /// reports the system dropped, part of a movement may be gone: it is
+    /// not judged, and the detector starts over once the mouse is seen
+    /// still again (as in the CLI test).
     fn feed_liftoff(&mut self, raw_events: &[RawInputEvent], now: Instant) {
         let epoch = self.liftoff_epoch;
         let secs = |t: Instant| t.duration_since(epoch).as_secs_f64();
         for event in raw_events {
+            if event.timestamp < epoch {
+                continue;
+            }
+            if event.lost_before {
+                self.liftoff_detector =
+                    LiftDetector::new(self.liftoff_dpi.0).watching_from(secs(event.timestamp));
+            }
             if let RawInputKind::Move { dx, dy } = event.kind {
-                if event.timestamp < epoch {
-                    continue;
-                }
                 let burst = self.liftoff_detector.feed(secs(event.timestamp), dx, dy);
                 self.record_liftoff(burst);
             }
@@ -1495,10 +1524,12 @@ mod tests {
             events.push(RawInputEvent {
                 kind: RawInputKind::ButtonPress(RawButton::Left),
                 timestamp: t,
+                lost_before: false,
             });
             events.push(RawInputEvent {
                 kind: RawInputKind::ButtonRelease(RawButton::Left),
                 timestamp: t + Duration::from_millis(hold),
+                lost_before: false,
             });
             t += Duration::from_millis(hold + 300);
         }
@@ -1687,6 +1718,25 @@ mod tests {
     }
 
     #[test]
+    fn releases_restored_after_dropped_reports_are_not_slow_releases() {
+        // The kernel dropped two releases while the reader fell behind; they
+        // were restored after the gap with the time of the drop, 400 ms
+        // after their press
+        let mut events = left_clicks(&[400, 100, 400, 100, 100, 100]);
+        for release in [1, 5] {
+            events[release].lost_before = true;
+        }
+        let mut panel = ClickPanel::new();
+        panel.sticky_running = true;
+        sticky_frame(&mut panel, IN_TEST_AREA, &events);
+        assert_eq!(panel.sticky_count, 0);
+        assert_eq!(panel.sticky_holds, [100.0, 100.0, 100.0, 100.0]);
+        // Unmarked, they read as a switch releasing late
+        let panel = sticky_panel_with_holds(&[400, 100, 400, 100, 100, 100]);
+        assert_eq!(panel.sticky_count, 2);
+    }
+
+    #[test]
     fn one_long_click_is_not_called_sticky() {
         let cfg = DiagConfig::default();
         let holds = [100.0, 120.0, 400.0, 90.0, 110.0, 130.0];
@@ -1784,6 +1834,7 @@ mod tests {
             .map(|i| RawInputEvent {
                 kind: RawInputKind::Move { dx, dy },
                 timestamp: start + Duration::from_millis(at_ms + i * every_ms),
+                lost_before: false,
             })
             .collect()
     }
@@ -1808,6 +1859,24 @@ mod tests {
         assert!((export.max_distance_mm - 6.35).abs() < 0.01);
         assert!(export.dpi_assumed);
         assert_eq!(export.verdict, "Cursor jumps on lift");
+    }
+
+    #[test]
+    fn liftoff_does_not_judge_motion_cut_by_dropped_reports() {
+        // A set-down jump of 200 counts at 1000 Hz, part of which the system
+        // dropped while the reader fell behind: what is left is not judged
+        for marked in [true, false] {
+            let mut panel = ClickPanel::new();
+            panel.start_liftoff();
+            let t0 = panel.liftoff_epoch;
+            let mut events = reports(t0, 500, 20, 1, 10, 0);
+            events[10].lost_before = marked;
+            liftoff_frame(&mut panel, &events, true, true);
+            panel.feed_liftoff(&[], t0 + Duration::from_millis(3000));
+            panel.stop_liftoff();
+            let jumps = panel.liftoff_view().jump_sized_count();
+            assert_eq!(jumps, usize::from(!marked), "marked: {}", marked);
+        }
     }
 
     #[test]

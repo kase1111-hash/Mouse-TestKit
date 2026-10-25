@@ -58,6 +58,9 @@ pub struct AccelPanel {
     accel_last_end: Option<f64>,
     /// Strokes left out because they turned back on themselves.
     accel_turned_back: usize,
+    /// Reports were lost during a pass (see `RawInputEvent::lost_before`):
+    /// the next stroke finished is the rest of it, not a pass of its own.
+    accel_skip_stroke: bool,
     accel_result: Option<AccelAnalysis>,
     /// Whether the current or last acceleration run read raw counts (true)
     /// or the on-screen pointer, which includes OS acceleration.
@@ -104,6 +107,7 @@ impl AccelPanel {
             accel_strokes: Vec::new(),
             accel_last_end: None,
             accel_turned_back: 0,
+            accel_skip_stroke: false,
             accel_result: None,
             accel_raw: true,
             angle_running: false,
@@ -127,28 +131,33 @@ impl AccelPanel {
     }
 
     /// Collect (time, dx, dy) motion for this frame from raw input or the
-    /// egui fallback.
+    /// egui fallback, and where reports were lost: indices into the motion,
+    /// each the first after a gap (its length when no motion followed).
     fn frame_motion(
         &mut self,
         ctx: &egui::Context,
         raw_events: &[RawInputEvent],
         has_bridge: bool,
-    ) -> Vec<(f64, i32, i32)> {
+    ) -> (Vec<(f64, i32, i32)>, Vec<usize>) {
         if has_bridge {
-            raw_events
-                .iter()
-                .filter_map(|ev| match ev.kind {
-                    RawInputKind::Move { dx, dy } => Some((self.secs(ev.timestamp), dx, dy)),
-                    _ => None,
-                })
-                .collect()
+            let mut motion = Vec::new();
+            let mut gaps = Vec::new();
+            for ev in raw_events {
+                if ev.lost_before && gaps.last() != Some(&motion.len()) {
+                    gaps.push(motion.len());
+                }
+                if let RawInputKind::Move { dx, dy } = ev.kind {
+                    motion.push((self.secs(ev.timestamp), dx, dy));
+                }
+            }
+            (motion, gaps)
         } else {
             let delta = ctx.input(|i| i.pointer.delta());
             let (dx, dy) = take_whole_points(&mut self.pointer_remainder, delta);
             if dx != 0 || dy != 0 {
-                vec![(self.secs(Instant::now()), dx, dy)]
+                (vec![(self.secs(Instant::now()), dx, dy)], Vec::new())
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     }
@@ -452,25 +461,48 @@ impl AccelPanel {
         }
 
         if self.is_running {
-            let motion = self.frame_motion(ctx, raw_events, has_bridge);
+            let (motion, gaps) = self.frame_motion(ctx, raw_events, has_bridge);
             let now = self.secs(Instant::now());
-            self.feed_accel(&motion, now);
+            self.feed_accel_with_gaps(&motion, &gaps, now);
         }
     }
 
     /// Feed one frame's motion `(t, dx, dy)` and advance time to `now` (s).
+    #[cfg(test)]
     fn feed_accel(&mut self, motion: &[(f64, i32, i32)], now: f64) {
-        for &(t, dx, dy) in motion {
+        self.feed_accel_with_gaps(motion, &[], now);
+    }
+
+    /// [`Self::feed_accel`] with reports lost before `motion[i]` for each
+    /// `i` in `gaps`. The pass in progress lost some of its counts (reports
+    /// only flow while the mouse moves): neither its part before the gap
+    /// nor the rest after it is recorded (as in the CLI test).
+    fn feed_accel_with_gaps(&mut self, motion: &[(f64, i32, i32)], gaps: &[usize], now: f64) {
+        for (i, &(t, dx, dy)) in motion.iter().enumerate() {
+            if gaps.contains(&i) {
+                self.accel_input_gap();
+            }
             if let Some(stroke) = self.accel_segmenter.feed(t, dx, dy) {
                 self.record_accel_stroke(&stroke);
             }
+        }
+        if gaps.contains(&motion.len()) {
+            self.accel_input_gap();
         }
         if let Some(stroke) = self.accel_segmenter.tick(now) {
             self.record_accel_stroke(&stroke);
         }
     }
 
+    fn accel_input_gap(&mut self) {
+        self.accel_segmenter.reset();
+        self.accel_skip_stroke = true;
+    }
+
     fn record_accel_stroke(&mut self, stroke: &Stroke) {
+        if std::mem::take(&mut self.accel_skip_stroke) {
+            return;
+        }
         match stroke_sample(stroke) {
             Ok(sample) => {
                 self.accel_strokes.push(sample);
@@ -489,6 +521,7 @@ impl AccelPanel {
         self.accel_strokes.clear();
         self.accel_last_end = None;
         self.accel_turned_back = 0;
+        self.accel_skip_stroke = false;
         self.accel_result = None;
     }
 
@@ -521,6 +554,7 @@ impl AccelPanel {
         self.accel_strokes.clear();
         self.accel_last_end = None;
         self.accel_turned_back = 0;
+        self.accel_skip_stroke = false;
         self.accel_result = None;
     }
 
@@ -678,8 +712,13 @@ impl AccelPanel {
         }
 
         if self.angle_running {
-            let motion = self.frame_motion(ctx, raw_events, has_bridge);
-            for (t, dx, dy) in motion {
+            let (motion, gaps) = self.frame_motion(ctx, raw_events, has_bridge);
+            for (i, (t, dx, dy)) in motion.into_iter().enumerate() {
+                if gaps.contains(&i) {
+                    // Dropped reports cut a piece out of the line in
+                    // progress: it is not judged (as in the CLI test)
+                    self.angle_segmenter.reset();
+                }
                 self.angle_accumulated_pos.0 += dx as f64;
                 // Screen y grows downward; plot y grows upward
                 self.angle_accumulated_pos.1 -= dy as f64;
@@ -839,6 +878,29 @@ mod tests {
         p.feed_accel(&last, t + 0.2);
         p.stop_accel(t + 0.25, StopBy::Key);
         assert_eq!(p.accel_strokes.len(), 10);
+    }
+
+    #[test]
+    fn a_pass_cut_by_dropped_reports_is_not_recorded() {
+        // A fast pass of 8000 counts loses 40 ms of its reports (1600
+        // counts) while the reader falls behind. Neither its part before the
+        // gap nor the rest after it is a pass.
+        for marked in [true, false] {
+            let mut p = AccelPanel::new();
+            p.start_accel(true);
+            let t = passes(&mut p, 0.0, 5, 8000, 4);
+            let t = passes(&mut p, t, 5, 8000, 40);
+            let motion: Vec<(f64, i32, i32)> = (0..200)
+                .filter(|k| !(80..120).contains(k))
+                .map(|k| (t + 0.001 * k as f64, 40, 0))
+                .collect();
+            let gaps: &[usize] = if marked { &[80] } else { &[] };
+            p.feed_accel_with_gaps(&motion, gaps, t + 0.2);
+            p.feed_accel(&[], t + 0.6);
+            p.stop_accel(t + 1.5, StopBy::Key);
+            let expected = if marked { 10 } else { 11 };
+            assert_eq!(p.accel_strokes.len(), expected, "marked: {}", marked);
+        }
     }
 
     #[test]

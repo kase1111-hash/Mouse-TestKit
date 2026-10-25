@@ -156,7 +156,8 @@ once the mouse is unplugged: the test must stop and not judge the silence.
 A batch with `lost_data` follows reports the system dropped because the
 reader fell behind: nothing may be timed across it (e.g.
 `StutterDetector::break_continuity`, `AutoTest::input_gap`). The GUI bridge
-marks the same gaps (`InputBridge::gaps`). GUI panels
+marks the same gaps (`InputBridge::gaps`, and `RawInputEvent::lost_before` on
+the first event after each), and GUI panels apply the same rules. GUI panels
 use `RawInputEvent::timestamp` from the input bridge. Without raw input
 (framework input, always on macOS) events only carry the frame time (steps
 of about 16 ms), so a check that needs finer timing than that (polling rate,

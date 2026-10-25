@@ -40,6 +40,11 @@ pub struct DoubleClickPanel {
     clicks: Vec<Instant>,
     /// Time of the most recent button release, for release-edge bounce.
     last_release: Option<Instant>,
+    /// Reports were lost since the last press (see
+    /// `RawInputEvent::lost_before`): presses or releases may be missing and
+    /// a restored release carries the time of the drop, so the next press is
+    /// not compared with what came before.
+    after_gap: bool,
     intervals: Vec<f64>,
     avg_interval: f64,
     min_interval: f64,
@@ -58,6 +63,7 @@ impl DoubleClickPanel {
             target_rect: egui::Rect::NOTHING,
             clicks: Vec::new(),
             last_release: None,
+            after_gap: false,
             intervals: Vec::new(),
             avg_interval: 0.0,
             min_interval: f64::MAX,
@@ -363,6 +369,10 @@ impl DoubleClickPanel {
                     .input(|i| i.pointer.hover_pos())
                     .is_some_and(|pos| target_rect.contains(pos));
                 for event in raw_events {
+                    if event.lost_before {
+                        self.last_release = None;
+                        self.after_gap = true;
+                    }
                     match event.kind {
                         RawInputKind::ButtonPress(RawButton::Left) if on_target => {
                             self.register_click_at(event.timestamp)
@@ -414,7 +424,8 @@ impl DoubleClickPanel {
     }
 
     fn register_click_at(&mut self, now: Instant) {
-        if let Some(last) = self.clicks.last() {
+        let after_gap = std::mem::take(&mut self.after_gap);
+        if let Some(last) = self.clicks.last().filter(|_| !after_gap) {
             let interval = now.duration_since(*last).as_secs_f64() * 1000.0;
             self.intervals.push(interval);
 
@@ -477,6 +488,7 @@ impl DoubleClickPanel {
     fn clear(&mut self) {
         self.clicks.clear();
         self.last_release = None;
+        self.after_gap = false;
         self.intervals.clear();
         self.avg_interval = 0.0;
         self.min_interval = f64::MAX;
@@ -655,6 +667,7 @@ mod tests {
         let press = vec![RawInputEvent {
             kind: RawInputKind::ButtonPress(RawButton::Left),
             timestamp: t,
+            lost_before: false,
         }];
         let input = egui::RawInput {
             events: vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))],
@@ -665,6 +678,50 @@ mod tests {
             panel.ui(ui, &c, &press, true);
         });
         assert!(panel.clicks.is_empty());
+    }
+
+    #[test]
+    fn test_a_release_restored_after_dropped_reports_is_not_a_bounce() {
+        // The kernel dropped a release while the reader fell behind; it was
+        // restored after the gap with the time of the drop, 10 ms before
+        // the next press
+        for marked in [true, false] {
+            let ctx = egui::Context::default();
+            let mut panel = DoubleClickPanel::new();
+            panel.start_for_test();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let c = ui.ctx().clone();
+                panel.ui(ui, &c, &[], true);
+            });
+            let t = Instant::now();
+            let ev = |ms: u64, kind: RawInputKind, lost_before: bool| RawInputEvent {
+                kind,
+                timestamp: t + std::time::Duration::from_millis(ms),
+                lost_before,
+            };
+            let events = [
+                ev(0, RawInputKind::ButtonPress(RawButton::Left), false),
+                ev(290, RawInputKind::ButtonRelease(RawButton::Left), marked),
+                ev(300, RawInputKind::ButtonPress(RawButton::Left), false),
+                ev(400, RawInputKind::ButtonRelease(RawButton::Left), false),
+                ev(700, RawInputKind::ButtonPress(RawButton::Left), false),
+            ];
+            let input = egui::RawInput {
+                events: vec![egui::Event::PointerMoved(panel.target_center_for_test())],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let c = ui.ctx().clone();
+                panel.ui(ui, &c, &events, true);
+            });
+            assert_eq!(panel.clicks.len(), 3);
+            assert_eq!(
+                panel.accidental_double_clicks,
+                u32::from(!marked),
+                "marked: {}",
+                marked
+            );
+        }
     }
 
     #[test]

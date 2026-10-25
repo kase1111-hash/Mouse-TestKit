@@ -67,6 +67,11 @@ pub struct DpiPanel {
     last_saved_distance: f32,
     /// The last measurement was cancelled because raw input stopped.
     cancelled_for_input: bool,
+    /// Reports the system dropped took some of the measurement's counts
+    /// (see `RawInputEvent::lost_before`): it will not be recorded...
+    spoiled: bool,
+    /// ... and the last one was not, for that reason.
+    discarded_for_gap: bool,
 }
 
 struct DpiSample {
@@ -89,6 +94,8 @@ impl DpiPanel {
             last_saved_dpi: 800,
             last_saved_distance: 2.0,
             cancelled_for_input: false,
+            spoiled: false,
+            discarded_for_gap: false,
         }
     }
 
@@ -160,6 +167,15 @@ impl DpiPanel {
             ui.label(
                 egui::RichText::new(
                     "The last measurement was cancelled: raw input from the mouse stopped during it (it was unplugged, its receiver or link dropped out, or another input was chosen), so not all of its movement was counted. Press SPACE to measure again.",
+                )
+                .color(egui::Color32::LIGHT_RED),
+            );
+        }
+        if self.discarded_for_gap {
+            ui.add_space(5.0);
+            ui.label(
+                egui::RichText::new(
+                    "The last measurement was not recorded: some of its movement was lost (the computer did not read the mouse in time and the system dropped reports). Press SPACE to measure again.",
                 )
                 .color(egui::Color32::LIGHT_RED),
             );
@@ -276,6 +292,14 @@ impl DpiPanel {
                         egui::RichText::new("Press SPACE when the mouse is on the end mark")
                             .color(egui::Color32::YELLOW),
                     );
+                    if self.spoiled {
+                        ui.label(
+                            egui::RichText::new(
+                                "Some movement was lost (the computer fell behind reading the mouse), so this measurement will not be recorded. Finish it with SPACE, then measure again.",
+                            )
+                            .color(egui::Color32::LIGHT_RED),
+                        );
+                    }
                 });
         } else {
             egui::Frame::new()
@@ -367,6 +391,7 @@ impl DpiPanel {
     /// Track the net displacement in raw counts.
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
         for ev in raw_events {
+            self.spoiled |= ev.lost_before;
             if let RawInputKind::Move { dx, dy } = ev.kind {
                 self.current_pos.0 += dx as i64;
                 self.current_pos.1 += dy as i64;
@@ -377,11 +402,19 @@ impl DpiPanel {
     fn start_measurement(&mut self) {
         self.is_running = true;
         self.cancelled_for_input = false;
+        self.spoiled = false;
+        self.discarded_for_gap = false;
         self.current_pos = (0, 0);
     }
 
+    /// End the measurement on the end mark. One that lost counts is not
+    /// recorded: it would read low (as in the CLI test).
     fn finish_measurement(&mut self) {
         self.is_running = false;
+        if std::mem::take(&mut self.spoiled) {
+            self.discarded_for_gap = true;
+            return;
+        }
         if self.current_pos == (0, 0) || self.target_distance_inches <= 0.0 {
             return;
         }
@@ -432,6 +465,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: Instant::now(),
+            lost_before: false,
         }
     }
 
@@ -523,6 +557,24 @@ mod tests {
         // 10 cm = 3.937 in, at 1000 DPI = 3937 counts
         let dpi = measure(&mut p, &[mv(3937, 0)]);
         assert!((dpi - 1000.0).abs() < 2.0, "{}", dpi);
+    }
+
+    #[test]
+    fn a_measurement_that_lost_counts_is_not_recorded() {
+        // 800 DPI over 2 in: 1600 counts, of which the system dropped about
+        // a fifth while the reader fell behind
+        let mut p = DpiPanel::new();
+        let mut events: Vec<_> = (0..320).map(|_| mv(4, 0)).collect();
+        events[160].lost_before = true;
+        events.truncate(320 - 80);
+        assert_eq!(measure(&mut p, &events), 0.0);
+        assert!(p.export().is_none());
+        assert!(p.discarded_for_gap);
+        // Measured again without a gap: recorded
+        let dpi = measure(&mut p, &[mv(1600, 0)]);
+        assert!((dpi - 800.0).abs() < 1.0, "{}", dpi);
+        assert!(!p.discarded_for_gap);
+        assert_eq!(p.export().unwrap().samples.len(), 1);
     }
 
     #[test]

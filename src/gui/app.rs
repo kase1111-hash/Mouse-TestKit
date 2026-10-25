@@ -921,7 +921,7 @@ fn permission_hint(unreadable: usize) -> Option<String> {
 
 /// Shown on a test's page when some of the measured mouse's reports were
 /// lost while the test ran.
-const LOST_REPORTS_WARNING: &str = "Some reports from the mouse were lost during this test: the computer did not read them in time (it was busy). A stutter, gap or missed click at that moment may not be the mouse's fault - run the test again to confirm.";
+const LOST_REPORTS_WARNING: &str = "Some reports from the mouse were lost during this test: the computer did not read them in time (it was busy). Nothing was timed across them, but clicks or movement in them are missing from the results - run the test again to confirm.";
 
 /// Pages whose running test takes the mouse's input whichever page is
 /// shown; every other test only sees input while its page is shown.
@@ -1251,6 +1251,7 @@ mod tests {
             RawInputEvent {
                 kind: RawInputKind::ButtonPress(RawButton::Left),
                 timestamp: Instant::now(),
+                lost_before: false,
             },
         )
     }

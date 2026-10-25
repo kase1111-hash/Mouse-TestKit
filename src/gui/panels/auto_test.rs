@@ -198,6 +198,10 @@ impl AutoTestPanel {
         if path == InputPath::Raw {
             for ev in raw_events {
                 let t = self.secs(ev.timestamp);
+                if ev.lost_before {
+                    // Reports were dropped: nothing is judged across the gap
+                    self.engine.input_gap(t);
+                }
                 self.engine.feed(t, &to_lib_event(&ev.kind));
             }
         } else if path == InputPath::Framework {
@@ -763,6 +767,7 @@ impl AutoTestPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn a_run_keeps_the_input_it_started_with() {
@@ -873,6 +878,53 @@ mod tests {
             vec![egui::Event::PointerMoved(pos), button_at(pos, b, true)],
         );
         run_frame(ctx, panel, vec![button_at(pos, b, false)]);
+    }
+
+    /// Movement-step findings of a run fed 4 s of a 1 kHz mouse moving
+    /// briskly, from whose reports the kernel drops 42 ms every 0.5 s (the
+    /// reader fell behind); the first report after each hole is marked when
+    /// `marked`.
+    fn movement_with_dropped_reports(marked: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut panel = AutoTestPanel::new();
+        panel.start_for_test(true);
+        panel.tick_for_test(7.5);
+        assert_eq!(panel.engine.current_phase(), Some(Phase::Movement));
+        let epoch = panel.epoch_for_test();
+        let mut events = Vec::new();
+        let mut after_hole = false;
+        for k in 1..=4000u64 {
+            if k > 500 && k % 500 < 42 {
+                after_hole = true;
+                continue;
+            }
+            events.push(RawInputEvent {
+                kind: RawInputKind::Move { dx: 3, dy: 1 },
+                timestamp: epoch + Duration::from_millis(7500 + k),
+                lost_before: marked && after_hole,
+            });
+            after_hole = false;
+        }
+        for frame in events.chunks(16) {
+            panel.process_input(&ctx, frame, true);
+        }
+        panel.tick_for_test(30.0);
+        panel
+            .engine
+            .findings_so_far()
+            .iter()
+            .filter(|f| f.phase == Phase::Movement)
+            .map(|f| f.title.clone())
+            .collect()
+    }
+
+    #[test]
+    fn reports_the_system_dropped_are_not_judged_as_stutters() {
+        let found = movement_with_dropped_reports(true);
+        assert!(found.iter().all(|t| !t.contains("stutter")), "{:?}", found);
+        // Unmarked, the holes read as the mouse stuttering
+        let found = movement_with_dropped_reports(false);
+        assert!(found.iter().any(|t| t.contains("stutter")), "{:?}", found);
     }
 
     #[test]
