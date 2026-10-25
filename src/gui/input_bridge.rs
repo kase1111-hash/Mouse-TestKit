@@ -131,6 +131,13 @@ pub struct InputDevice {
     /// Where it is attached, e.g. `event5` on Linux or the HID interface on
     /// Windows. Tells apart the several nodes one receiver often exposes.
     pub location: String,
+    /// Which unit it is: the same when this device comes back (plugged
+    /// into the same port again, or its wireless link reconnecting) and
+    /// different for another unit of the same model. Its name with the
+    /// port path and serial or Bluetooth address on Linux (`phys`, `uniq`;
+    /// the `eventN` node is numbered afresh), with `location` on Windows
+    /// (the instance ID depends on the port).
+    pub unit: String,
 }
 
 impl InputDevice {
@@ -806,10 +813,18 @@ mod linux {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let name = device.name().unwrap_or("Unknown device").to_string();
+            let unit = format!(
+                "{} | {} | {}",
+                name,
+                device.physical_path().unwrap_or(""),
+                device.unique_name().unwrap_or("")
+            );
             let info = InputDevice {
                 id,
-                name: device.name().unwrap_or("Unknown device").to_string(),
+                name,
                 location: node.clone(),
+                unit,
             };
             eprintln!(
                 "InputBridge: reading '{}' at {}",
@@ -1161,7 +1176,13 @@ mod windows {
         let path = device_path(id).unwrap_or_default();
         let (name, location) = windows_device_label(&path, id);
         state.devices.add(id);
-        sender.send_control(BridgeMessage::Added(InputDevice { id, name, location }))
+        let unit = format!("{name} | {location}");
+        sender.send_control(BridgeMessage::Added(InputDevice {
+            id,
+            name,
+            location,
+            unit,
+        }))
     }
 
     /// Handle `WM_INPUT_DEVICE_CHANGE`. Returns `false` if the GUI is gone.
@@ -1433,6 +1454,7 @@ mod tests {
             id,
             name: name.to_string(),
             location: location.to_string(),
+            unit: format!("{name} | {location}"),
         }
     }
 
@@ -1908,7 +1930,13 @@ mod tests {
         // The same mouse model plugged into two ports
         let device = |path: &str, id| {
             let (name, location) = windows_device_label(path, id);
-            InputDevice { id, name, location }
+            let unit = format!("{name} | {location}");
+            InputDevice {
+                id,
+                name,
+                location,
+                unit,
+            }
         };
         let a = device(
             r"\\?\HID#VID_046D&PID_C08B&MI_00#7&2a1b3c&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}",
@@ -1920,6 +1948,8 @@ mod tests {
         );
         assert_eq!(a.name, b.name, "same model");
         assert_ne!(a.label(), b.label());
+        // Neither is taken for the other when it comes back
+        assert_ne!(a.unit, b.unit);
     }
 }
 

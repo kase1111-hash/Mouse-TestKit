@@ -26,11 +26,13 @@ pub struct AutoTestPanel {
     epoch: Instant,
     /// Whether the last run used precise raw-input timestamps.
     last_run_raw: bool,
-    /// Name of the device measured now (see [`Self::input_changed`])...
+    /// The unit measured now (`InputDevice::unit`, see
+    /// [`Self::input_changed`])...
     measured: Option<String>,
-    /// ... and of the mouse the raw-input run started with. Plugged back
-    /// in, or reconnected over its wireless link, that mouse is a new device
-    /// with the same name; another device is not measured in its place.
+    /// ... and the mouse the raw-input run started with. Plugged back in,
+    /// or reconnected over its wireless link, that mouse is a new device of
+    /// the same unit; another device, even of the same model, is not
+    /// measured in its place.
     run_mouse: Option<String>,
     show_metrics: bool,
     /// Framework input: partial wheel movement not yet worth a notch.
@@ -187,8 +189,8 @@ impl AutoTestPanel {
         t.duration_since(self.epoch).as_secs_f64()
     }
 
-    /// The measured input changed: `device` (its name) is measured now, or
-    /// nothing. Called by the app before the frame's input, whichever page
+    /// The measured input changed: `device` (its unit, see
+    /// `InputDevice::unit`) is measured now, or nothing. Called by the app before the frame's input, whichever page
     /// is shown. The step in progress of a raw-input run did not see all of
     /// its mouse's input, so it is not judged.
     pub fn input_changed(&mut self, device: Option<&str>) {
@@ -313,6 +315,12 @@ impl AutoTestPanel {
     #[cfg(test)]
     pub(crate) fn tick_for_test(&mut self, secs: f64) {
         self.engine.tick(secs);
+    }
+
+    /// Whether the run's input is measured now (see [`Self::on_run_mouse`]).
+    #[cfg(test)]
+    pub(crate) fn on_run_mouse_for_test(&self) -> bool {
+        self.on_run_mouse()
     }
 
     /// Titles of the findings so far.

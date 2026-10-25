@@ -144,7 +144,7 @@ impl MouseTestKitApp {
         bridge.set_selection_frozen(tests_running);
         let events = bridge.poll();
         bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
-        let measured = bridge.active_device().map(|d| (d.id, d.name.clone()));
+        let measured = bridge.active_device().map(|d| (d.id, d.unit.clone()));
         if measured.as_ref().map(|m| m.0) != self.measured {
             self.measured = measured.as_ref().map(|m| m.0);
             self.input_changed(measured.as_ref().map(|m| m.1.as_str()));
@@ -157,7 +157,7 @@ impl MouseTestKitApp {
     /// input, so every test running ends (Auto Diagnostics does not judge
     /// the step in progress), whichever page is shown: a test whose page is
     /// not shown would otherwise carry on with the next input when shown
-    /// again. `device` is the name of the device measured now.
+    /// again. `device` is the unit measured now (`InputDevice::unit`).
     fn input_changed(&mut self, device: Option<&str>) {
         self.polling_panel.input_changed();
         self.stutter_panel.input_changed();
@@ -1297,10 +1297,15 @@ mod tests {
     use crate::input_bridge::{BridgeMessage, InputDevice, RawButton, RawInputEvent, RawInputKind};
 
     fn device(id: u64, name: &str, location: &str) -> BridgeMessage {
+        unit_device(id, name, location, &format!("{name} | {location}"))
+    }
+
+    fn unit_device(id: u64, name: &str, location: &str, unit: &str) -> BridgeMessage {
         BridgeMessage::Added(InputDevice {
             id,
             name: name.to_string(),
             location: location.to_string(),
+            unit: unit.to_string(),
         })
     }
 
@@ -1531,6 +1536,44 @@ mod tests {
         assert_eq!(app.measured, Some(2));
         assert!(!app.polling_panel.is_running());
         assert!(!app.stutter_panel.is_running());
+    }
+
+    #[test]
+    fn another_unit_of_the_same_model_is_not_the_auto_runs_mouse() {
+        // Two units of one model (same name) in two ports. The run's unit is
+        // unplugged and the other one clicked: it is not measured in its
+        // place. The run's unit plugged back into its port (a new device)
+        // is measured again.
+        let name = "HID mouse VID_046D PID_C077";
+        let (bridge, sender) = InputBridge::for_test();
+        sender
+            .send(unit_device(1, name, "instance 7&1a", "unit A"))
+            .unwrap();
+        sender
+            .send(unit_device(2, name, "instance 7&2b", "unit B"))
+            .unwrap();
+        sender.send(press(1)).unwrap();
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        app.poll_input(false);
+        app.auto_test_panel.start_for_test(true);
+        assert!(app.auto_test_panel.on_run_mouse_for_test());
+        sender.send(BridgeMessage::Removed(1)).unwrap();
+        sender.send(press(2)).unwrap();
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(2));
+        assert!(!app.auto_test_panel.on_run_mouse_for_test());
+        // Unit A back: pinned on the Dashboard, as the Auto choice keeps B
+        sender
+            .send(unit_device(3, name, "instance 7&1a", "unit A"))
+            .unwrap();
+        app.poll_input(false);
+        app.input_bridge
+            .as_mut()
+            .unwrap()
+            .set_choice(DeviceChoice::Device(3));
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(3));
+        assert!(app.auto_test_panel.on_run_mouse_for_test());
     }
 
     #[test]
