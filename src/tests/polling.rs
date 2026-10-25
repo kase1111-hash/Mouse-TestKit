@@ -5,13 +5,16 @@
 //! movement and reversals legitimately skip polls. As in the GUI panel, a
 //! rate is only taken from the intervals between reports sent while the
 //! mouse moved fast enough to report at every poll
-//! (`analysis::polling::window_hz`); a window without enough of them
-//! publishes nothing, so it cannot drag Min/Avg down.
+//! (`analysis::polling::rate_hz`); a window without enough of them
+//! publishes nothing, so it cannot drag Min/Avg down. Reports delivered in
+//! batches (a Bluetooth mouse, `analysis::polling::batched_delivery`) are
+//! measured per delivery, and no USB rate is named for them.
 
 use crate::terminal;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use mouse_testkit::analysis::polling::{
-    usb_nominal_rate, window_hz, PollingStats, USB_MIN_POLLING_HZ,
+    batched_delivery, rate_hz, saturated_intervals_ms, usb_nominal_rate, Batching, PollingStats,
+    MIN_FAST_INTERVALS, USB_MIN_POLLING_HZ,
 };
 use std::time::{Duration, Instant};
 
@@ -43,6 +46,10 @@ pub fn run() -> bool {
     let mut stats = PollingStats::new();
     let mut last_print = Instant::now();
     let mut reports: Vec<(Instant, i32, i32)> = Vec::new();
+    // The latest window's batching, and whether any window was batched (the
+    // readings are then deliveries per second)
+    let mut batching: Option<Batching> = None;
+    let mut ever_batched = false;
     let mut gaps = 0usize;
     let mut device_lost = false;
 
@@ -90,9 +97,17 @@ pub fn run() -> bool {
 
             print!("\r\x1B[K");
             match window_rate(&reports) {
-                Some(hz) => {
+                Some((hz, batched)) => {
                     stats.update(hz);
-                    print!("Current: {:4} Hz{} | ", hz, nominal_label(hz as f64));
+                    if batched.is_some() {
+                        batching = batched;
+                        ever_batched = true;
+                    }
+                    let label = match batched {
+                        Some(_) => " (batched)".to_string(),
+                        None => nominal_label(hz as f64),
+                    };
+                    print!("Current: {:4} Hz{} | ", hz, label);
                     print!("Min: {:4} Hz | ", stats.min_hz);
                     print!("Max: {:4} Hz | ", stats.max_hz);
                     print!("Avg: {:6.1} Hz | ", stats.avg_hz);
@@ -119,9 +134,19 @@ pub fn run() -> bool {
             stats.min_hz,
             stats.max_hz,
             stats.avg_hz,
-            nominal_label(stats.avg_hz)
+            if ever_batched {
+                String::new()
+            } else {
+                nominal_label(stats.avg_hz)
+            }
         );
-        if let Some(note) = no_usb_rate_note(stats.avg_hz) {
+        if let Some(b) = batching {
+            println!(
+                "Reports arrived in batches, {:.1} per delivery on average, one delivery every\n{:.1} ms, as a Bluetooth mouse sends the reports it has ready once per\nconnection event. The cursor moves once per delivery, so the rates shown are\ndeliveries per second.",
+                b.reports_per_event, b.event_period_ms
+            );
+        }
+        if let Some(note) = no_usb_rate_note(stats.avg_hz, ever_batched) {
             println!("{}", note);
         }
     } else {
@@ -136,8 +161,9 @@ pub fn run() -> bool {
     true
 }
 
-/// Polling rate of the last second's reports, from fast movement only.
-fn window_rate(reports: &[(Instant, i32, i32)]) -> Option<u32> {
+/// Polling rate of the last second's reports, from fast movement only, and
+/// their batching: with batched delivery the rate is deliveries per second.
+fn window_rate(reports: &[(Instant, i32, i32)]) -> Option<(u32, Option<Batching>)> {
     let origin = reports.first()?.0;
     let reports: Vec<(f64, i32, i32)> = reports
         .iter()
@@ -149,15 +175,18 @@ fn window_rate(reports: &[(Instant, i32, i32)]) -> Option<u32> {
             )
         })
         .collect();
-    window_hz(&reports)
+    let intervals = saturated_intervals_ms(&reports);
+    let hz = rate_hz(&intervals, MIN_FAST_INTERVALS)?;
+    Some((hz, batched_delivery(&intervals)))
 }
 
-/// Why no USB rate is named for an average rate, if none is.
-fn no_usb_rate_note(avg_hz: f64) -> Option<&'static str> {
-    if usb_nominal_rate(avg_hz).is_some() {
-        None
-    } else if avg_hz < USB_MIN_POLLING_HZ as f64 {
+/// Why no USB rate is named for an average rate, if none is and the
+/// batching note (deliveries are no USB rate) does not already say so.
+fn no_usb_rate_note(avg_hz: f64, batched: bool) -> Option<&'static str> {
+    if avg_hz < USB_MIN_POLLING_HZ as f64 {
         Some("Under 110 Hz no USB rate fits: normal for a Bluetooth mouse (67-133 Hz),\nlow for a USB mouse, which should report 125 Hz or more.")
+    } else if batched || usb_nominal_rate(avg_hz).is_some() {
+        None
     } else {
         Some("No USB rate fits: a USB mouse measures at or just under its rate, never well\nabove it. About 133 Hz is a Bluetooth mouse on a 7.5 ms connection interval.")
     }
@@ -193,7 +222,33 @@ mod tests {
         let slow = window((0..200).map(|i| 3000 + 1000 * (i % 6)), 1);
         assert_eq!(window_rate(&slow), None);
         let fast = window((0..900).map(|_| 1000), 3);
-        assert_eq!(window_rate(&fast), Some(1000));
+        assert_eq!(window_rate(&fast), Some((1000, None)));
+    }
+
+    #[test]
+    fn batched_deliveries_get_no_usb_rate() {
+        // A Bluetooth mouse sampling at 250 Hz, served every 8.75 ms: two or
+        // three reports per connection event, 0.4 ms apart
+        let t0 = Instant::now();
+        let mut reports = Vec::new();
+        let mut sent = 0;
+        for k in 1..=114u64 {
+            let made = k * 8750 / 4000;
+            for (i, _) in (sent..made).enumerate() {
+                let at = t0 + Duration::from_micros(k * 8750 + 400 * i as u64);
+                reports.push((at, 6, 2));
+            }
+            sent = made;
+        }
+        let (hz, batching) = window_rate(&reports).unwrap();
+        assert_eq!(hz, 114);
+        let b = batching.expect("batched");
+        assert!((b.event_period_ms - 8.75).abs() < 0.1, "{:?}", b);
+        // 114 deliveries a second are not a 125 Hz USB mouse
+        assert_eq!(no_usb_rate_note(hz as f64, true), None);
+        // A USB mouse's window is never batched
+        let usb = window((0..900).map(|_| 8000), 3);
+        assert_eq!(window_rate(&usb), Some((125, None)));
     }
 
     #[test]
@@ -201,8 +256,10 @@ mod tests {
         assert_eq!(nominal_label(89.0), "");
         assert_eq!(nominal_label(133.0), "");
         assert_eq!(nominal_label(997.0), " (~1000 Hz)");
-        assert!(no_usb_rate_note(89.0).unwrap().starts_with("Under 110 Hz"));
-        assert!(no_usb_rate_note(133.0).unwrap().contains("7.5 ms"));
-        assert_eq!(no_usb_rate_note(997.0), None);
+        assert!(no_usb_rate_note(89.0, false)
+            .unwrap()
+            .starts_with("Under 110 Hz"));
+        assert!(no_usb_rate_note(133.0, false).unwrap().contains("7.5 ms"));
+        assert_eq!(no_usb_rate_note(997.0, false), None);
     }
 }
