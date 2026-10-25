@@ -121,8 +121,8 @@ pub fn print_lost_data_note(gaps: usize) {
             "\nNote: {} time(s) the computer did not read the mouse in time and the system",
             gaps
         );
-        println!("dropped some of its reports. Nothing was timed across those gaps; if it keeps");
-        println!("happening, close other busy programs and re-run the test.");
+        println!("dropped some of its reports. Nothing was timed or counted across those gaps; if");
+        println!("it keeps happening, close other busy programs and re-run the test.");
     }
 }
 

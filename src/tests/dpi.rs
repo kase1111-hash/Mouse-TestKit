@@ -109,6 +109,7 @@ pub fn run() -> TestOutcome {
     let mut spoiled = false;
     let (mut total_x, mut total_y) = (0i64, 0i64);
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
     let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
@@ -139,6 +140,7 @@ pub fn run() -> TestOutcome {
             device_lost = true;
             break;
         };
+        gaps += usize::from(batch.lost_data);
         if batch.lost_data && counting && !spoiled {
             // Dropped reports took their counts with them. The user is still
             // sliding, so the SPACE that ends the slide discards the sample
@@ -324,6 +326,7 @@ pub fn run() -> TestOutcome {
         outcome
     };
 
+    terminal::print_lost_data_note(gaps);
     if device_lost {
         terminal::print_device_lost();
     }

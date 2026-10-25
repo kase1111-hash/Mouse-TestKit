@@ -58,6 +58,7 @@ pub fn run() -> bool {
     let mut recording_slow = true;
     // Some of the current pass was lost: it will not be recorded
     let mut spoiled = false;
+    let mut gaps = 0usize;
     let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
@@ -72,6 +73,7 @@ pub fn run() -> bool {
             device_lost = true;
             break;
         };
+        gaps += usize::from(batch.lost_data);
         if batch.lost_data && !spoiled {
             // Dropped reports took their counts with them: reports only flow
             // while the mouse moves, so this pass lost some of its movement
@@ -240,6 +242,7 @@ pub fn run() -> bool {
         );
     }
 
+    terminal::print_lost_data_note(gaps);
     if device_lost {
         terminal::print_device_lost();
     }
