@@ -124,6 +124,9 @@ Each test panel follows this pattern:
 - Struct with internal state (is_running, results, settings)
 - `ui(&mut self, ui: &mut egui::Ui)` method for rendering
 - State management within the panel
+- `input_changed()`, which the app calls (whichever page is shown) when the
+  measured device changes: a run in progress ends, so two inputs are never
+  mixed in one result
 
 ### Test Modules
 
