@@ -197,6 +197,25 @@ pub fn after_device_lost(outcome: TestOutcome) -> TestOutcome {
     }
 }
 
+/// Printed in place of a clean verdict by a test whose mouse disconnected
+/// part way (see [`after_device_lost`]).
+pub const CUT_SHORT_VERDICT: &str = "? Inconclusive - the mouse disconnected before the test finished. Nothing\n  wrong was seen before that, but the test is not complete.";
+
+/// [`after_device_lost`] for a verdict and the lines that state it: a
+/// clean verdict's lines become [`CUT_SHORT_VERDICT`].
+pub fn verdict_after_device_lost(
+    outcome: TestOutcome,
+    lines: Vec<String>,
+) -> (TestOutcome, Vec<String>) {
+    match outcome {
+        TestOutcome::NoIssues => (
+            TestOutcome::Inconclusive,
+            vec![CUT_SHORT_VERDICT.to_string()],
+        ),
+        outcome => (outcome, lines),
+    }
+}
+
 /// Status of a test that only prints its result, from whether it measured
 /// a mouse at all.
 fn plain_status(measured: bool) -> TestStatus {
@@ -370,7 +389,18 @@ mod tests {
             TestOutcome::Inconclusive,
         ] {
             assert_eq!(after_device_lost(kept), kept);
+            let lines = vec!["⚠ found before".to_string()];
+            assert_eq!(
+                verdict_after_device_lost(kept, lines.clone()),
+                (kept, lines)
+            );
         }
+        // No clean line is printed for a test that was cut short
+        let (outcome, lines) =
+            verdict_after_device_lost(TestOutcome::NoIssues, vec!["✓ No jumps".to_string()]);
+        assert_eq!(outcome, TestOutcome::Inconclusive);
+        assert!(lines.iter().all(|l| !l.contains('✓')), "{:?}", lines);
+        assert!(lines[0].starts_with("? Inconclusive"));
     }
 
     #[test]

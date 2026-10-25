@@ -246,7 +246,7 @@ pub fn run() -> TestOutcome {
 
     let (mut outcome, mut lines) = verdict(&tally, lifts, dpi_assumed);
     if device_lost {
-        outcome = standard::after_device_lost(outcome);
+        (outcome, lines) = standard::verdict_after_device_lost(outcome, lines);
     }
     // Not a single movement since the start: either every lift was perfectly
     // clean, or the mouse stopped sending input (unplugged, link lost).

@@ -168,6 +168,9 @@ pub fn run() -> TestOutcome {
         println!("  This can affect precision in games and design work.");
         println!("  Turn off angle snapping / prediction in the mouse software.");
         TestOutcome::IssueFound
+    } else if device_lost {
+        println!("\n{}", standard::CUT_SHORT_VERDICT);
+        TestOutcome::Inconclusive
     } else {
         println!(
             "\n✓ No angle snapping detected ({:.0}% of near-axis lines were perfectly straight)",

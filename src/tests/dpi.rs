@@ -279,7 +279,7 @@ pub fn run() -> TestOutcome {
             );
         }
 
-        let (outcome, message) = if disagree && samples.len() < 3 {
+        let (mut outcome, mut message) = if disagree && samples.len() < 3 {
             (
                 TestOutcome::Inconclusive,
                 format!(
@@ -298,6 +298,11 @@ pub fn run() -> TestOutcome {
                 ),
             )
         };
+        if device_lost {
+            let lines;
+            (outcome, lines) = standard::verdict_after_device_lost(outcome, vec![message]);
+            message = lines.join("\n");
+        }
         println!("\n{}", message);
         if disagree && samples.len() >= 3 {
             println!(

@@ -141,7 +141,7 @@ pub fn run() -> TestOutcome {
 
     let (mut outcome, mut lines) = verdict(double_clicks.len(), detector.presses, min_clicks());
     if device_lost {
-        outcome = standard::after_device_lost(outcome);
+        (outcome, lines) = standard::verdict_after_device_lost(outcome, lines);
     }
     if outcome == TestOutcome::NoIssues {
         lines.extend(super::click_sticky::per_button(&detector.presses_by_button()).1);

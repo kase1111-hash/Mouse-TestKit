@@ -129,7 +129,8 @@ pub fn run() -> TestOutcome {
         .as_secs_f64();
     let mut report = tracker.report(now);
     if device_lost {
-        report.outcome = standard::after_device_lost(report.outcome);
+        (report.outcome, report.lines) =
+            standard::verdict_after_device_lost(report.outcome, report.lines);
     }
 
     println!("\n\n=== Click Stickiness Test Complete ===\n");
