@@ -128,6 +128,14 @@ impl AccelPanel {
         self.is_running || self.angle_running
     }
 
+    pub fn accel_is_running(&self) -> bool {
+        self.is_running
+    }
+
+    pub fn angle_is_running(&self) -> bool {
+        self.angle_running
+    }
+
     /// The measured input changed (another device, or raw input stopped or
     /// started): runs in progress end, whichever page is shown, keeping the
     /// passes and lines measured so far but not the one cut off.

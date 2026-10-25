@@ -182,22 +182,25 @@ impl MouseTestKitApp {
             || self.auto_test_panel.is_running()
     }
 
-    /// Pages whose test is running. Pages that share a panel (the three
-    /// click tests; angle snap and acceleration) count as running together.
+    /// Pages whose test is running. Each test counts on its own, also
+    /// where pages share a panel (the three click tests; angle snap and
+    /// acceleration): one left running says nothing about the others.
     fn running_pages(&self) -> Vec<ActiveTest> {
-        let click = self.click_panel.is_running();
-        let accel = self.accel_panel.is_running();
+        let click = &self.click_panel;
         [
             (ActiveTest::AutoTest, self.auto_test_panel.is_running()),
             (ActiveTest::PollingRate, self.polling_panel.is_running()),
             (ActiveTest::Stutter, self.stutter_panel.is_running()),
-            (ActiveTest::ClickResponse, click),
-            (ActiveTest::ClickSticky, click),
-            (ActiveTest::LiftOff, click),
+            (ActiveTest::ClickResponse, click.response_is_running()),
+            (ActiveTest::ClickSticky, click.sticky_is_running()),
+            (ActiveTest::LiftOff, click.liftoff_is_running()),
             (ActiveTest::ScrollWheel, self.scroll_panel.is_running()),
             (ActiveTest::Dpi, self.dpi_panel.is_running()),
-            (ActiveTest::AngleSnap, accel),
-            (ActiveTest::Acceleration, accel),
+            (ActiveTest::AngleSnap, self.accel_panel.angle_is_running()),
+            (
+                ActiveTest::Acceleration,
+                self.accel_panel.accel_is_running(),
+            ),
             (
                 ActiveTest::DoubleClick,
                 self.double_click_panel.is_running(),
@@ -1505,6 +1508,39 @@ mod tests {
         assert_eq!(app.measured, Some(2));
         assert!(!app.polling_panel.is_running());
         assert!(!app.stutter_panel.is_running());
+    }
+
+    #[test]
+    fn tests_that_share_a_panel_are_noted_on_their_own() {
+        use ActiveTest::{AngleSnap, ClickResponse, ClickSticky, LiftOff};
+        // Click Test left running while the user looks at Lift-Off, whose
+        // test is not running, then starts it: reports lost meanwhile are
+        // not about the lift run
+        let mut app = MouseTestKitApp::with_parts(Config::default(), None);
+        app.click_panel.start_response_for_test();
+        let running = app.running_pages();
+        assert!(running.contains(&ClickResponse));
+        assert!(!running.contains(&ClickSticky) && !running.contains(&LiftOff));
+        app.lost_reports.update(&running, LiftOff, true);
+        assert!(!app.lost_reports.applies_to(LiftOff));
+        // Lost during a lift run with Click Test still going: cleared when
+        // the lift test runs again
+        app.click_panel.start_liftoff_for_test();
+        app.lost_reports.update(&app.running_pages(), LiftOff, true);
+        assert!(app.lost_reports.applies_to(LiftOff));
+        assert!(!app.lost_reports.applies_to(ClickResponse));
+        app.click_panel.stop_liftoff_for_test();
+        app.lost_reports
+            .update(&app.running_pages(), LiftOff, false);
+        app.click_panel.start_liftoff_for_test();
+        app.lost_reports
+            .update(&app.running_pages(), LiftOff, false);
+        assert!(!app.lost_reports.applies_to(LiftOff));
+        // Angle snapping and acceleration likewise
+        app.accel_panel.start_angle_for_test();
+        let running = app.running_pages();
+        assert!(running.contains(&AngleSnap));
+        assert!(!running.contains(&ActiveTest::Acceleration));
     }
 
     #[test]

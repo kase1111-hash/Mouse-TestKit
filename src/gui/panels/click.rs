@@ -339,6 +339,18 @@ impl ClickPanel {
         self.response_running || self.sticky_running || self.liftoff_running
     }
 
+    pub fn response_is_running(&self) -> bool {
+        self.response_running
+    }
+
+    pub fn sticky_is_running(&self) -> bool {
+        self.sticky_running
+    }
+
+    pub fn liftoff_is_running(&self) -> bool {
+        self.liftoff_running
+    }
+
     /// The measured input changed (another device, or raw input stopped or
     /// started): every run in progress ends, whichever page is shown,
     /// keeping what was measured so far. A press still open or a lift-off
@@ -353,6 +365,21 @@ impl ClickPanel {
         if self.liftoff_running {
             self.stop_liftoff_at(Instant::now(), LiftoffStop::InputChanged);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_response_for_test(&mut self) {
+        self.response_running = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_liftoff_for_test(&mut self) {
+        self.start_liftoff();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_liftoff_for_test(&mut self) {
+        self.stop_liftoff();
     }
 
     /// End the stickiness run. A press still open never gets its release
