@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::export::{ExportInfo, TestResultsExport};
-use crate::input_bridge::{DeviceChoice, InputBridge};
+use crate::input_bridge::{DeviceChoice, DeviceId, InputBridge, RawInputEvent};
 use crate::panels::{
     AccelPanel, AutoTestPanel, ClickPanel, DoubleClickPanel, DpiPanel, JitterPanel, PollingPanel,
     ScrollPanel, StutterPanel,
@@ -74,6 +74,9 @@ pub struct MouseTestKitApp {
     config_dirty_since: Option<Instant>,
     /// Background raw input thread (None on unsupported platforms)
     input_bridge: Option<InputBridge>,
+    /// The device measured in the last frame (None: framework input), to
+    /// notice when the input under test changes
+    measured: Option<DeviceId>,
     /// Pages whose test run lost some of the mouse's reports
     lost_reports: LostReportsNotice,
 }
@@ -123,8 +126,48 @@ impl MouseTestKitApp {
             config,
             config_dirty_since: None,
             input_bridge,
+            measured: None,
             lost_reports: LostReportsNotice::default(),
         }
+    }
+
+    /// Drain this frame's raw input (none without the bridge). Before any
+    /// test sees it, runs end if the measured device changed: the input may
+    /// be another device's, chosen on the Dashboard or claimed after the
+    /// measured mouse was unplugged (see [`Self::input_changed`]).
+    fn poll_input(&mut self, pointer_moved: bool) -> Vec<RawInputEvent> {
+        let tests_running = self.any_test_running();
+        let Some(bridge) = self.input_bridge.as_mut() else {
+            return Vec::new();
+        };
+        // Auto device selection must not switch devices mid-test
+        bridge.set_selection_frozen(tests_running);
+        let events = bridge.poll();
+        bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
+        let measured = bridge.active_device().map(|d| (d.id, d.unit.clone()));
+        if measured.as_ref().map(|m| m.0) != self.measured {
+            self.measured = measured.as_ref().map(|m| m.0);
+            self.input_changed(measured.as_ref().map(|m| m.1.as_str()));
+        }
+        events
+    }
+
+    /// The measured input changed: another device was chosen or claimed,
+    /// the measured one went away, or raw input started. A run measures one
+    /// input, so every test running ends (Auto Diagnostics does not judge
+    /// the step in progress), whichever page is shown: a test whose page is
+    /// not shown would otherwise carry on with the next input when shown
+    /// again. `device` is the unit measured now (`InputDevice::unit`).
+    fn input_changed(&mut self, device: Option<&str>) {
+        self.polling_panel.input_changed();
+        self.stutter_panel.input_changed();
+        self.click_panel.input_changed();
+        self.jitter_panel.input_changed();
+        self.dpi_panel.input_changed();
+        self.accel_panel.input_changed();
+        self.double_click_panel.input_changed();
+        self.scroll_panel.input_changed();
+        self.auto_test_panel.input_changed(device);
     }
 
     fn any_test_running(&self) -> bool {
@@ -139,22 +182,25 @@ impl MouseTestKitApp {
             || self.auto_test_panel.is_running()
     }
 
-    /// Pages whose test is running. Pages that share a panel (the three
-    /// click tests; angle snap and acceleration) count as running together.
+    /// Pages whose test is running. Each test counts on its own, also
+    /// where pages share a panel (the three click tests; angle snap and
+    /// acceleration): one left running says nothing about the others.
     fn running_pages(&self) -> Vec<ActiveTest> {
-        let click = self.click_panel.is_running();
-        let accel = self.accel_panel.is_running();
+        let click = &self.click_panel;
         [
             (ActiveTest::AutoTest, self.auto_test_panel.is_running()),
             (ActiveTest::PollingRate, self.polling_panel.is_running()),
             (ActiveTest::Stutter, self.stutter_panel.is_running()),
-            (ActiveTest::ClickResponse, click),
-            (ActiveTest::ClickSticky, click),
-            (ActiveTest::LiftOff, click),
+            (ActiveTest::ClickResponse, click.response_is_running()),
+            (ActiveTest::ClickSticky, click.sticky_is_running()),
+            (ActiveTest::LiftOff, click.liftoff_is_running()),
             (ActiveTest::ScrollWheel, self.scroll_panel.is_running()),
             (ActiveTest::Dpi, self.dpi_panel.is_running()),
-            (ActiveTest::AngleSnap, accel),
-            (ActiveTest::Acceleration, accel),
+            (ActiveTest::AngleSnap, self.accel_panel.angle_is_running()),
+            (
+                ActiveTest::Acceleration,
+                self.accel_panel.accel_is_running(),
+            ),
             (
                 ActiveTest::DoubleClick,
                 self.double_click_panel.is_running(),
@@ -190,6 +236,28 @@ impl MouseTestKitApp {
         }
     }
 
+    /// The tests (named as in the export) whose results lost reports.
+    fn reports_lost(&self) -> Vec<String> {
+        [
+            (ActiveTest::AutoTest, "Auto Diagnostics"),
+            (ActiveTest::PollingRate, "Polling Rate"),
+            (ActiveTest::Stutter, "Stutter"),
+            (ActiveTest::ClickResponse, "Click Response"),
+            (ActiveTest::ClickSticky, "Click Sticky"),
+            (ActiveTest::LiftOff, "Lift-Off"),
+            (ActiveTest::ScrollWheel, "Scroll"),
+            (ActiveTest::Dpi, "DPI"),
+            (ActiveTest::AngleSnap, "Angle Snap"),
+            (ActiveTest::Acceleration, "Acceleration"),
+            (ActiveTest::DoubleClick, "Double-Click"),
+            (ActiveTest::Jitter, "Jitter"),
+        ]
+        .into_iter()
+        .filter(|&(page, _)| self.lost_reports.applies_to(page))
+        .map(|(_, name)| name.to_string())
+        .collect()
+    }
+
     fn collect_results(&self) -> TestResultsExport {
         TestResultsExport {
             export_info: ExportInfo::new(),
@@ -205,6 +273,7 @@ impl MouseTestKitApp {
             angle_snap: self.accel_panel.export_angle(),
             scroll: self.scroll_panel.export(),
             auto_diagnostics: self.auto_test_panel.report().cloned(),
+            reports_lost: self.reports_lost(),
         }
     }
 
@@ -921,7 +990,7 @@ fn permission_hint(unreadable: usize) -> Option<String> {
 
 /// Shown on a test's page when some of the measured mouse's reports were
 /// lost while the test ran.
-const LOST_REPORTS_WARNING: &str = "Some reports from the mouse were lost during this test: the computer did not read them in time (it was busy). A stutter, gap or missed click at that moment may not be the mouse's fault - run the test again to confirm.";
+const LOST_REPORTS_WARNING: &str = "Some reports from the mouse were lost during this test: the computer did not read them in time (it was busy). Nothing was timed across them, but clicks or movement in them are missing from the results - run the test again to confirm.";
 
 /// Pages whose running test takes the mouse's input whichever page is
 /// shown; every other test only sees input while its page is shown.
@@ -1085,18 +1154,8 @@ impl eframe::App for MouseTestKitApp {
         let ctx = &ctx;
         // Poll raw input events from the background thread (once per frame).
         // Use a local variable so the borrow checker doesn't conflict with &mut self in the closure.
-        let tests_running = self.any_test_running();
         let pointer_moved = ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
-        let frame_events = match &mut self.input_bridge {
-            Some(bridge) => {
-                // Auto device selection must not switch devices mid-test
-                bridge.set_selection_frozen(tests_running);
-                let events = bridge.poll();
-                bridge.cross_check_pointer(Instant::now(), pointer_moved, &events);
-                events
-            }
-            None => Vec::new(),
-        };
+        let frame_events = self.poll_input(pointer_moved);
         let reports_lost = self
             .input_bridge
             .as_ref()
@@ -1238,10 +1297,15 @@ mod tests {
     use crate::input_bridge::{BridgeMessage, InputDevice, RawButton, RawInputEvent, RawInputKind};
 
     fn device(id: u64, name: &str, location: &str) -> BridgeMessage {
+        unit_device(id, name, location, &format!("{name} | {location}"))
+    }
+
+    fn unit_device(id: u64, name: &str, location: &str, unit: &str) -> BridgeMessage {
         BridgeMessage::Added(InputDevice {
             id,
             name: name.to_string(),
             location: location.to_string(),
+            unit: unit.to_string(),
         })
     }
 
@@ -1251,6 +1315,7 @@ mod tests {
             RawInputEvent {
                 kind: RawInputKind::ButtonPress(RawButton::Left),
                 timestamp: Instant::now(),
+                lost_before: false,
             },
         )
     }
@@ -1398,6 +1463,164 @@ mod tests {
         assert!(notice.applies_to(Jitter));
         assert!(!notice.applies_to(PollingRate));
         assert!(!notice.applies_to(Stutter));
+    }
+
+    fn move_from(id: u64) -> BridgeMessage {
+        BridgeMessage::Event(
+            id,
+            RawInputEvent {
+                kind: RawInputKind::Move { dx: 40, dy: 0 },
+                timestamp: Instant::now(),
+                lost_before: false,
+            },
+        )
+    }
+
+    /// An app measuring "Office Mouse" (1), with "Gaming Mouse" (2) also
+    /// connected, and runs started on mouse 1 on several pages; the
+    /// Dashboard is shown.
+    fn runs_on_mouse_one() -> (MouseTestKitApp, std::sync::mpsc::SyncSender<BridgeMessage>) {
+        let (bridge, sender) = InputBridge::for_test();
+        sender.send(device(1, "Office Mouse", "event3")).unwrap();
+        sender.send(device(2, "Gaming Mouse", "event4")).unwrap();
+        sender.send(press(1)).unwrap();
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(1));
+        app.polling_panel.start_for_test();
+        app.stutter_panel.start_for_test();
+        app.double_click_panel.start_for_test();
+        app.accel_panel.start_accel_for_test();
+        app.auto_test_panel.start_for_test(true);
+        app.active_test = ActiveTest::Dashboard;
+        (app, sender)
+    }
+
+    #[test]
+    fn choosing_another_mouse_ends_the_runs_on_every_page() {
+        // The user pins mouse 2 in the Measure picker while the runs go on
+        let (mut app, sender) = runs_on_mouse_one();
+        app.input_bridge
+            .as_mut()
+            .unwrap()
+            .set_choice(DeviceChoice::Device(2));
+        sender.send(move_from(2)).unwrap();
+        assert_eq!(app.poll_input(false).len(), 1);
+        assert!(!app.polling_panel.is_running());
+        assert!(!app.stutter_panel.is_running());
+        assert!(!app.double_click_panel.is_running());
+        assert!(!app.accel_panel.is_running());
+        // Auto Diagnostics runs on by its clock, judging nothing of mouse 2
+        assert!(app.auto_test_panel.is_running());
+        let found = app.auto_test_panel.finding_titles_for_test();
+        assert!(
+            found.iter().any(|t| t == "Input lost during the step"),
+            "{:?}",
+            found
+        );
+        // Nothing changes while the same mouse is measured
+        app.polling_panel.start_for_test();
+        sender.send(move_from(2)).unwrap();
+        app.poll_input(false);
+        assert!(app.polling_panel.is_running());
+    }
+
+    #[test]
+    fn another_mouse_taking_over_after_an_unplug_ends_hidden_runs() {
+        // Mouse 1 is unplugged and mouse 2 clicked before the next frame:
+        // no frame without raw input is ever seen
+        let (mut app, sender) = runs_on_mouse_one();
+        sender.send(BridgeMessage::Removed(1)).unwrap();
+        sender.send(press(2)).unwrap();
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(2));
+        assert!(!app.polling_panel.is_running());
+        assert!(!app.stutter_panel.is_running());
+    }
+
+    #[test]
+    fn another_unit_of_the_same_model_is_not_the_auto_runs_mouse() {
+        // Two units of one model (same name) in two ports. The run's unit is
+        // unplugged and the other one clicked: it is not measured in its
+        // place. The run's unit plugged back into its port (a new device)
+        // is measured again.
+        let name = "HID mouse VID_046D PID_C077";
+        let (bridge, sender) = InputBridge::for_test();
+        sender
+            .send(unit_device(1, name, "instance 7&1a", "unit A"))
+            .unwrap();
+        sender
+            .send(unit_device(2, name, "instance 7&2b", "unit B"))
+            .unwrap();
+        sender.send(press(1)).unwrap();
+        let mut app = MouseTestKitApp::with_parts(Config::default(), Some(bridge));
+        app.poll_input(false);
+        app.auto_test_panel.start_for_test(true);
+        assert!(app.auto_test_panel.on_run_mouse_for_test());
+        sender.send(BridgeMessage::Removed(1)).unwrap();
+        sender.send(press(2)).unwrap();
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(2));
+        assert!(!app.auto_test_panel.on_run_mouse_for_test());
+        // Unit A back: pinned on the Dashboard, as the Auto choice keeps B
+        sender
+            .send(unit_device(3, name, "instance 7&1a", "unit A"))
+            .unwrap();
+        app.poll_input(false);
+        app.input_bridge
+            .as_mut()
+            .unwrap()
+            .set_choice(DeviceChoice::Device(3));
+        app.poll_input(false);
+        assert_eq!(app.measured, Some(3));
+        assert!(app.auto_test_panel.on_run_mouse_for_test());
+    }
+
+    #[test]
+    fn tests_that_share_a_panel_are_noted_on_their_own() {
+        use ActiveTest::{AngleSnap, ClickResponse, ClickSticky, LiftOff};
+        // Click Test left running while the user looks at Lift-Off, whose
+        // test is not running, then starts it: reports lost meanwhile are
+        // not about the lift run
+        let mut app = MouseTestKitApp::with_parts(Config::default(), None);
+        app.click_panel.start_response_for_test();
+        let running = app.running_pages();
+        assert!(running.contains(&ClickResponse));
+        assert!(!running.contains(&ClickSticky) && !running.contains(&LiftOff));
+        app.lost_reports.update(&running, LiftOff, true);
+        assert!(!app.lost_reports.applies_to(LiftOff));
+        // Lost during a lift run with Click Test still going: cleared when
+        // the lift test runs again
+        app.click_panel.start_liftoff_for_test();
+        app.lost_reports.update(&app.running_pages(), LiftOff, true);
+        assert!(app.lost_reports.applies_to(LiftOff));
+        assert!(!app.lost_reports.applies_to(ClickResponse));
+        app.click_panel.stop_liftoff_for_test();
+        app.lost_reports
+            .update(&app.running_pages(), LiftOff, false);
+        app.click_panel.start_liftoff_for_test();
+        app.lost_reports
+            .update(&app.running_pages(), LiftOff, false);
+        assert!(!app.lost_reports.applies_to(LiftOff));
+        // Angle snapping and acceleration likewise
+        app.accel_panel.start_angle_for_test();
+        let running = app.running_pages();
+        assert!(running.contains(&AngleSnap));
+        assert!(!running.contains(&ActiveTest::Acceleration));
+    }
+
+    #[test]
+    fn exports_say_which_results_lost_reports() {
+        use ActiveTest::{AutoTest, Stutter};
+        let mut app = MouseTestKitApp::with_parts(Config::default(), None);
+        assert!(app.collect_results().reports_lost.is_empty());
+        // Reports lost during a Stutter run with Auto Diagnostics going too
+        app.lost_reports.update(&[AutoTest, Stutter], Stutter, true);
+        let results = app.collect_results();
+        assert_eq!(results.reports_lost, ["Auto Diagnostics", "Stutter"]);
+        let csv = results.to_csv();
+        assert!(csv.contains("\nStutter,Reports Lost,"), "{}", csv);
+        assert!(results.to_json().unwrap().contains("\"reports_lost\""));
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub fn run() -> TestOutcome {
     let mut recorder = LineRecorder::new();
     let mut line_no = 0usize;
     let mut last_print = Instant::now();
+    let mut gaps = 0usize;
     let mut device_lost = false;
 
     let _guard = terminal::TerminalGuard::new();
@@ -89,6 +90,7 @@ pub fn run() -> TestOutcome {
             device_lost = true;
             break;
         };
+        gaps += usize::from(batch.lost_data);
         if batch.lost_data && recorder.drop_line() {
             // Dropped reports cut a piece out of the line
             println!("\r\x1B[KSome movement was lost (the computer fell behind) - that line was dropped.");
@@ -168,6 +170,9 @@ pub fn run() -> TestOutcome {
         println!("  This can affect precision in games and design work.");
         println!("  Turn off angle snapping / prediction in the mouse software.");
         TestOutcome::IssueFound
+    } else if device_lost {
+        println!("\n{}", standard::CUT_SHORT_VERDICT);
+        TestOutcome::Inconclusive
     } else {
         println!(
             "\n✓ No angle snapping detected ({:.0}% of near-axis lines were perfectly straight)",
@@ -191,6 +196,7 @@ pub fn run() -> TestOutcome {
         outcome
     };
 
+    terminal::print_lost_data_note(gaps);
     if device_lost {
         terminal::print_device_lost();
     }

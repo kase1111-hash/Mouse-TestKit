@@ -182,6 +182,7 @@ pub fn run() -> TestOutcome {
     let mut results: Vec<ClickResult> = Vec::new();
     let mut false_starts = 0usize;
     let mut timeouts = 0usize;
+    let mut gaps = 0usize;
     let mut quit = false;
     let mut device_lost = false;
 
@@ -223,6 +224,7 @@ pub fn run() -> TestOutcome {
                         break 'trials;
                     }
                     Trial::InputGap => {
+                        gaps += 1;
                         say("Some input from the mouse was lost (the computer fell behind).");
                         attempts += 1;
                         if attempts >= MAX_FALSE_STARTS_PER_TRIAL {
@@ -289,6 +291,7 @@ pub fn run() -> TestOutcome {
         TestOutcome::Inconclusive
     };
 
+    terminal::print_lost_data_note(gaps);
     if device_lost {
         terminal::print_device_lost();
     }

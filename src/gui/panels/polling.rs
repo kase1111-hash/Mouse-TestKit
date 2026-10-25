@@ -64,6 +64,10 @@ pub(super) fn input_lost_notice(ui: &mut egui::Ui) {
     );
 }
 
+/// Shown for a reading of 110 Hz or more that is well above every standard
+/// USB rate (see `analysis::polling::usb_nominal_rate`).
+const NO_USB_RATE_FITS: &str = "No standard USB rate fits this reading: the computer polls a USB mouse on a fixed clock, so it measures at or just under its rate (125, 250, 500, 1000 Hz and up), never well above it. About 133 Hz is normal for a Bluetooth mouse on its shortest connection interval (7.5 ms).";
+
 /// Panel for measuring mouse polling rate.
 ///
 /// Calculates the polling rate from the median interval between consecutive
@@ -125,6 +129,14 @@ impl PollingPanel {
 
     pub fn is_running(&self) -> bool {
         self.is_running
+    }
+
+    /// The measured input changed (another device, or raw input stopped or
+    /// started): a run in progress ends, whichever page is shown, so two
+    /// mice are never blended (see [`input_lost_notice`]).
+    pub fn input_changed(&mut self) {
+        self.stopped_for_input |= self.is_running;
+        self.is_running = false;
     }
 
     pub fn ui(
@@ -236,12 +248,15 @@ impl PollingPanel {
             ));
         }
 
-        if self.samples > 0 && usb_nominal_rate(self.avg_hz).is_none() {
+        if self.samples > 0 && self.avg_hz < USB_MIN_POLLING_HZ as f64 {
             ui.add_space(8.0);
             ui.label(format!(
                 "Under {} Hz no USB rate fits. That is normal for a Bluetooth mouse, which reports once per connection interval (about 67-133 Hz). A USB mouse, wired or with a receiver, should report 125 Hz or more: check its polling rate setting.",
                 USB_MIN_POLLING_HZ
             ));
+        } else if self.samples > 0 && !self.ever_batched && self.nominal_hz().is_none() {
+            ui.add_space(8.0);
+            ui.label(NO_USB_RATE_FITS);
         }
 
         if self.is_running && !self.live {
@@ -312,9 +327,14 @@ impl PollingPanel {
         }
     }
 
-    /// Keep the motion reports of the last second.
+    /// Keep the motion reports of the last second. Reports were lost before
+    /// an event marked `lost_before`: the interval across the hole is no
+    /// poll, so the window starts again after it (as in the CLI monitor).
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent], now: Instant) {
         for event in raw_events {
+            if event.lost_before {
+                self.reports.clear();
+            }
             if let RawInputKind::Move { dx, dy } = event.kind {
                 self.reports.push_back((event.timestamp, dx, dy));
             }
@@ -444,6 +464,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: t,
+            lost_before: false,
         }
     }
 
@@ -556,6 +577,16 @@ mod tests {
         let avg = p.export().unwrap().avg_hz;
         assert!((avg - 89.0).abs() < 1.0, "{}", avg);
         assert_eq!(usb_nominal_rate(avg), None);
+        // ... or one report per 7.5 ms interval: 133 Hz, not a 125 Hz mouse
+        let mut p = PollingPanel::new();
+        p.start();
+        let events: Vec<_> = (0..300u64)
+            .map(|i| mv(t0 + Duration::from_micros(7_500 * i), 8, 2))
+            .collect();
+        drive(&mut p, &events);
+        assert!(!p.ever_batched);
+        assert!((p.avg_hz - 133.3).abs() < 1.0, "{}", p.avg_hz);
+        assert_eq!(p.nominal_hz(), None);
     }
 
     #[test]
@@ -623,6 +654,24 @@ mod tests {
             // 133 deliveries a second are not a 125 Hz USB mouse
             assert_eq!(p.nominal_hz(), None, "{}", event_us);
         }
+    }
+
+    #[test]
+    fn the_window_starts_again_after_dropped_reports() {
+        // A 1 kHz mouse: the kernel drops 40 ms of reports. The window is
+        // emptied there, so its intervals and the time across the hole are
+        // not mixed.
+        let mut p = PollingPanel::new();
+        p.start();
+        let t0 = Instant::now();
+        let mut events: Vec<_> = (0..500)
+            .map(|i| mv(t0 + Duration::from_millis(i), 3, 0))
+            .collect();
+        let mut resumed = mv(t0 + Duration::from_millis(540), 3, 0);
+        resumed.lost_before = true;
+        events.push(resumed);
+        p.process_raw_events(&events, t0 + Duration::from_millis(540));
+        assert_eq!(p.reports.len(), 1);
     }
 
     #[test]

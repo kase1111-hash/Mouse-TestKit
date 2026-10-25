@@ -92,6 +92,14 @@ impl StutterPanel {
         self.is_running
     }
 
+    /// The measured input changed: a run in progress ends, whichever page
+    /// is shown (see [`input_lost_notice`]). Another mouse's reports would
+    /// be judged against this one's baseline.
+    pub fn input_changed(&mut self) {
+        self.stopped_for_input |= self.is_running;
+        self.is_running = false;
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -430,11 +438,15 @@ impl StutterPanel {
         notes
     }
 
-    /// Feed raw motion reports to the detector.
+    /// Feed raw motion reports to the detector. Nothing is timed across
+    /// reports the system dropped (see `RawInputEvent::lost_before`).
     fn process_raw_events(&mut self, raw_events: &[RawInputEvent]) {
         self.frame_reports = 0;
         self.frame_judged = 0;
         for event in raw_events {
+            if event.lost_before {
+                self.detector.break_continuity();
+            }
             if let RawInputKind::Move { dx, dy } = event.kind {
                 if dx == 0 && dy == 0 {
                     continue;
@@ -509,6 +521,7 @@ mod tests {
         RawInputEvent {
             kind: RawInputKind::Move { dx, dy },
             timestamp: t,
+            lost_before: false,
         }
     }
 
@@ -627,6 +640,48 @@ mod tests {
             });
         }
         assert_eq!(p.export().unwrap().total_stutter_count, 60);
+    }
+
+    /// An 8 kHz mouse moved briskly for 4 s while the reader thread falls
+    /// behind every 0.25 s and the kernel drops 5 ms of reports; the first
+    /// report after each hole is marked when `marked`.
+    fn eight_khz_with_dropped_reports(marked: bool) -> Vec<RawInputEvent> {
+        let t0 = Instant::now();
+        let mut events: Vec<RawInputEvent> = Vec::new();
+        let mut after_hole = false;
+        for k in 1..=32_000u64 {
+            if k > 2000 && k % 2000 < 40 {
+                after_hole = true;
+                continue;
+            }
+            let mut e = mv(t0 + Duration::from_micros(125 * k), 3, 1);
+            e.lost_before = marked && after_hole;
+            after_hole = false;
+            events.push(e);
+        }
+        events
+    }
+
+    #[test]
+    fn reports_the_system_dropped_are_not_stutters() {
+        let mut p = StutterPanel::new();
+        p.start();
+        for frame in eight_khz_with_dropped_reports(true).chunks(128) {
+            p.process_raw_events(frame);
+        }
+        assert_eq!(p.detector.stutter_count(), 0);
+        assert_eq!(p.detector.rating(), StutterRating::Excellent);
+        // Unmarked, each hole reads as a stutter of the mouse
+        let mut p = StutterPanel::new();
+        p.start();
+        for frame in eight_khz_with_dropped_reports(false).chunks(128) {
+            p.process_raw_events(frame);
+        }
+        assert!(
+            p.detector.stutter_count() >= 10,
+            "{}",
+            p.detector.stutter_count()
+        );
     }
 
     #[test]

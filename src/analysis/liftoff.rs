@@ -89,13 +89,19 @@ const REMAINDER_COUNTS: f64 = std::f64::consts::SQRT_2;
 /// Reports less than this apart (s) were bunched by the host or a radio
 /// link: the fastest USB polling (8000 Hz) is 125 us apart.
 const MIN_REPORT_INTERVAL_S: f64 = 0.000_1;
-/// Steady report times: every interval is one to [`STEADY_MAX_POLLS`] times
-/// the shortest, within this share. A USB mouse reports on its polls (and
-/// skips a poll when it has less than a count to send), its times keeping
-/// to a few percent; bunched delivery puts reports far closer together
-/// than the gaps between bunches. Steady times are trusted to this share
-/// of the shortest interval.
+/// Steady report times: every interval is one to [`STEADY_MAX_POLLS`]
+/// polls, within this share (or [`TIMESTAMP_JITTER_S`]). A USB mouse
+/// reports on its polls (and skips a poll when it has less than a count to
+/// send); bunched delivery puts reports far closer together than the gaps
+/// between bunches, under half a poll. Steady times are trusted to this
+/// share of a poll.
 const STEADY_SPREAD: f64 = 0.25;
+/// How far (s) the host's timestamps of two reports can wander apart, with
+/// a margin for estimating the poll from them: USB interrupt moderation (40
+/// us by default on Linux) and the interrupt handler's own delay stamp a
+/// report up to about 60 us late, half a poll at 8000 Hz. Times are never
+/// trusted more closely than this.
+const TIMESTAMP_JITTER_S: f64 = 0.000_075;
 /// Most polls a steady mouse skips between two reports of one movement.
 const STEADY_MAX_POLLS: f64 = 4.0;
 /// A gradual end: over the first and last fifth of a movement, its speed
@@ -233,7 +239,7 @@ impl Burst {
 /// The accelerations are lower bounds in counts/s^2: the least any motion
 /// that produced these reports could have needed, allowing for the counts
 /// a mouse holds back and for the report times being off by a quarter of
-/// the shortest report interval. The start is bounded only from the speed
+/// a poll (at least [`TIMESTAMP_JITTER_S`]). The start is bounded only from the speed
 /// reached after the distance covered, not from when the first report
 /// came: a mouse waking from power saving may put several ms of motion into
 /// its first report.
@@ -352,6 +358,21 @@ fn analyse(reports: &[(f64, i32, i32)], peak: usize, stopped: bool) -> Shape {
     shape
 }
 
+/// The poll period (s) of report `intervals`: the typical one among those
+/// within [`TIMESTAMP_JITTER_S`] of the shortest, so a report stamped late
+/// (which shortens the next interval) does not stand for the poll.
+/// Infinite when there are none.
+fn poll_of(intervals: &[f64]) -> f64 {
+    let shortest = intervals.iter().copied().fold(f64::INFINITY, f64::min);
+    let mut close: Vec<f64> = intervals
+        .iter()
+        .copied()
+        .filter(|&i| i <= shortest + 2.0 * TIMESTAMP_JITTER_S)
+        .collect();
+    close.sort_by(f64::total_cmp);
+    close.get(close.len() / 2).copied().unwrap_or(f64::INFINITY)
+}
+
 /// The shape of one movement: reports with no pause of [`STOP_GAP_S`].
 fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     let n = seg.len();
@@ -377,16 +398,18 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     let shortest = intervals.iter().copied().fold(f64::INFINITY, f64::min);
     shape.span_ms = (t[n - 1] - t[0] + shortest) * 1000.0;
     let lost = 2.0 * REMAINDER_COUNTS;
-    // Whole polls of `unit`, at most [`STEADY_MAX_POLLS`], at a steady time.
+    // Whole polls of `unit`, one to [`STEADY_MAX_POLLS`], at a steady time.
     let on_grid = |i: f64, unit: f64| {
         let polls = (i / unit).round();
-        polls <= STEADY_MAX_POLLS && (i - polls * unit).abs() <= STEADY_SPREAD * i
+        (1.0..=STEADY_MAX_POLLS).contains(&polls)
+            && (i - polls * unit).abs() <= (STEADY_SPREAD * i).max(TIMESTAMP_JITTER_S)
     };
+    let all_poll = poll_of(&intervals);
     // A pause: more polls without a report than a moving mouse skips, so
     // the mouse moved less than a count meanwhile. With bunched times the
-    // shortest interval is no poll, and the typical one stands in for it.
-    let poll = if shortest >= MIN_REPORT_INTERVAL_S {
-        shortest
+    // shortest intervals are no poll, and the typical one stands in for it.
+    let poll = if all_poll >= MIN_REPORT_INTERVAL_S {
+        all_poll
     } else {
         let mut sorted = intervals.clone();
         sorted.sort_by(f64::total_cmp);
@@ -407,10 +430,10 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
         to -= 1;
     }
     let timed = &intervals[from..to];
-    let unit = timed.iter().copied().fold(f64::INFINITY, f64::min);
+    let unit = poll_of(timed);
     shape.steady_timing =
         to - from >= 2 && unit >= MIN_REPORT_INTERVAL_S && timed.iter().all(|&i| on_grid(i, unit));
-    let slack = STEADY_SPREAD * unit;
+    let slack = (STEADY_SPREAD * unit).max(TIMESTAMP_JITTER_S);
 
     // Start: from rest, the speed after a path s is at most sqrt(2 a s), so
     // the path before the first report bounds the speed it had then.
@@ -458,11 +481,11 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     // count: a pause between two larger reports is more likely a radio link
     // delivering reports in bunches than a mouse that stopped.
     shape.stretch_accel = shape.start_accel.max(shape.stop_accel);
-    let trusted = shortest >= MIN_REPORT_INTERVAL_S
+    let trusted = all_poll >= MIN_REPORT_INTERVAL_S
         && intervals
             .iter()
             .enumerate()
-            .all(|(b, &i)| on_grid(i, shortest) || (paused(i) && (lone(b) || lone(b + 1))));
+            .all(|(b, &i)| on_grid(i, all_poll) || (paused(i) && (lone(b) || lone(b + 1))));
     if trusted {
         // Path covered by the end of each report.
         let walked: Vec<f64> = (0..n)
@@ -544,7 +567,7 @@ fn shape_of(seg: &[(f64, i32, i32)]) -> Shape {
     // stretch. Stretches are whole report intervals and end half an
     // interval after a report, so jitter in the times cannot move a report
     // across an end; the first report covers one interval before it.
-    let poll = shortest.max(MIN_REPORT_INTERVAL_S);
+    let poll = all_poll.max(MIN_REPORT_INTERVAL_S);
     let span = t[to] - t[from] + poll;
     let w = poll * (span / 5.0 / poll).floor().max(1.0);
     let at = |time: f64| {
@@ -1383,6 +1406,78 @@ mod tests {
         }
     }
 
+    /// `reports` with host timestamp noise: each report stamped up to
+    /// `late_us` late (`spread`: false) or up to `late_us` either way.
+    fn jittered(
+        reports: &[(f64, i32, i32)],
+        late_us: f64,
+        spread: bool,
+        seed: u64,
+    ) -> Vec<(f64, i32, i32)> {
+        let mut state = seed;
+        let mut unit = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        reports
+            .iter()
+            .map(|&(t, dx, dy)| {
+                let u = unit();
+                let late = if spread { 2.0 * u - 1.0 } else { u };
+                (t + late * late_us / 1000.0, dx, dy)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_spikes_stay_jumps_with_host_timestamp_noise() {
+        // Host timestamps at 4-8 kHz wander by tens of microseconds (USB
+        // interrupt moderation, the interrupt handler's delay): up to 20 us
+        // either way, or up to 60 us late. A sensor spike is still a jump.
+        for rate in [4000.0, 8000.0] {
+            for dpi in [800.0, 1600.0, 3200.0] {
+                for (mm, ms) in [(3.0, 6.0), (4.0, 10.0), (6.0, 8.0)] {
+                    let spike = sensor(500.0, rate, 0.3, dpi, ms, |t| {
+                        let d = mm * (t / ms).clamp(0.0, 1.0);
+                        (d * 0.8, -d * 0.6)
+                    });
+                    for (seed, (late_us, spread)) in
+                        [(20.0, true), (60.0, false)].into_iter().enumerate()
+                    {
+                        let reports = jittered(&spike, late_us, spread, seed as u64 + 1);
+                        let bursts = run(&mut LiftDetector::new(dpi), &reports);
+                        assert_eq!(
+                            kinds(&bursts, dpi),
+                            vec![BurstKind::Jump],
+                            "{rate} Hz {dpi} DPI {mm} mm/{ms} ms {late_us} us: {:?}",
+                            bursts[0].shape
+                        );
+                    }
+                }
+                // A hand nudge with the same noise is still the hand
+                for (mm, ms) in [(2.5, 40.0), (3.0, 60.0), (3.0, 100.0)] {
+                    let nudge = nudge(500.0, rate, dpi, mm, ms, 0.25);
+                    for (late_us, spread) in [(20.0, true), (60.0, false)] {
+                        let reports = jittered(&nudge, late_us, spread, 9);
+                        let bursts = run(&mut LiftDetector::new(dpi), &reports);
+                        let k = kinds(&bursts, dpi);
+                        assert!(
+                            matches!(
+                                k[..],
+                                [BurstKind::Nudge | BurstKind::Quiet | BurstKind::Slide]
+                            ),
+                            "{rate} Hz {dpi} DPI {mm} mm/{ms} ms {late_us} us: {:?} {:?}",
+                            k,
+                            bursts[0].shape
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_turning_back_at_speed_is_a_jump() {
         // Speeds up and slows down as gently as a hand, but turns straight
@@ -1524,6 +1619,19 @@ mod tests {
         let bursts = run(&mut LiftDetector::new(dpi), &reports);
         assert!(!bursts[0].shape.steady_timing, "{:?}", bursts[0].shape);
         assert_ne!(bursts[0].classify(dpi), BurstKind::Jump);
+        // An 8000 Hz spike whose reports a stalled host passed on two at a
+        // time, 20 us apart: under half a poll is no timestamp noise
+        let spike = sensor(500.0, 8000.0, 0.3, 1600.0, 6.0, |t| {
+            (3.0 * (t / 6.0).clamp(0.0, 1.0), 0.0)
+        });
+        let paired: Vec<(f64, i32, i32)> = spike
+            .iter()
+            .enumerate()
+            .map(|(i, &(t, dx, dy))| (if i % 2 == 0 { t + 0.105 } else { t }, dx, dy))
+            .collect();
+        let bursts = run(&mut LiftDetector::new(1600.0), &paired);
+        assert!(!bursts[0].shape.steady_timing, "{:?}", bursts[0].shape);
+        assert_ne!(bursts[0].classify(1600.0), BurstKind::Jump);
     }
 
     #[test]

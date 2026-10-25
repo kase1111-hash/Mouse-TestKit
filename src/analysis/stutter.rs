@@ -65,10 +65,12 @@ pub const MAX_FREEZE_MS: f64 = 1000.0;
 /// worth of counts (see [`is_freeze`]).
 pub const FREEZE_CARRY_REPORTS: f64 = 3.0;
 
-/// Whether a gap between two reports of a saturated pair, longer than
-/// [`MAX_POLL_INTERVAL_MS`] and at most [`MAX_FREEZE_MS`], is a freeze: the
-/// reports stopped while the hand kept moving the same way, as when a
-/// wireless link, a hub or a cable drops out.
+/// Whether a gap between two reports of a saturated pair or a
+/// [`turned_gap`], longer than [`MAX_POLL_INTERVAL_MS`] and at most
+/// [`MAX_FREEZE_MS`], is a freeze: the reports stopped while the hand kept
+/// moving, as when a wireless link, a hub or a cable drops out. A hand
+/// circling through the gap turns, and the movement held back is the chord
+/// of the arc missed, which can point well away from the report before.
 ///
 /// `smaller` is the size (counts) of the smaller of the two reports, `after`
 /// the size of the report after the gap, and `median_size` the median report
@@ -167,11 +169,11 @@ pub fn is_dropout(edges: &GapEdges, period_ms: f64, median_size: f64) -> bool {
 }
 
 /// Whether two consecutive motion reports that do not point the same way
-/// are still a gap to judge with [`is_dropout`]: longer than a poll, and
-/// both large enough to show the mouse moving. What no hand can do is stop
-/// and set off again without slowing down and speeding up, whichever way it
-/// sets off; and a hand circling once a second keeps turning through a
-/// dropout, by 90 degrees in a quarter of a second.
+/// are still a gap to judge with [`is_dropout`] and [`is_freeze`]: longer
+/// than a poll, and both large enough to show the mouse moving. What no hand
+/// can do is stop and set off again without slowing down and speeding up,
+/// whichever way it sets off; and a hand circling once a second keeps
+/// turning through a dropout, by 90 degrees in a quarter of a second.
 pub fn turned_gap(prev: (i32, i32), next: (i32, i32), interval_ms: f64) -> bool {
     interval_ms > MAX_POLL_INTERVAL_MS
         && is_saturated_report(prev.0, prev.1)
@@ -579,13 +581,11 @@ impl StutterDetector {
         let prev_size = (pdx as f64).hypot(pdy as f64);
         let smaller = prev_size.min(size);
         let gap_done = self.gap_edges.pair(index, interval, prev_size, size);
-        if !saturated {
-            // Only a dropout candidate, judged once the next report is in
-            return None;
-        }
 
         // A longer gap is a pause or a freeze, judged by the size of its
-        // reports; it says nothing about the poll period.
+        // reports (a turned gap too: while circling, the movement held back
+        // is the chord of the arc missed); it says nothing about the poll
+        // period.
         if interval <= MAX_POLL_INTERVAL_MS {
             self.recent.push_back(interval);
             if self.recent.len() > BASELINE_WINDOW {
@@ -1377,6 +1377,50 @@ mod detector_tests {
         );
         assert_eq!(d.freezes(), 1);
         assert_eq!(d.rating(), StutterRating::Good);
+    }
+
+    #[test]
+    fn freezes_that_turn_while_circling_are_detected() {
+        // Circling twice a second through 300-700 ms dropouts: the cursor
+        // turns half a circle or more in the gap, so the held-back movement
+        // (the chord of that arc) points away from the report before it.
+        // (None lasts a whole turn, which would bring it back to the start.)
+        let drop = |t: f64| {
+            let k = (t / 2.0).floor();
+            let start = k * 2.0 + 1.0;
+            t > 0.5 && (start..start + 0.3 + 0.08 * (k % 6.0)).contains(&t)
+        };
+        for (hz, radius) in [(125.0, 400.0), (1000.0, 300.0)] {
+            let reports = simulate(hz, vec![circles(12.0, radius, 2.0)], drop, 30e-6);
+            let d = run(&reports, 2.0);
+            assert_eq!(d.freezes(), 6, "{} Hz", hz);
+            // The movement was held back, not lost
+            assert_eq!(d.dropouts(), 0, "{} Hz", hz);
+        }
+        // At 125-250 Hz a hand can stop within a poll or two. One that
+        // stops for 150-650 ms and sets off at 135 degrees to its last
+        // heading sends an ordinary report first, not a catch-up: no freeze
+        for hz in [125.0, 250.0] {
+            let mut segs = Vec::new();
+            for i in 0..12 {
+                let heading = 0.375 * TAU * i as f64;
+                segs.push(seg(0.8, move |t| {
+                    (5000.0 * t * heading.cos(), 5000.0 * t * heading.sin())
+                }));
+                segs.push(pause(0.15 + 0.1 * (i % 6) as f64));
+            }
+            let reports = simulate(hz, segs, |_| false, 30e-6);
+            let turned = reports
+                .windows(2)
+                .filter(|w| {
+                    let ms = (w[1].0 - w[0].0) * 1000.0;
+                    turned_gap((w[0].1, w[0].2), (w[1].1, w[1].2), ms)
+                        && !is_saturated_pair((w[0].1, w[0].2), (w[1].1, w[1].2))
+                })
+                .count();
+            assert!(turned >= 3, "{} Hz: {}", hz, turned);
+            assert_eq!(run(&reports, 2.0).freezes(), 0, "{} Hz", hz);
+        }
     }
 
     /// Like [`simulate`], but polls for which `lost(t)` is true are lost
